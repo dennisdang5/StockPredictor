@@ -8,6 +8,7 @@ import yfinance as yf
 import numpy as np
 import statistics
 
+
 def get_data(stocks, sstudy_period):
     
     dat = yf.Tickers(stocks)
@@ -24,19 +25,7 @@ def get_data(stocks, sstudy_period):
 
     data = get_feature_input(op,cp, lookback, op.shape[1], len(stocks))
     
-
-    # train-test split for time series
-    x_data = 
-
-    train_val_size = int(data.shape[1] * 0.8)
-    train_val, test = data[:,:train_val_size], data[:,train_val_size:]
-
-    train_size = int(data.shape[1] * 0.8)
-    train, validation = 
-
-
-    print(train.shape)
-    print(test.shape)
+    return data
 
    
 

@@ -10,6 +10,9 @@ import statistics
 import util
 
 
+#####LOOK HERE######
+timeseries = None
+
 # train-test split for time series
 train_size = int(len(timeseries) * 0.67)
 
