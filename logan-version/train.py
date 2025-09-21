@@ -7,6 +7,7 @@ import model
 import util
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
+import time
 
 class EarlyStopper():
     def __init__(self, patience=10, min_delta=0):
@@ -22,6 +23,7 @@ class EarlyStopper():
             torch.save(model.state_dict(), 'savedmodel.pth')
 
         elif validation_loss > (self.min_validation_loss + self.min_delta):
+            torch.save(model.state_dict(), 'savedmodel.pth')
             self.counter += 1
             if self.counter >= self.patience:
                 return True
@@ -29,20 +31,30 @@ class EarlyStopper():
         
 
 class Trainer():
-    def __init__(self, stocks=["MSFT", "AAPL"], sstudy_period="1y", batch_size=8, num_epochs=10000):
+    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None):
         self.stocks = stocks
-        self.sstudy_period = sstudy_period
+        self.time_args = time_args
         self.batch_size=batch_size
         self.writer = SummaryWriter()
 
         #data
-        X_train, X_val, X_test, Y_train, Y_val, Y_test = util.get_data(stocks, sstudy_period)
+        input_data = util.get_data(stocks, time_args)
+        if (input_data == 1):
+            return 1
+        else:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test = input_data
+        
 
         self.trainLoader = data.DataLoader(data.TensorDataset(X_train, Y_train), shuffle=True, batch_size=batch_size)
         self.validationLoader = data.DataLoader(data.TensorDataset(X_val, Y_val), shuffle=True, batch_size=batch_size)
         self.testLoader = data.DataLoader(data.TensorDataset(X_test, Y_test), shuffle=True, batch_size=batch_size)
         
         self.lstmModel = model.LSTMModelPricePredict()
+
+        if saved_model != None:
+            state_dict = torch.load(saved_model)
+            self.lstmModel.load_state_dict(state_dict)
+        
         print("{} total parameters".format(sum(param.numel() for param in self.lstmModel.parameters())))
 
         self.optimizer = optim.Adam(self.lstmModel.parameters())
@@ -58,11 +70,14 @@ class Trainer():
             print ("MPS device not found.")
 
     def train_one_epoch(self, epoch):
+
         print("Epoch: {}".format(epoch+1))
         print("--------------------------------------------")
         train_loss = 0
         val_loss = 0
         stop_condition=None
+
+        start_time = time.perf_counter()
         
         for X_batch, Y_batch in self.trainLoader:
             
@@ -97,16 +112,24 @@ class Trainer():
                 # add to total validation loss
                 val_loss += loss.item()
 
-            stop_condition = self.stopper.early_stop(val_loss,self.lstmModel)              
+            stop_condition = self.stopper.early_stop(val_loss,self.lstmModel)    
+
+        end_time = time.perf_counter()
         
         print("Training Loss: {}".format(train_loss/len(self.trainLoader)))
         print("Validation Loss: {}".format(val_loss/len(self.validationLoader)))
+        print("Training Time: {:.6f}s".format(end_time-start_time))
         print("--------------------------------------------")
         self.writer.add_scalar('Loss/train', train_loss/len(self.trainLoader), epoch+1)
         self.writer.add_scalars('Loss/trainVSvalidation', {"Training":(train_loss/len(self.trainLoader)), "Validation":(val_loss/len(self.validationLoader))}, epoch+1)
+        self.writer.add_scalar('Train Time', (end_time-start_time), epoch+1)
         self.writer.flush()
 
         return stop_condition
     
     def get_summary(self):
         summary(self.lstmModel, (240,3), self.batch_size)
+
+    def stop(self):
+        self.writer.close()
+        

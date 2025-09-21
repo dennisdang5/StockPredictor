@@ -4,6 +4,7 @@ __pycache__*
 # Logs and databases #
 ######################
 *.log
+logan-version/runs/*
 
 # OS things #
 ######################
