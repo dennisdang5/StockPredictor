@@ -48,14 +48,14 @@ class Trainer():
         self.trainLoader = data.DataLoader(data.TensorDataset(X_train, Y_train), shuffle=True, batch_size=batch_size)
         self.validationLoader = data.DataLoader(data.TensorDataset(X_val, Y_val), shuffle=True, batch_size=batch_size)
         self.testLoader = data.DataLoader(data.TensorDataset(X_test, Y_test), shuffle=True, batch_size=batch_size)
-        
+
         self.lstmModel = model.LSTMModelPricePredict()
+
+        print("{} total parameters".format(sum(param.numel() for param in self.lstmModel.parameters())))
 
         if saved_model != None:
             state_dict = torch.load(saved_model)
             self.lstmModel.load_state_dict(state_dict)
-        
-        print("{} total parameters".format(sum(param.numel() for param in self.lstmModel.parameters())))
 
         self.optimizer = optim.Adam(self.lstmModel.parameters())
         self.loss_fn = nn.MSELoss()
@@ -63,11 +63,17 @@ class Trainer():
         self.stopper = EarlyStopper()
         self.num_epochs = num_epochs
 
-        if torch.backends.mps.is_available():
-            self.mps_device = torch.device("mps")
-            print("MPS device found")
+        print(torch.accelerator.is_available())
+        print(torch.accelerator.current_accelerator())
+
+        if torch.accelerator.is_available():
+            accelerator_type = torch.accelerator.current_accelerator()
+            self.accelerator = torch.device(accelerator_type)
+            self.lstmModel = torch.nn.DataParallel(self.lstmModel,device_ids=[i for i in range(torch.accelerator.device_count())])
+            print("{} device found".format(accelerator_type))
         else:
             print ("MPS device not found.")
+            self.accelerator = None
 
     def train_one_epoch(self, epoch):
 
