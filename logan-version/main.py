@@ -1,6 +1,21 @@
 import train
+import torch
 
+def pick_device():
+        if torch.cuda.is_available():
+                    dev = torch.device("cuda")
+                            name = torch.cuda.get_device_name(0)
+                                    print(f"[device] CUDA: {name}")
+                                            torch.backends.cudnn.benchmark = True
+                                                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                                                            dev = torch.device("mps")
+                                                                    print("[device] Apple Metal Performance Shaders (mps)")
+                                                                        else:
+                                                                                    dev = torch.device("cpu")
+                                                                                            print("[device] CPU")
+                                                                                                return dev
 
+print("my code")
 start = "1989-12-01"
 end = "2015-09-30"
 stocks = ["AAPL","MSFT"]
@@ -11,7 +26,10 @@ for name, param in trainer.lstmModel.named_parameters():
     print("param: {}".format(param.numel()))
     print()
 
-for epoch in range(trainer.num_epochs):
+#total_epochs = trainer.num_epochs
+total_epochs = 2
+
+for epoch in range(total_epochs):
     stop = trainer.train_one_epoch(epoch)
     if stop: 
         print("Early stop at epoch: {}".format(epoch))
