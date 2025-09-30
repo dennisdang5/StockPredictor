@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import torch
 import torch.optim as optim
 from torch import nn
@@ -8,6 +9,19 @@ import util
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
 import time
+
+# ---------------------------
+# Device selection helper
+# ---------------------------
+def pick_device():
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        return torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # Apple Silicon (Metal)
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
 
 class EarlyStopper():
     def __init__(self, patience=10, min_delta=0):
@@ -20,10 +34,10 @@ class EarlyStopper():
         if validation_loss < self.min_validation_loss:
             self.min_validation_loss = validation_loss
             self.counter = 0
-            torch.save(model.state_dict(), 'savedmodel.pth')
+            torch.save(model.module.state_dict() if hasattr(model, "module") else model.state_dict(), 'savedmodel.pth')
 
         elif validation_loss > (self.min_validation_loss + self.min_delta):
-            torch.save(model.state_dict(), 'savedmodel.pth')
+            torch.save(model.module.state_dict() if hasattr(model, "module") else model.state_dict(), 'savedmodel.pth')
             self.counter += 1
             if self.counter >= self.patience:
                 return True
@@ -36,6 +50,15 @@ class Trainer():
         self.time_args = time_args
         self.batch_size=batch_size
         self.writer = SummaryWriter()
+        self.device = pick_device()
+        self.use_amp = self.device.type == "cuda"
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.pin_memory = self.device.type == "cuda"
+        print(f"[device] using {self.device}")
+        if self.device.type == "cuda":
+            print(f"[cuda] {torch.cuda.get_device_name(0)} (count={torch.cuda.device_count()})")
+        elif self.device.type == "mps":
+            print("[mps] Apple Metal Performance Shaders backend")
 
         #data
         input_data = util.get_data(stocks, time_args)
@@ -45,17 +68,48 @@ class Trainer():
             X_train, X_val, X_test, Y_train, Y_val, Y_test = input_data
         
 
-        self.trainLoader = data.DataLoader(data.TensorDataset(X_train, Y_train), shuffle=True, batch_size=batch_size)
-        self.validationLoader = data.DataLoader(data.TensorDataset(X_val, Y_val), shuffle=True, batch_size=batch_size)
-        self.testLoader = data.DataLoader(data.TensorDataset(X_test, Y_test), shuffle=True, batch_size=batch_size)
+        self.trainLoader = data.DataLoader(
+            data.TensorDataset(X_train, Y_train),
+            shuffle=True,
+            batch_size=batch_size,
+            pin_memory=self.pin_memory,
+            num_workers=os.cpu_count() or 4,
+            persistent_workers=True
+        )
+        self.validationLoader = data.DataLoader(
+            data.TensorDataset(X_val, Y_val),
+            shuffle=True,
+            batch_size=batch_size,
+            pin_memory=self.pin_memory,
+            num_workers=os.cpu_count() or 4,
+            persistent_workers=True
+        )
+        self.testLoader = data.DataLoader(
+            data.TensorDataset(X_test, Y_test),
+            shuffle=False,
+            batch_size=batch_size,
+            pin_memory=self.pin_memory,
+            num_workers=os.cpu_count() or 4,
+            persistent_workers=True
+        )
 
         self.lstmModel = model.LSTMModelPricePredict()
 
+        # Multi-GPU (CUDA) support via DataParallel; safe no-op on single GPU/CPU/MPS
+        if self.device.type == "cuda" and torch.cuda.device_count() > 1:
+            self.lstmModel = nn.DataParallel(self.lstmModel)
+            print(f"[dataparallel] using {torch.cuda.device_count()} GPUs")
+        # Move model to the chosen device
+        self.lstmModel = self.lstmModel.to(self.device)
+
         print("{} total parameters".format(sum(param.numel() for param in self.lstmModel.parameters())))
 
-        if saved_model != None:
-            state_dict = torch.load(saved_model)
-            self.lstmModel.load_state_dict(state_dict)
+        if saved_model is not None:
+            state_dict = torch.load(saved_model, map_location="cpu")
+            # Load into underlying module if DataParallel is active
+            target_module = self.lstmModel.module if hasattr(self.lstmModel, "module") else self.lstmModel
+            target_module.load_state_dict(state_dict)
+            print(f"[load] restored weights from {saved_model}")
 
         self.optimizer = optim.Adam(self.lstmModel.parameters())
         self.loss_fn = nn.MSELoss()
@@ -63,22 +117,11 @@ class Trainer():
         self.stopper = EarlyStopper()
         self.num_epochs = num_epochs
 
-        print(torch.accelerator.is_available())
-        print(torch.accelerator.current_accelerator())
-
-        if torch.accelerator.is_available():
-            accelerator_type = torch.accelerator.current_accelerator()
-            self.accelerator = torch.device(accelerator_type)
-            self.lstmModel = torch.nn.DataParallel(self.lstmModel,device_ids=[i for i in range(torch.accelerator.device_count())])
-            print("{} device found".format(accelerator_type))
-        else:
-            print ("MPS device not found.")
-            self.accelerator = None
-
     def train_one_epoch(self, epoch):
 
         print("Epoch: {}".format(epoch+1))
         print("--------------------------------------------")
+        self.lstmModel.train()
         train_loss = 0
         val_loss = 0
         stop_condition=None
@@ -87,20 +130,23 @@ class Trainer():
         
         for X_batch, Y_batch in self.trainLoader:
             
-            # zero gradients
-            self.optimizer.zero_grad()
+            # move data to device
+            X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
+            Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
 
-            # forward pass
-            Y_pred = self.lstmModel(X_batch)
-
-            # get and add loss for batches
-            loss = self.loss_fn(Y_batch, Y_pred)
-            
-            # backprop from loss
-            loss.backward()
-
-            # update weights
-            self.optimizer.step()
+            # forward + loss (+AMP on CUDA)
+            if self.use_amp:
+                with torch.cuda.amp.autocast():
+                    Y_pred = self.lstmModel(X_batch)
+                    loss = self.loss_fn(Y_pred, Y_batch)
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                Y_pred = self.lstmModel(X_batch)
+                loss = self.loss_fn(Y_pred, Y_batch)
+                loss.backward()
+                self.optimizer.step()
 
             # keep loss for later
             train_loss += loss.item()
@@ -109,16 +155,18 @@ class Trainer():
         
         with torch.no_grad():
             for X_batch, Y_batch in self.validationLoader:
-                # forward pass
-                Y_pred = self.lstmModel(X_batch)
-
-                # get loss
-                loss = self.loss_fn(Y_batch, Y_pred)
-
-                # add to total validation loss
+                X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
+                Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
+                if self.use_amp:
+                    with torch.cuda.amp.autocast():
+                        Y_pred = self.lstmModel(X_batch)
+                        loss = self.loss_fn(Y_pred, Y_batch)
+                else:
+                    Y_pred = self.lstmModel(X_batch)
+                    loss = self.loss_fn(Y_pred, Y_batch)
                 val_loss += loss.item()
 
-            stop_condition = self.stopper.early_stop(val_loss,self.lstmModel)    
+            stop_condition = self.stopper.early_stop(val_loss, self.lstmModel)    
 
         end_time = time.perf_counter()
         
@@ -134,8 +182,7 @@ class Trainer():
         return stop_condition
     
     def get_summary(self):
-        summary(self.lstmModel, (240,3), self.batch_size)
+        summary(self.lstmModel, (240,3), self.batch_size, device=self.device.type)
 
     def stop(self):
         self.writer.close()
-        
