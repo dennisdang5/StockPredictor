@@ -3,9 +3,9 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-task=1
 #SBATCH --mem=0
-#SBATCH --partition=debug
+#SBATCH --partition=gpu
 #SBATCH --time=00:05:00
-#SBATCH --nodelist=e23-02,b11-09 
+#SBATCH --nodelist=e21-[03-16],e22-[01-16],e23-01 
 #SBATCH --account=liu32_1378
 
 module purge
