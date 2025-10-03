@@ -146,7 +146,7 @@ class Trainer():
 
             # forward + loss (+AMP on CUDA)
             if self.use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast(device_type=self.device.type):
                     Y_pred = self.lstmModel(X_batch)
                     loss = self.loss_fn(Y_pred, Y_batch)
                 self.scaler.scale(loss).backward()
@@ -168,7 +168,7 @@ class Trainer():
                 X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
                 Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
                 if self.use_amp:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast(device_type=self.device.type):
                         Y_pred = self.lstmModel(X_batch)
                         loss = self.loss_fn(Y_pred, Y_batch)
                 else:
