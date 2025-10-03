@@ -54,13 +54,24 @@ class Trainer():
         self.use_amp = self.device.type == "cuda"
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         self.pin_memory = self.device.type == "cuda"
+
+        # -------- NEW: set workers = number of CUDA GPUs detected --------
+        if self.device.type == "cuda":
+            self.num_workers = torch.cuda.device_count()  # 0,1,2,...
+        else:
+            self.num_workers = 0
+        self.persistent_workers = self.num_workers > 0
+        # ------------------------------------------------------------------
+
         print(f"[device] using {self.device}")
         if self.device.type == "cuda":
             print(f"[cuda] {torch.cuda.get_device_name(0)} (count={torch.cuda.device_count()})")
         elif self.device.type == "mps":
             print("[mps] Apple Metal Performance Shaders backend")
 
-        #data
+        print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
+
+        # data
         input_data = util.get_data(stocks, time_args)
         if (input_data == 1):
             return 1
@@ -73,24 +84,24 @@ class Trainer():
             shuffle=True,
             batch_size=batch_size,
             pin_memory=self.pin_memory,
-            num_workers=os.cpu_count() or 4,
-            persistent_workers=True
+            num_workers=self.num_workers,
+            persistent_workers=self.persistent_workers
         )
         self.validationLoader = data.DataLoader(
             data.TensorDataset(X_val, Y_val),
             shuffle=True,
             batch_size=batch_size,
             pin_memory=self.pin_memory,
-            num_workers=os.cpu_count() or 4,
-            persistent_workers=True
+            num_workers=self.num_workers,
+            persistent_workers=self.persistent_workers
         )
         self.testLoader = data.DataLoader(
             data.TensorDataset(X_test, Y_test),
             shuffle=False,
             batch_size=batch_size,
             pin_memory=self.pin_memory,
-            num_workers=os.cpu_count() or 4,
-            persistent_workers=True
+            num_workers=self.num_workers,
+            persistent_workers=self.persistent_workers
         )
 
         self.lstmModel = model.LSTMModelPricePredict()
@@ -129,7 +140,6 @@ class Trainer():
         start_time = time.perf_counter()
         
         for X_batch, Y_batch in self.trainLoader:
-            
             # move data to device
             X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
             Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
