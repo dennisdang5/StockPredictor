@@ -52,7 +52,7 @@ class Trainer():
         self.writer = SummaryWriter()
         self.device = pick_device()
         self.use_amp = self.device.type == "cuda"
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler(device=self.device.type,enabled=self.use_amp)
         self.pin_memory = self.device.type == "cuda"
 
         # -------- NEW: set workers = number of CUDA GPUs detected --------
