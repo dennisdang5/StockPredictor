@@ -8,6 +8,8 @@ import yfinance as yf
 import numpy as np
 import statistics
 import torchsummary
+import os
+import pickle
 
 
 def get_data(stocks, args):
@@ -126,6 +128,56 @@ def get_feature_input(op, cp, lookback, study_period, num_stocks):
     returns wrt to last cp = 
 
     """
+
+def save_data_locally(stocks, args, data_dir="data"):
+    """
+    Import data using yfinance and save it locally for future use.
+    Returns the processed data and saves it to pickle files.
+    """
+    # Create data directory if it doesn't exist
+    os.makedirs(data_dir, exist_ok=True)
+    
+    # Generate filename based on stocks and time args
+    stocks_str = "_".join(stocks)
+    time_str = "_".join(args)
+    filename = f"{data_dir}/{stocks_str}_{time_str}.pkl"
+    
+    # Check if data already exists
+    if os.path.exists(filename):
+        print(f"Data file {filename} already exists. Loading from local file...")
+        return load_data_from_local(filename)
+    
+    print(f"Downloading data for {stocks} with args {args}...")
+    
+    # Get data using existing get_data function
+    data = get_data(stocks, args)
+    
+    if data == 1:
+        print("Error downloading data")
+        return 1
+    
+    # Save data to local file
+    with open(filename, 'wb') as f:
+        pickle.dump(data, f)
+    
+    print(f"Data saved to {filename}")
+    return data
+
+def load_data_from_local(filename):
+    """
+    Load data from a local pickle file.
+    """
+    try:
+        with open(filename, 'rb') as f:
+            data = pickle.load(f)
+        print(f"Data loaded from {filename}")
+        return data
+    except FileNotFoundError:
+        print(f"File {filename} not found")
+        return 1
+    except Exception as e:
+        print(f"Error loading data from {filename}: {e}")
+        return 1
 
 def get_model_summary(model):
     torchsummary.summary(model,(240,3),batch_size=8)

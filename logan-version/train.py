@@ -71,8 +71,8 @@ class Trainer():
 
         print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
 
-        # data
-        input_data = util.get_data(stocks, time_args)
+        # data - now using local data loading
+        input_data = util.save_data_locally(stocks, time_args)
         if (input_data == 1):
             return 1
         else:

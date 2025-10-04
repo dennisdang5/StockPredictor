@@ -5,6 +5,7 @@ __pycache__*
 ######################
 *.log
 logan-version/runs/*
+logan-version/data/*
 
 # OS things #
 ######################
