@@ -4,7 +4,24 @@ import torch
 print("my code")
 start = "1989-12-01"
 end = "2015-09-30"
-stocks = ["AAPL","MSFT"]
+
+# Top 30 S&P 500 stocks by market cap (subset for testing)
+stocks = [
+    # Top Technology & Growth
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
+    
+    # Major Financial Services
+    "JPM", "BAC", "V", "MA", "WFC", "GS", "BLK", "AXP",
+    
+    # Healthcare Leaders
+    "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO",
+    
+    # Consumer & Retail Giants
+    "WMT", "PG", "HD", "COST", "MCD", "NKE",
+    
+    # Industrial & Energy Leaders
+    "BA", "CAT", "XOM", "CVX"
+]
 trainer = train.Trainer(stocks=stocks, time_args=[start,end])
 
 for name, param in trainer.lstmModel.named_parameters():
