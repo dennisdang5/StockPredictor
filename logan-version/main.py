@@ -1,4 +1,4 @@
-import train
+import trainer
 import torch
 
 print("my code")
@@ -22,15 +22,15 @@ stocks = [
     # Industrial & Energy Leaders
     "BA", "CAT", "XOM", "CVX"
 ]
-trainer = train.Trainer(stocks=stocks, time_args=[start,end])
+trainer = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=5000)
 
-for name, param in trainer.lstmModel.named_parameters():
+for name, param in trainer.Model.named_parameters():
     print("name: {}".format(name))
     print("param: {}".format(param.numel()))
     print()
 
 #total_epochs = trainer.num_epochs
-total_epochs = 2
+total_epochs = trainer.num_epochs
 
 for epoch in range(total_epochs):
     stop = trainer.train_one_epoch(epoch)
