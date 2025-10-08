@@ -96,8 +96,8 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False):
     test_mask  = (dates_np >  val_end)   & (dates_np <= last)
 
     def _sel(mask):
-        X = torch.from_numpy(xdata[mask]).to(torch.float32)
-        Y = torch.from_numpy(ydata[mask]).to(torch.float32)
+        X = xdata[mask]
+        Y = ydata[mask]
         D = [pd.Timestamp(d).to_pydatetime() for d in dates_np[mask]]
         return X, Y, D
 
