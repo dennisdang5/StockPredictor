@@ -8,6 +8,8 @@ import yfinance as yf
 import numpy as np
 import statistics
 import torchsummary
+import os
+import pickle
 
 
 def get_data(stocks, args):
@@ -41,7 +43,10 @@ def get_data(stocks, args):
 
     # get 
 
-    xdata, ydata = get_feature_input(op,cp, lookback, op.shape[1], len(stocks))
+    # Get date information from the dataframe
+    date_index = open_close.index
+    
+    xdata, ydata, dates = get_feature_input(op, cp, lookback, op.shape[1], len(stocks), date_index)
     xdata = torch.Tensor.to(torch.from_numpy(xdata),dtype=torch.float32)
     ydata = torch.Tensor.to(torch.from_numpy(ydata),dtype=torch.float32)
 
@@ -56,17 +61,22 @@ def get_data(stocks, args):
     Xtrain, Xvalidation, Xtest = xdata[:,:train_size], xdata[:,train_size+lookback:train_val_size+lookback], xdata[:,train_val_size+2*lookback:]
     Ytrain, Yvalidation, Ytest = ydata[:,:train_size], ydata[:,train_size+lookback:train_val_size+lookback], ydata[:,train_val_size+2*lookback:]
 
+    # Split dates accordingly
+    Dtrain = dates[:train_size]
+    Dvalidation = dates[train_size+lookback:train_val_size+lookback]
+    Dtest = dates[train_val_size+2*lookback:]
+
     print("Training set size: {}".format(Xtrain.shape[1]))
     print("Validation set size: {}".format(Xvalidation.shape[1]))
     print("Test set size: {}".format(Xtest.shape[1]))
 
     batch_flatten = lambda Xs: [torch.flatten(x,start_dim=0,end_dim=1) for x in Xs]
 
-    return tuple(batch_flatten([Xtrain, Xvalidation, Xtest, Ytrain, Yvalidation, Ytest]))
+    return tuple(batch_flatten([Xtrain, Xvalidation, Xtest, Ytrain, Yvalidation, Ytest]) + [Dtrain, Dvalidation, Dtest])
 
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
-def get_feature_input(op, cp, lookback, study_period, num_stocks):
+def get_feature_input(op, cp, lookback, study_period, num_stocks, date_index):
 
     T_study = study_period
     lookback = 240
@@ -87,6 +97,8 @@ def get_feature_input(op, cp, lookback, study_period, num_stocks):
     # 4 features ir, cpr, opr, op
     rss = np.empty((num_stocks, len(end_t),4,lookback))
     target = np.empty((num_stocks,len(end_t),1))
+    # dates for each window (end date of each window)
+    dates = []
 
 
     # loop over all end times to generate all stacks
@@ -111,10 +123,13 @@ def get_feature_input(op, cp, lookback, study_period, num_stocks):
                 rss[n][k][3][j] = f_t1[n][i][period[j]]
 
             #print(op.iloc[n,end_t[k]]==op.iloc[n,period[-1]])
-                
+            
+            # Store the date for this window (end date of the window)
+            if n == 0:  # Only store dates once (same for all stocks)
+                dates.append(date_index[end_t[k]])
 
     rss = np.transpose(rss,(0,1,3,2))
-    return rss, target
+    return rss, target, dates
     """
     trying to get prediction at time t
     looking back at previous 241 days to predict the 242nd day
@@ -126,6 +141,57 @@ def get_feature_input(op, cp, lookback, study_period, num_stocks):
     returns wrt to last cp = 
 
     """
+
+def save_data_locally(stocks, args, data_dir="data"):
+    """
+    Import data using yfinance and save it locally for future use.
+    Returns the processed data and saves it to pickle files.
+    Now includes date information for each data window.
+    """
+    # Create data directory if it doesn't exist
+    os.makedirs(data_dir, exist_ok=True)
+    
+    # Generate filename based on stocks and time args
+    stocks_str = "_".join(stocks)
+    time_str = "_".join(args)
+    filename = f"{data_dir}/{stocks_str}_{time_str}.pkl"
+    
+    # Check if data already exists
+    if os.path.exists(filename):
+        print(f"Data file {filename} already exists. Loading from local file...")
+        return load_data_from_local(filename)
+    
+    print(f"Downloading data for {stocks} with args {args}...")
+    
+    # Get data using existing get_data function (now includes dates)
+    data = get_data(stocks, args)
+    
+    if data == 1:
+        print("Error downloading data")
+        return 1
+    
+    # Save data to local file
+    with open(filename, 'wb') as f:
+        pickle.dump(data, f)
+    
+    print(f"Data saved to {filename}")
+    return data
+
+def load_data_from_local(filename):
+    """
+    Load data from a local pickle file.
+    """
+    try:
+        with open(filename, 'rb') as f:
+            data = pickle.load(f)
+        print(f"Data loaded from {filename}")
+        return data
+    except FileNotFoundError:
+        print(f"File {filename} not found")
+        return 1
+    except Exception as e:
+        print(f"Error loading data from {filename}: {e}")
+        return 1
 
 def get_model_summary(model):
     torchsummary.summary(model,(240,3),batch_size=8)
