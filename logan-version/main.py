@@ -1,20 +1,6 @@
 import trainer
 import torch
 
-def pick_device():
-    if torch.cuda.is_available():
-        dev = torch.device("cuda")
-        name = torch.cuda.get_device_name(0)
-        print(f"[device] CUDA: {name}")
-        torch.backends.cudnn.benchmark = True
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        dev = torch.device("mps")
-        print("[device] Apple Metal Performance Shaders (mps)")
-    else:
-        dev = torch.device("cpu")
-        print("[device] CPU")
-    return dev
-
 print("my code")
 start = "1989-12-01"
 end = "2015-09-30"
