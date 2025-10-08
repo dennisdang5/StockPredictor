@@ -77,10 +77,13 @@ class Trainer():
         self.pin_memory = self.device.type == "cuda"
 
         # -------- NEW: set workers = number of CUDA GPUs detected --------
+        """
         if self.device.type == "cuda":
             self.num_workers = torch.cuda.device_count()  # 0,1,2,...
         else:
             self.num_workers = 0
+            """
+        self.num_workers=1
         self.persistent_workers = self.num_workers > 0
         # ------------------------------------------------------------------
 
