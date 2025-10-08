@@ -8,113 +8,236 @@ import yfinance as yf
 import numpy as np
 import statistics
 import torchsummary
+import os
+from tqdm import tqdm
+from zipfile import ZipFile, ZIP_STORED
+from io import BytesIO
 
+########################################################
+# helper functions
+########################################################
 
-def get_data(stocks, args):
-    
-    dat = yf.Tickers(stocks)
+def _save_npz_progress(path: str, arrays: dict, desc="Saving dataset"):
+    with ZipFile(path, mode="w", compression=ZIP_STORED) as zf:
+        bar = tqdm(total=len(arrays), desc=desc)
+        for name, arr in arrays.items():
+            buf = BytesIO()
+            np.save(buf, np.asanyarray(arr), allow_pickle=False)
+            zf.writestr(f"{name}.npy", buf.getvalue())
+            bar.update(1)
+        bar.close()
 
-    try:
+def _load_npz_progress(path: str, names: list, desc="Loading dataset"):
+    # Use numpy.load for correctness but show progress as we realize arrays.
+    with np.load(path, allow_pickle=False) as z:
+        out = {}
+        bar = tqdm(total=len(names), desc=desc)
+        for n in names:
+            out[n] = z[n]            # triggers decompression/read for that entry
+            bar.update(1)
+        bar.close()
+        return out
 
-        if len(args) == 1:
-            # only take open and close times
-            open_close = (dat.history(period=args[0]))[['Open','Close']]
-        elif len(args) == 2:
-            open_close = (dat.history(period=None, start=args[0], end=args[1], interval="1d"))[['Open','Close']]
-        else:
-            print("Invalid Data Input Arguments")
-            return 1
-    except:
-        print("Data Error")
+########################################################
+# data management
+########################################################
+
+def get_data(stocks, args, data_dir="data", lookback=240, force=False):
+    """
+    Return 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
+    Loads from .npz if present (and not force); otherwise builds from yfinance,
+    saves .npz, and returns the tuple.
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    base = "_".join(stocks) + "_" + "_".join(args)
+    npz_path = os.path.join(data_dir, base + ".npz")
+
+    # Fast path: load cached dataset
+    if os.path.exists(npz_path) and not force:
+        print(f"Data file {npz_path} exists. Loading .npz ...")
+        return load_data_from_local(npz_path)
+
+    # Build from raw prices
+    dat = yf.Tickers(" ".join(stocks))
+    if len(args) == 1:
+        open_close = dat.history(period=args[0])[["Open", "Close"]]
+    elif len(args) == 2:
+        open_close = dat.history(period=None, start=args[0], end=args[1], interval="1d")[["Open", "Close"]]
+    else:
+        print("Invalid Data Input Arguments")
         return 1
-    
 
-    lookback = 240
+    # Now build op/cp/date_index from the cleaned frame
+    op = open_close["Open"].T   # (S, T)
+    cp = open_close["Close"].T  # (S, T)
+    date_index = open_close.index
 
-    op = open_close["Open"].T
-    cp = open_close["Close"].T
+    if lookback >= op.shape[1]:
+        raise ValueError("study period too short for chosen lookback")
 
-    print(op.shape)
+    # Features/targets
+    xdata, ydata, dates = get_feature_input(op, cp, lookback, op.shape[1], len(stocks), date_index)
+    xdata = torch.from_numpy(xdata).to(torch.float32)  # (S, W, L, F)
+    ydata = torch.from_numpy(ydata).to(torch.float32)  # (S, W, 1)
 
-    if lookback >= (op.shape)[1]:
-        print("study period too short")
+    # Date-based split (works even if some stocks miss certain dates)
+    dates_np = np.array(dates, dtype="datetime64[ns]")
+    uniq = np.unique(dates_np)
+    n_total = len(uniq)
+    n_train_val = int(n_total * (2 / 3))
+    n_train = int(n_train_val * 0.8)
+    start = uniq[0]
+    train_end = uniq[n_train - 1] if n_train > 0 else start
+    val_end = uniq[n_train_val - 1] if n_train_val > 0 else train_end
+    last = uniq[-1]
 
-    # get 
+    train_mask = (dates_np >= start) & (dates_np <= train_end)
+    val_mask   = (dates_np >  train_end) & (dates_np <= val_end)
+    test_mask  = (dates_np >  val_end)   & (dates_np <= last)
 
-    xdata, ydata = get_feature_input(op,cp, lookback, op.shape[1], len(stocks))
-    xdata = torch.Tensor.to(torch.from_numpy(xdata),dtype=torch.float32)
-    ydata = torch.Tensor.to(torch.from_numpy(ydata),dtype=torch.float32)
+    def _sel(mask):
+        X = torch.from_numpy(xdata[mask]).to(torch.float32)
+        Y = torch.from_numpy(ydata[mask]).to(torch.float32)
+        D = [pd.Timestamp(d).to_pydatetime() for d in dates_np[mask]]
+        return X, Y, D
 
-    total_points = xdata.shape[1]
-    total_points_buffer = total_points - 2*lookback
+    Xtr_f, Ytr_f, Dtrain_f = _sel(train_mask)
+    Xva_f, Yva_f, Dvalidation_f = _sel(val_mask)
+    Xte_f, Yte_f, Dtest_f = _sel(test_mask)
 
-    print("Total Points No Overlap: {}".format(total_points_buffer))
+    # --- split summary ---
+    n_tr, n_va, n_te = len(Dtrain_f), len(Dvalidation_f), len(Dtest_f)
+    n_tot = n_tr + n_va + n_te
+    print(f"[split] train/val/test sizes = {n_tr:,} / {n_va:,} / {n_te:,}  | total kept = {n_tot:,}")
 
-    train_val_size = int(total_points_buffer * (2/3))
-    train_size = int(train_val_size * 0.8)
+    # Save compact dataset
+    def _to_np(x): return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
+    _save_npz_progress(npz_path,{
+            "X_train": _to_np(Xtr_f), "X_val": _to_np(Xva_f), "X_test": _to_np(Xte_f),
+            "Y_train": _to_np(Ytr_f), "Y_val": _to_np(Yva_f), "Y_test": _to_np(Yte_f),
+            "D_train": np.array(Dtrain_f, dtype="datetime64[ns]"),
+            "D_val":   np.array(Dvalidation_f, dtype="datetime64[ns]"),
+            "D_test":  np.array(Dtest_f, dtype="datetime64[ns]"),
+        },
+        desc="Saving dataset (.npz)"
+    )
+    print(f"Data saved to {npz_path}")
 
-    Xtrain, Xvalidation, Xtest = xdata[:,:train_size], xdata[:,train_size+lookback:train_val_size+lookback], xdata[:,train_val_size+2*lookback:]
-    Ytrain, Yvalidation, Ytest = ydata[:,:train_size], ydata[:,train_size+lookback:train_val_size+lookback], ydata[:,train_val_size+2*lookback:]
+    return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f)
 
-    print("Training set size: {}".format(Xtrain.shape[1]))
-    print("Validation set size: {}".format(Xvalidation.shape[1]))
-    print("Test set size: {}".format(Xtest.shape[1]))
+def save_data_locally(stocks, args, data_dir="data", force=False):
+    # Force a rebuild/save and return the 9-tuple
+    return get_data(stocks, args, data_dir=data_dir, lookback=240, force=True)
 
-    batch_flatten = lambda Xs: [torch.flatten(x,start_dim=0,end_dim=1) for x in Xs]
 
-    return tuple(batch_flatten([Xtrain, Xvalidation, Xtest, Ytrain, Yvalidation, Ytest]))
+def load_data_from_local(filename):
+    """
+    Load from .npz (fast path). If a legacy .pkl is passed accidentally, refuse
+    and return 1 so the caller can rebuild.
+    """
+    if filename.endswith(".npz"):
+        names = ["X_train","X_val","X_test","Y_train","Y_val","Y_test","D_train","D_val","D_test"]
+        z = _load_npz_progress(filename, names, desc="Loading dataset (.npz)")
+        Xtr = torch.from_numpy(z["X_train"]).to(torch.float32)
+        Xva = torch.from_numpy(z["X_val"]).to(torch.float32)
+        Xte = torch.from_numpy(z["X_test"]).to(torch.float32)
+        Ytr = torch.from_numpy(z["Y_train"]).to(torch.float32)
+        Yva = torch.from_numpy(z["Y_val"]).to(torch.float32)
+        Yte = torch.from_numpy(z["Y_test"]).to(torch.float32)
+        Dtr = [pd.Timestamp(d).to_pydatetime() for d in z["D_train"]]
+        Dva = [pd.Timestamp(d).to_pydatetime() for d in z["D_val"]]
+        Dte = [pd.Timestamp(d).to_pydatetime() for d in z["D_test"]]
+        return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte)
+
+    if filename.endswith(".pkl"):
+        print("Legacy pickle file detected. Ignoring it—rebuilding .npz instead.")
+        return 1
+
+    print(f"Unknown data file type: {filename}")
+    return 1
+
+########################################################
+# get feature input
+########################################################
 
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
-def get_feature_input(op, cp, lookback, study_period, num_stocks):
+def get_feature_input(op, cp, lookback, study_period, num_stocks, date_index):
 
-    T_study = study_period
-    lookback = 240
-
-    # one day/two day back calculate ir, cpr, opr
-    f_t1 = np.empty((num_stocks, 4, T_study))
+    T = study_period
+    # Precompute elementary series (may contain NaNs)
+    f_t1 = np.full((num_stocks, 4, T), np.nan, dtype=float)
     for n in range(num_stocks):
-        for t in range(2,T_study):
-            f_t1[n][0][t] = cp.iloc[n,t-1]/op.iloc[n,t-1] - 1   #ir
-            f_t1[n][1][t] = cp.iloc[n,t-1]/cp.iloc[n,t-2] - 1   #cpr
-            f_t1[n][2][t] = op.iloc[n,t]/op.iloc[n,t-1] - 1     #opr
-            f_t1[n][3][t] = op.iloc[n,t]                        #op
-  
+        for t in range(2, T):
+            o_t1, c_t1, c_t2, o_t = op.iloc[n, t-1], cp.iloc[n, t-1], cp.iloc[n, t-2], op.iloc[n, t]
+            if pd.notna(c_t1) and pd.notna(o_t1):
+                f_t1[n, 0, t] = c_t1 / o_t1 - 1.0     # ir
+            if pd.notna(c_t1) and pd.notna(c_t2):
+                f_t1[n, 1, t] = c_t1 / c_t2 - 1.0     # cpr
+            if pd.notna(o_t) and pd.notna(o_t1):
+                f_t1[n, 2, t] = o_t / o_t1 - 1.0      # opr
+            if pd.notna(o_t):
+                f_t1[n, 3, t] = o_t                   # op
 
-    # get all end times last end t is T_study-1 (can use end_t values as index)
-    end_t = list(range(lookback + 2,T_study))
+    X_list, y_list, d_list = [], [], []
+    # --- counters ---
+    total_candidates = 0
+    kept = 0
+    dropped_nan_target = 0
+    dropped_feature_nan = 0
+    dropped_flat_iqr = 0
+    dropped_op_nan = 0
 
-    # 4 features ir, cpr, opr, op
-    rss = np.empty((num_stocks, len(end_t),4,lookback))
-    target = np.empty((num_stocks,len(end_t),1))
-
-
-    # loop over all end times to generate all stacks
-
-    #over all stocks
     for n in range(num_stocks):
-        #over all end times
-        for k in range(len(end_t)):
+        for end_t in range(lookback + 2, T):
+            total_candidates += 1
+            tgt = cp.iloc[n, end_t]
+            if pd.isna(tgt):
+                dropped_nan_target += 1
+                continue
+            period = np.arange(end_t - lookback + 1, end_t + 1, dtype=int)
 
-            target[n][k][0] = cp.iloc[n,end_t[k]]
+            # Build 4-feature window; skip if any feature is invalid over the window
+            window = np.empty((lookback, 4), dtype=float)
+            valid = True
+            for i in range(3):  # ir, cpr, opr (robust z-score)
+                vec = f_t1[n, i, period]
+                if np.isnan(vec).any():
+                    dropped_feature_nan += 1
+                    valid = False; break
+                q1, q2, q3 = np.quantile(vec, [0.25, 0.5, 0.75])
+                iqr = (q3 - q1)
+                if iqr == 0:
+                    dropped_flat_iqr += 1
+                    valid = False
+                    break
+                window[:, i] = (vec - q2) / iqr
+            if not valid:
+                continue
+            vec_op = f_t1[n, 3, period]
+            if np.isnan(vec_op).any():
+                dropped_op_nan += 1
+                continue
+            window[:, 3] = vec_op
 
-            period = [l for l in range(end_t[k]-lookback+1,end_t[k]+1)]
-            #print(len(period)==lookback)
+            X_list.append(window)
+            y_list.append([tgt])
+            d_list.append(date_index[end_t])
+            kept += 1
 
-            # calculate features
-            q = np.array([statistics.quantiles(f_t1[n][i][period]) for i in range(3)])
-            for j in range(len(period)):
-                for i in range(3):
+    # --- summary (before split) ---
+    removed = total_candidates - kept
+    pct = (kept / total_candidates * 100.0) if total_candidates else 0.0
+    print(f"[windows] candidates: {total_candidates:,} | kept: {kept:,} ({pct:.1f}%) | removed: {removed:,}")
+    if removed:
+        print(f"[windows] removed breakdown — NaN target: {dropped_nan_target:,}, "
+              f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,}, NaN open: {dropped_op_nan:,}")
 
-                    rss[n][k][i][j] = (f_t1[n][i][period[j]] - q[i][1])/(q[i][2]-q[i][0])
-                #opening price
-                rss[n][k][3][j] = f_t1[n][i][period[j]]
+    X = np.array(X_list, dtype=float)   # (N, lookback, 4)
+    y = np.array(y_list, dtype=float)   # (N, 1)
+    dates = d_list                      # list of length N
+    return X, y, dates
 
-            #print(op.iloc[n,end_t[k]]==op.iloc[n,period[-1]])
-                
-
-    rss = np.transpose(rss,(0,1,3,2))
-    return rss, target
     """
     trying to get prediction at time t
     looking back at previous 241 days to predict the 242nd day
@@ -126,6 +249,10 @@ def get_feature_input(op, cp, lookback, study_period, num_stocks):
     returns wrt to last cp = 
 
     """
+
+########################################################
+# model
+########################################################
 
 def get_model_summary(model):
     torchsummary.summary(model,(240,3),batch_size=8)
