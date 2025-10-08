@@ -163,7 +163,6 @@ def load_data_from_local(filename):
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
 def get_feature_input(op, cp, lookback, study_period, num_stocks, date_index):
-def get_feature_input(op, cp, lookback, study_period, num_stocks, date_index):
 
     T = study_period
     # Precompute elementary series (may contain NaNs)

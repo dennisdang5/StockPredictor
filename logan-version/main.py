@@ -1,5 +1,4 @@
 import trainer
-import trainer
 import torch
 
 def pick_device():
