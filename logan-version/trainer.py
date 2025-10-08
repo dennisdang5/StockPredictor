@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import matplotlib.dates as mdates
 from tqdm import tqdm
+from helpers_workers import dataloader_kwargs, autotune_num_workers
 
 class IndexedDataset(data.Dataset):
     """
@@ -71,65 +72,81 @@ class Trainer():
         self.time_args = time_args
         self.batch_size= batch_size
         self.writer = SummaryWriter()
+
         self.device = pick_device()
         self.use_amp = self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler(device=self.device.type,enabled=self.use_amp)
-        self.pin_memory = self.device.type == "cuda"
+        
 
-        # -------- NEW: set workers = number of CUDA GPUs detected --------
-        if self.device.type == "cuda":
-            self.num_workers = torch.cuda.device_count()  # 0,1,2,...
-        else:
-            self.num_workers = 0
-        self.persistent_workers = self.num_workers > 0
-        # ------------------------------------------------------------------
+        self.num_workers = 0# =========================
+        # RECOMMENDED WORKERS HERE
+        # =========================
+        # Choose an I/O profile for your pipeline (edit as needed)
+        io_profile = "medium"   # {"light","medium","heavy"}
+
+        # Get heuristic kwargs for DataLoader based on device + SLURM CPU budget
+        loader_args = dataloader_kwargs(self.device, io=io_profile)
+
+        # Save to instance attributes for consistency + logging
+        self.num_workers        = loader_args["num_workers"]
+        self.persistent_workers = loader_args["persistent_workers"]
+        self.pin_memory         = loader_args["pin_memory"]
+
+        # DataLoader doesn't accept None for prefetch_factor, so strip it if absent
+        if loader_args.get("prefetch_factor", None) is None:
+            loader_args.pop("prefetch_factor", None)
+        self.loader_args = loader_args
 
         print(f"[device] using {self.device}")
         if self.device.type == "cuda":
             print(f"[cuda] {torch.cuda.get_device_name(0)} (count={torch.cuda.device_count()})")
         elif self.device.type == "mps":
             print("[mps] Apple Metal Performance Shaders backend")
-
         print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
 
         # data - now using local data loading (includes dates)
         input_data = util.get_data(stocks, time_args)
-        if (type(input_data) == int):
+        if isinstance(input_data, int):
             print("Error getting data")
             return 1
-        else:
-            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test = input_data
+        X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test = input_data
         # Store dates for later reference (even when data is shuffled)
         self.train_dates = D_train
         self.val_dates = D_val
         self.test_dates = D_test
         
+        train_ds = IndexedDataset(X_train, Y_train, D_train)
+        val_ds   = IndexedDataset(X_val,   Y_val,   D_val)
+        test_ds  = IndexedDataset(X_test,  Y_test,  D_test)
 
+        # (Optional) quick autotune once; uncomment if you want to probe
+        tuned = autotune_num_workers(train_ds, self.batch_size, self.device, candidates=(0,1,2,4,8))
+        print(f"[dataloader] autotuned num_workers={tuned}")
+        self.num_workers = tuned
+        self.persistent_workers = bool(tuned)
+        # Update loader_args with tuned values, handling prefetch_factor correctly
+        self.loader_args.update(num_workers=tuned, persistent_workers=bool(tuned))
+        if tuned == 0:
+            self.loader_args.pop("prefetch_factor", None)
+        else:
+            self.loader_args["prefetch_factor"] = 2
+
+        # =========================
+        # BUILD DATALOADERS (use heuristics)
+        # =========================
         self.trainLoader = data.DataLoader(
-            IndexedDataset(X_train, Y_train, D_train),
-            shuffle=True,
-            batch_size=batch_size,
-            pin_memory=self.pin_memory,
-            num_workers=self.num_workers,
-            persistent_workers=self.persistent_workers
+            train_ds, shuffle=True,  batch_size=self.batch_size, **self.loader_args
         )
         self.validationLoader = data.DataLoader(
-            IndexedDataset(X_val, Y_val, D_val),
-            shuffle=True,
-            batch_size=batch_size,
-            pin_memory=self.pin_memory,
-            num_workers=self.num_workers,
-            persistent_workers=self.persistent_workers
+            val_ds,   shuffle=False, batch_size=self.batch_size, **self.loader_args
         )
         self.testLoader = data.DataLoader(
-            IndexedDataset(X_test, Y_test, D_test),
-            shuffle=False,
-            batch_size=batch_size,
-            pin_memory=self.pin_memory,
-            num_workers=self.num_workers,
-            persistent_workers=self.persistent_workers
+            test_ds,  shuffle=False, batch_size=self.batch_size, **self.loader_args
         )
 
+        # =========================
+        # MODEL
+        # =========================
         self.Model = model.LSTMModelPricePredict()
 
         # Multi-GPU (CUDA) support via DataParallel; safe no-op on single GPU/CPU/MPS
@@ -150,7 +167,6 @@ class Trainer():
 
         self.optimizer = optim.Adam(self.Model.parameters())
         self.loss_fn = nn.MSELoss()
-
         self.stopper = EarlyStopper()
         self.num_epochs = num_epochs
 
