@@ -9,22 +9,20 @@ end = "2015-09-30"
 stocks = [
     # Top Technology & Growth
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
-]
 
-"""    
     # Major Financial Services
     "JPM", "BAC", "V", "MA", "WFC", "GS", "BLK", "AXP",
-    
+
     # Healthcare Leaders
     "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO",
-    
+
     # Consumer & Retail Giants
     "WMT", "PG", "HD", "COST", "MCD", "NKE",
-    
+
     # Industrial & Energy Leaders
     "BA", "CAT", "XOM", "CVX"
+]
 
-"""
 
 train_obj = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=5000)
 
@@ -37,8 +35,8 @@ for name, param in train_obj.Model.named_parameters():
     print("param: {}".format(param.numel()))
     print()
 
-#total_epochs = train_obj.num_epochs
-total_epochs = 2
+total_epochs = train_obj.num_epochs
+#total_epochs = 100
 
 for epoch in range(total_epochs):
     stop = train_obj.train_one_epoch(epoch)
