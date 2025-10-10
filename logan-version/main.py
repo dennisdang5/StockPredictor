@@ -35,8 +35,8 @@ for name, param in train_obj.Model.named_parameters():
     print("param: {}".format(param.numel()))
     print()
 
-total_epochs = train_obj.num_epochs
-#total_epochs = 100
+#total_epochs = train_obj.num_epochs
+total_epochs = 100
 
 for epoch in range(total_epochs):
     stop = train_obj.train_one_epoch(epoch)
