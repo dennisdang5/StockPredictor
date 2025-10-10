@@ -4,7 +4,7 @@ import torch
 import torch.optim as optim
 from torch import nn
 import torch.utils.data as data
-import model
+from model import LSTMModelPricePredict
 import util
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
@@ -14,6 +14,18 @@ from datetime import datetime
 import matplotlib.dates as mdates
 from tqdm import tqdm
 from helpers_workers import dataloader_kwargs, autotune_num_workers
+import os, torch, torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DistributedSampler
+import torch.distributed as dist
+
+def setup_dist():
+    if not torch.cuda.is_available() or os.getenv("RANK") is None:
+        return None, torch.device("cuda" if torch.cuda.is_available() else "cpu"), False
+    dist.init_process_group("nccl")
+    local_rank = int(os.getenv("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    return local_rank, torch.device(f"cuda:{local_rank}"), True
 
 class IndexedDataset(data.Dataset):
     """
@@ -57,7 +69,10 @@ class EarlyStopper():
         if validation_loss < self.min_validation_loss:
             self.min_validation_loss = validation_loss
             self.counter = 0
-            torch.save(model.module.state_dict() if hasattr(model, "module") else model.state_dict(), 'savedmodel.pth')
+            rank = dist.get_rank() if is_dist else 0
+            is_main = (rank == 0)
+            if is_main:
+                torch.save((model.module if hasattr(model, "module") else model).state_dict(), "savedmodel.pth")
 
         elif validation_loss > (self.min_validation_loss + self.min_delta):
             self.counter += 1
@@ -68,6 +83,8 @@ class EarlyStopper():
 
 class Trainer():
     def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None):
+        local_rank, device, is_dist = setup_dist()
+
         self.stocks = stocks
         self.time_args = time_args
         self.batch_size= batch_size
@@ -78,7 +95,8 @@ class Trainer():
         self.scaler = torch.amp.GradScaler(device=self.device.type,enabled=self.use_amp)
         
 
-        self.num_workers = 0# =========================
+        self.num_workers = 0
+        # =========================
         # RECOMMENDED WORKERS HERE
         # =========================
         # Choose an I/O profile for your pipeline (edit as needed)
@@ -88,7 +106,8 @@ class Trainer():
         loader_args = dataloader_kwargs(self.device, io=io_profile)
 
         # Save to instance attributes for consistency + logging
-        self.num_workers        = loader_args["num_workers"]
+        #self.num_workers        = loader_args["num_workers"]
+        self.num_workers        = 1
         self.persistent_workers = loader_args["persistent_workers"]
         self.pin_memory         = loader_args["pin_memory"]
 
@@ -115,39 +134,45 @@ class Trainer():
         self.val_dates = D_val
         self.test_dates = D_test
         
-        train_ds = IndexedDataset(X_train, Y_train, D_train)
+        self.train_ds = IndexedDataset(X_train, Y_train, D_train)
         val_ds   = IndexedDataset(X_val,   Y_val,   D_val)
         test_ds  = IndexedDataset(X_test,  Y_test,  D_test)
 
+        self.train_sampler = DistributedSampler(self.train_ds, shuffle=True) if is_dist else None
+        val_sampler   = DistributedSampler(val_ds,   shuffle=False, drop_last=False) if is_dist else None
+        test_sampler   = DistributedSampler(test_ds,   shuffle=False, drop_last=False) if is_dist else None
+
         # (Optional) quick autotune once; uncomment if you want to probe
-        tuned = autotune_num_workers(train_ds, self.batch_size, self.device, candidates=(0,1,2,4,8))
-        print(f"[dataloader] autotuned num_workers={tuned}")
-        self.num_workers = tuned
-        self.persistent_workers = bool(tuned)
-        # Update loader_args with tuned values, handling prefetch_factor correctly
-        self.loader_args.update(num_workers=tuned, persistent_workers=bool(tuned))
-        if tuned == 0:
-            self.loader_args.pop("prefetch_factor", None)
-        else:
-            self.loader_args["prefetch_factor"] = 2
+        #tuned = autotune_num_workers(self.train_ds, self.batch_size, self.device, candidates=(0,1,2,4,8))
+        #print(f"[dataloader] autotuned num_workers={tuned}")
+        #self.num_workers = tuned
+        #self.persistent_workers = bool(tuned)
+        ## Update loader_args with tuned values, handling prefetch_factor correctly
+        #self.loader_args.update(num_workers=tuned, persistent_workers=bool(tuned))
+        #if tuned == 0:
+        #    self.loader_args.pop("prefetch_factor", None)
+        #else:
+        #    self.loader_args["prefetch_factor"] = 2
 
         # =========================
         # BUILD DATALOADERS (use heuristics)
         # =========================
-        self.trainLoader = data.DataLoader(
-            train_ds, shuffle=True,  batch_size=self.batch_size, **self.loader_args
+        trainLoader = data.DataLoader(
+            self.train_ds, shuffle=False, sampler=self.train_sampler,  batch_size=self.batch_size, **self.loader_args
         )
         self.validationLoader = data.DataLoader(
-            val_ds,   shuffle=False, batch_size=self.batch_size, **self.loader_args
+            val_ds,   shuffle=False, sampler=val_sampler, batch_size=self.batch_size, **self.loader_args
         )
         self.testLoader = data.DataLoader(
-            test_ds,  shuffle=False, batch_size=self.batch_size, **self.loader_args
+            test_ds,  shuffle=False, sampler=test_sampler, batch_size=self.batch_size, **self.loader_args
         )
 
         # =========================
         # MODEL
         # =========================
-        self.Model = model.LSTMModelPricePredict()
+        self.Model = LSTMModelPricePredict()
+        if is_dist:
+            self.Model = DDP(self.Model, device_ids=[device.index])
 
         # Multi-GPU (CUDA) support via DataParallel; safe no-op on single GPU/CPU/MPS
         if self.device.type == "cuda" and torch.cuda.device_count() > 1:
@@ -172,6 +197,10 @@ class Trainer():
 
     def train_one_epoch(self, epoch):
 
+        # NEW: ensure DDP shuffles differently each epoch
+        if dist.is_available() and dist.is_initialized() and getattr(self, "train_sampler", None) is not None:
+            self.train_sampler.set_epoch(epoch)
+
         print("Epoch: {}".format(epoch+1))
         print("--------------------------------------------")
         self.Model.train()
@@ -181,7 +210,11 @@ class Trainer():
 
         start_time = time.perf_counter()
         
-        pbar = tqdm(self.trainLoader, total=len(self.trainLoader), desc=f"train {epoch+1}/{self.num_epochs}")
+        trainLoader = data.DataLoader(
+            self.train_ds, shuffle=False, sampler=self.train_sampler,  batch_size=self.batch_size, **self.loader_args
+        )
+
+        pbar = tqdm(trainLoader, total=len(trainLoader), desc=f"train {epoch+1}/{self.num_epochs}")
         for X_batch, Y_batch, indices in pbar:
             self.optimizer.zero_grad(set_to_none=True)
             # move data to device
@@ -217,7 +250,7 @@ class Trainer():
             
 
             pbar.set_postfix(avg_train=train_loss/(pbar.n or 1))
-        avg_train = train_loss / len(self.trainLoader)
+        avg_train = train_loss / len(trainLoader)
 
         self.Model.eval()
         

@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH -J test_train_lstm_model
-#SBATCH --ntasks=1
+#SBATCH --ntasks=2
 #SBATCH --gpus-per-task=2
+#SBATCH --nodes=2
 #SBATCH --mem=0
 #SBATCH --partition=gpu
 #SBATCH --time=00:30:00
@@ -36,5 +37,26 @@ except Exception as e:
 PY
 command -v nvidia-smi >/dev/null && nvidia-smi || echo "nvidia-smi not found"
 
+# Keep threads reasonable; let DataLoader workers do the I/O
+export OMP_NUM_THREADS=1
+export NCCL_DEBUG=WARN
+
+# Master addr/port for rendezvous
+MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)
+MASTER_PORT=$((10000 + RANDOM % 50000))
+
+# Processes per node = GPUs per node (fallback if env var missing)
+NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-}
+if ! [[ "$NPROC_PER_NODE" =~ ^[0-9]+$ ]]; then
+  NPROC_PER_NODE=$(nvidia-smi -L | wc -l)
+fi
+
+echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
+
 # 3) Run your code under srun so it inherits the GPU allocation/cgroup cleanly.
-srun -u python -u main.py
+srun torchrun \
+  --nnodes="$SLURM_NNODES" \
+  --nproc_per_node="$NPROC_PER_NODE" \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+  main.py
