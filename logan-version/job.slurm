@@ -5,9 +5,9 @@
 #SBATCH --nodes=2
 #SBATCH --mem=0
 #SBATCH --partition=gpu
-#SBATCH --time=00:30:00
+#SBATCH --time=06:00:00
 #SBATCH --account=liu32_1378
-#SBATCH --constraint=v100|a40|a100
+#SBATCH --constraint=a40
 
 set -euo pipefail
 
