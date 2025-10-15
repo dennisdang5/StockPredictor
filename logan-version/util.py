@@ -52,10 +52,17 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False):
     base = "_".join(stocks) + "_" + "_".join(args)
     npz_path = os.path.join(data_dir, base + ".npz")
 
-    # Fast path: load cached dataset
-    if os.path.exists(npz_path) and not force:
-        print(f"Data file {npz_path} exists. Loading .npz ...")
-        return load_data_from_local(npz_path)
+    # Fast path: try to load separate datasets first, then fall back to combined format
+    if not force:
+        # Try separate format first
+        separate_data = load_separate_datasets(stocks, args, data_dir)
+        if separate_data != 1:
+            return separate_data
+        
+        # Fall back to combined format if separate files don't exist
+        if os.path.exists(npz_path):
+            print(f"Combined data file {npz_path} exists. Loading .npz ...")
+            return load_data_from_local(npz_path)
 
     # Build from raw prices
     dat = yf.Tickers(" ".join(stocks))
@@ -110,18 +117,39 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False):
     n_tot = n_tr + n_va + n_te
     print(f"[split] train/val/test sizes = {n_tr:,} / {n_va:,} / {n_te:,}  | total kept = {n_tot:,}")
 
-    # Save compact dataset
+    # Save datasets separately
     def _to_np(x): return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
-    _save_npz_progress(npz_path,{
-            "X_train": _to_np(Xtr_f), "X_val": _to_np(Xva_f), "X_test": _to_np(Xte_f),
-            "Y_train": _to_np(Ytr_f), "Y_val": _to_np(Yva_f), "Y_test": _to_np(Yte_f),
-            "D_train": np.array(Dtrain_f, dtype="datetime64[ns]"),
-            "D_val":   np.array(Dvalidation_f, dtype="datetime64[ns]"),
-            "D_test":  np.array(Dtest_f, dtype="datetime64[ns]"),
-        },
-        desc="Saving dataset (.npz)"
-    )
-    print(f"Data saved to {npz_path}")
+    
+    # Create separate file paths for each dataset
+    train_path = os.path.join(data_dir, base + "_train.npz")
+    val_path = os.path.join(data_dir, base + "_val.npz")
+    test_path = os.path.join(data_dir, base + "_test.npz")
+    
+    # Save training dataset
+    _save_npz_progress(train_path, {
+        "X": _to_np(Xtr_f),
+        "Y": _to_np(Ytr_f),
+        "D": np.array(Dtrain_f, dtype="datetime64[ns]")
+    }, desc="Saving training dataset (.npz)")
+    
+    # Save validation dataset
+    _save_npz_progress(val_path, {
+        "X": _to_np(Xva_f),
+        "Y": _to_np(Yva_f),
+        "D": np.array(Dvalidation_f, dtype="datetime64[ns]")
+    }, desc="Saving validation dataset (.npz)")
+    
+    # Save test dataset
+    _save_npz_progress(test_path, {
+        "X": _to_np(Xte_f),
+        "Y": _to_np(Yte_f),
+        "D": np.array(Dtest_f, dtype="datetime64[ns]")
+    }, desc="Saving test dataset (.npz)")
+    
+    print(f"Datasets saved separately:")
+    print(f"  Training: {train_path}")
+    print(f"  Validation: {val_path}")
+    print(f"  Test: {test_path}")
 
     return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f)
 
@@ -132,22 +160,30 @@ def save_data_locally(stocks, args, data_dir="data", force=False):
 
 def load_data_from_local(filename):
     """
-    Load from .npz (fast path). If a legacy .pkl is passed accidentally, refuse
-    and return 1 so the caller can rebuild.
+    Load from .npz (fast path). Handles both old combined format and new separate format.
+    If a legacy .pkl is passed accidentally, refuse and return 1 so the caller can rebuild.
     """
     if filename.endswith(".npz"):
-        names = ["X_train","X_val","X_test","Y_train","Y_val","Y_test","D_train","D_val","D_test"]
-        z = _load_npz_progress(filename, names, desc="Loading dataset (.npz)")
-        Xtr = torch.from_numpy(z["X_train"]).to(torch.float32)
-        Xva = torch.from_numpy(z["X_val"]).to(torch.float32)
-        Xte = torch.from_numpy(z["X_test"]).to(torch.float32)
-        Ytr = torch.from_numpy(z["Y_train"]).to(torch.float32)
-        Yva = torch.from_numpy(z["Y_val"]).to(torch.float32)
-        Yte = torch.from_numpy(z["Y_test"]).to(torch.float32)
-        Dtr = [pd.Timestamp(d).to_pydatetime() for d in z["D_train"]]
-        Dva = [pd.Timestamp(d).to_pydatetime() for d in z["D_val"]]
-        Dte = [pd.Timestamp(d).to_pydatetime() for d in z["D_test"]]
-        return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte)
+        # Check if this is the old combined format
+        with np.load(filename, allow_pickle=False) as z:
+            if "X_train" in z:
+                # Old combined format
+                names = ["X_train","X_val","X_test","Y_train","Y_val","Y_test","D_train","D_val","D_test"]
+                z = _load_npz_progress(filename, names, desc="Loading dataset (.npz)")
+                Xtr = torch.from_numpy(z["X_train"]).to(torch.float32)
+                Xva = torch.from_numpy(z["X_val"]).to(torch.float32)
+                Xte = torch.from_numpy(z["X_test"]).to(torch.float32)
+                Ytr = torch.from_numpy(z["Y_train"]).to(torch.float32)
+                Yva = torch.from_numpy(z["Y_val"]).to(torch.float32)
+                Yte = torch.from_numpy(z["Y_test"]).to(torch.float32)
+                Dtr = [pd.Timestamp(d).to_pydatetime() for d in z["D_train"]]
+                Dva = [pd.Timestamp(d).to_pydatetime() for d in z["D_val"]]
+                Dte = [pd.Timestamp(d).to_pydatetime() for d in z["D_test"]]
+                return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte)
+            else:
+                # New separate format - this shouldn't happen with the current filename
+                print("Error: Trying to load separate format with combined filename")
+                return 1
 
     if filename.endswith(".pkl"):
         print("Legacy pickle file detected. Ignoring it—rebuilding .npz instead.")
@@ -155,6 +191,46 @@ def load_data_from_local(filename):
 
     print(f"Unknown data file type: {filename}")
     return 1
+
+def load_separate_datasets(stocks, args, data_dir="data"):
+    """
+    Load train, validation, and test datasets from separate .npz files.
+    Returns 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
+    """
+    base = "_".join(stocks) + "_" + "_".join(args)
+    train_path = os.path.join(data_dir, base + "_train.npz")
+    val_path = os.path.join(data_dir, base + "_val.npz")
+    test_path = os.path.join(data_dir, base + "_test.npz")
+    
+    # Check if all separate files exist
+    if not all(os.path.exists(path) for path in [train_path, val_path, test_path]):
+        print("Separate dataset files not found. Need to rebuild datasets.")
+        return 1
+    
+    # Load training dataset
+    train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset")
+    Xtr = torch.from_numpy(train_data["X"]).to(torch.float32)
+    Ytr = torch.from_numpy(train_data["Y"]).to(torch.float32)
+    Dtr = [pd.Timestamp(d).to_pydatetime() for d in train_data["D"]]
+    
+    # Load validation dataset
+    val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset")
+    Xva = torch.from_numpy(val_data["X"]).to(torch.float32)
+    Yva = torch.from_numpy(val_data["Y"]).to(torch.float32)
+    Dva = [pd.Timestamp(d).to_pydatetime() for d in val_data["D"]]
+    
+    # Load test dataset
+    test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset")
+    Xte = torch.from_numpy(test_data["X"]).to(torch.float32)
+    Yte = torch.from_numpy(test_data["Y"]).to(torch.float32)
+    Dte = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
+    
+    print(f"Loaded separate datasets:")
+    print(f"  Training: {len(Xtr)} samples from {train_path}")
+    print(f"  Validation: {len(Xva)} samples from {val_path}")
+    print(f"  Test: {len(Xte)} samples from {test_path}")
+    
+    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte)
 
 ########################################################
 # get feature input

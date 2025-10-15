@@ -161,6 +161,7 @@ class Trainer():
             print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
 
         # data - now using local data loading (includes dates)
+        # This will automatically try separate format first, then fall back to combined format
         input_data = util.get_data(stocks, time_args)
         if isinstance(input_data, int):
             raise RuntimeError("Error getting data from util.get_data()")
@@ -571,6 +572,16 @@ class Trainer():
                 self.writer.flush()
         
         return avg_test_loss
+
+    def load_separate_datasets(self, stocks, time_args, data_dir="data"):
+        """
+        Load train, validation, and test datasets from separate .npz files.
+        This method can be used to explicitly load separate datasets.
+        """
+        input_data = util.load_separate_datasets(stocks, time_args, data_dir)
+        if isinstance(input_data, int):
+            raise RuntimeError("Error loading separate datasets from util.load_separate_datasets()")
+        return input_data
 
     def stop(self):
         if self.writer is not None:
