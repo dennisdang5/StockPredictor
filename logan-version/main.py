@@ -38,14 +38,13 @@ for name, param in train_obj.Model.named_parameters():
 #total_epochs = train_obj.num_epochs
 total_epochs = 100
 
+stop = False  # Initialize stop condition
 for epoch in range(total_epochs):
     stop = train_obj.train_one_epoch(epoch)
     if stop: 
         if train_obj.is_main:
             print("Early stop at epoch: {}".format(epoch))
-        train_obj.stop()
         break
 
-# Don't forget to clean up if training completes without early stopping
-if not stop:
-    train_obj.stop()
+# Always clean up distributed training resources
+train_obj.stop()

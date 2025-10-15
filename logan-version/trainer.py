@@ -14,10 +14,9 @@ from datetime import datetime
 import matplotlib.dates as mdates
 from tqdm import tqdm
 from helpers_workers import dataloader_kwargs, autotune_num_workers
-import os, torch, torch.distributed as dist
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler
-import torch.distributed as dist
 
 def setup_dist():
     if not torch.cuda.is_available() or os.getenv("RANK") is None:
@@ -36,7 +35,6 @@ class IndexedDataset(data.Dataset):
         self.X = X
         self.Y = Y
         self.dates = dates
-        print(len(X), len(Y), len(dates))
         assert len(X) == len(Y) == len(dates), "All inputs must have same length"
     
     def __len__(self):
@@ -69,17 +67,40 @@ class EarlyStopper():
         self.is_main = (rank == 0)
 
     def early_stop(self, validation_loss, model):
-        if validation_loss < self.min_validation_loss:
-            self.min_validation_loss = validation_loss
-            self.counter = 0
-            if self.is_main:
-                torch.save((model.module if hasattr(model, "module") else model).state_dict(), "savedmodel.pth")
-
-        elif validation_loss > (self.min_validation_loss + self.min_delta):
-            self.counter += 1
-            if self.counter >= self.patience:
-                return True
-        return False
+        # In distributed mode, we need to synchronize early stopping across all ranks
+        if self.is_dist:
+            # Create tensors for synchronization
+            device = next(model.parameters()).device
+            should_stop_tensor = torch.tensor(0, dtype=torch.int, device=device)
+            
+            # Check if this rank should stop
+            if validation_loss < self.min_validation_loss:
+                self.min_validation_loss = validation_loss
+                self.counter = 0
+                if self.is_main:
+                    torch.save((model.module if hasattr(model, "module") else model).state_dict(), "savedmodel.pth")
+            elif validation_loss > (self.min_validation_loss + self.min_delta):
+                self.counter += 1
+                if self.counter >= self.patience:
+                    should_stop_tensor = torch.tensor(1, dtype=torch.int, device=device)
+            
+            # Broadcast the early stopping decision from rank 0 to all ranks
+            # First, gather all ranks' decisions
+            dist.all_reduce(should_stop_tensor, op=dist.ReduceOp.MAX)
+            
+            # If any rank wants to stop, all ranks should stop
+            return should_stop_tensor.item() == 1
+        else:
+            # Non-distributed mode - original logic
+            if validation_loss < self.min_validation_loss:
+                self.min_validation_loss = validation_loss
+                self.counter = 0
+                torch.save(model.state_dict(), "savedmodel.pth")
+            elif validation_loss > (self.min_validation_loss + self.min_delta):
+                self.counter += 1
+                if self.counter >= self.patience:
+                    return True
+            return False
         
 
 class Trainer():
@@ -92,7 +113,7 @@ class Trainer():
 
         self.stocks = stocks
         self.time_args = time_args
-        self.batch_size= batch_size
+        self.batch_size = batch_size
         
         # Only rank 0 creates TensorBoard writer
         self.writer = SummaryWriter() if self.is_main else None
@@ -133,7 +154,8 @@ class Trainer():
             print(f"[distributed] is_dist={self.is_dist}, rank={self.rank}/{self.world_size}")
             print(f"[device] using {self.device}")
             if self.device.type == "cuda":
-                print(f"[cuda] {torch.cuda.get_device_name(0)} (count={torch.cuda.device_count()})")
+                device_idx = self.local_rank if self.is_dist else 0
+                print(f"[cuda] {torch.cuda.get_device_name(device_idx)} (count={torch.cuda.device_count()})")
             elif self.device.type == "mps":
                 print("[mps] Apple Metal Performance Shaders backend")
             print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
@@ -141,8 +163,7 @@ class Trainer():
         # data - now using local data loading (includes dates)
         input_data = util.get_data(stocks, time_args)
         if isinstance(input_data, int):
-            print("Error getting data")
-            return 1
+            raise RuntimeError("Error getting data from util.get_data()")
         X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test = input_data
         # Store dates for later reference (even when data is shuffled)
         self.train_dates = D_train
@@ -214,7 +235,7 @@ class Trainer():
 
         self.optimizer = optim.Adam(self.Model.parameters())
         self.loss_fn = nn.MSELoss()
-        self.stopper = EarlyStopper(is_dist=self.is_dist, rank=self.rank)
+        self.stopper = EarlyStopper(patience=50, min_delta=0.001, is_dist=self.is_dist, rank=self.rank)
         self.num_epochs = num_epochs
 
     def train_one_epoch(self, epoch):
@@ -260,13 +281,6 @@ class Trainer():
                 loss.backward()
                 self.optimizer.step()
 
-            """            
-            # keep loss for later
-            print("X_batch: ", X_batch)
-            print("Y_batch: ", Y_batch)
-            print("Y_pred: ", Y_pred)
-            print("loss: ", loss)
-            """
 
             train_loss += loss.item()
             
@@ -277,8 +291,8 @@ class Trainer():
         if self.is_dist:
             train_loss_tensor = torch.tensor(train_loss, device=self.device)
             dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
-            train_loss = train_loss_tensor.item() / self.world_size
-            train_samples = len(self.trainLoader)
+            train_loss = train_loss_tensor.item()
+            train_samples = len(self.trainLoader) * self.world_size
         else:
             train_samples = len(self.trainLoader)
         
@@ -310,8 +324,8 @@ class Trainer():
             if self.is_dist:
                 val_loss_tensor = torch.tensor(val_loss, device=self.device)
                 dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-                val_loss = val_loss_tensor.item() / self.world_size
-                val_samples = len(self.validationLoader)
+                val_loss = val_loss_tensor.item()
+                val_samples = len(self.validationLoader) * self.world_size
             else:
                 val_samples = len(self.validationLoader)
             
@@ -323,6 +337,9 @@ class Trainer():
             
             stop_condition = self.stopper.early_stop(avg_val, self.Model)   
             
+            # If early stopping is triggered, synchronize all ranks before exiting
+            if stop_condition and self.is_dist:
+                dist.barrier()  # Ensure all ranks are synchronized before any rank exits
 
         end_time = time.perf_counter()
         
@@ -331,6 +348,8 @@ class Trainer():
             print("Training Loss: {}".format(avg_train))
             print("Validation Loss: {}".format(avg_val))
             print("Training Time: {:.6f}s".format(end_time-start_time))
+            if stop_condition:
+                print("Early stop at epoch: {}".format(epoch))
             print("--------------------------------------------")
             
             # Only log to TensorBoard if writer exists
@@ -503,7 +522,6 @@ class Trainer():
             tbar = tqdm(self.testLoader, total=len(self.testLoader), 
                        desc=f"test", disable=not self.is_main)
             for X_batch, Y_batch, indices in tbar:
-                self.optimizer.zero_grad(set_to_none=True)
                 X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
                 Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
                 
@@ -533,8 +551,8 @@ class Trainer():
         if self.is_dist:
             test_loss_tensor = torch.tensor(test_loss, device=self.device)
             dist.all_reduce(test_loss_tensor, op=dist.ReduceOp.SUM)
-            test_loss = test_loss_tensor.item() / self.world_size
-            test_samples = len(self.testLoader)
+            test_loss = test_loss_tensor.item()
+            test_samples = len(self.testLoader) * self.world_size
         else:
             test_samples = len(self.testLoader)
         
