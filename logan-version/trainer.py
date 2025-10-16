@@ -104,7 +104,7 @@ class EarlyStopper():
         
 
 class Trainer():
-    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None):
+    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification"):
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
         self.rank = dist.get_rank() if self.is_dist else 0
@@ -114,7 +114,7 @@ class Trainer():
         self.stocks = stocks
         self.time_args = time_args
         self.batch_size = batch_size
-        
+        self.prediction_type = prediction_type
         # Only rank 0 creates TensorBoard writer
         self.writer = SummaryWriter() if self.is_main else None
 
@@ -162,7 +162,7 @@ class Trainer():
 
         # data - now using local data loading (includes dates)
         # This will automatically try separate format first, then fall back to combined format
-        input_data = util.get_data(stocks, time_args)
+        input_data = util.get_data(stocks, time_args, self.prediction_type)
         if isinstance(input_data, int):
             raise RuntimeError("Error getting data from util.get_data()")
         X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test = input_data

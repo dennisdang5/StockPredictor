@@ -42,7 +42,7 @@ def _load_npz_progress(path: str, names: list, desc="Loading dataset"):
 # data management
 ########################################################
 
-def get_data(stocks, args, data_dir="data", lookback=240, force=False):
+def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification"):
     """
     Return 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
     Loads from .npz if present (and not force); otherwise builds from yfinance,
@@ -50,19 +50,28 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False):
     """
     os.makedirs(data_dir, exist_ok=True)
     base = "_".join(stocks) + "_" + "_".join(args)
-    npz_path = os.path.join(data_dir, base + ".npz")
+    
+    # Create prediction-type specific file names
+    prediction_suffix = f"_{prediction_type}"
+    npz_path = os.path.join(data_dir, base + prediction_suffix + ".npz")
 
-    # Fast path: try to load separate datasets first, then fall back to combined format
+    # Fast path: try to load prediction-type specific datasets first, then fall back to combined format
     if not force:
-        # Try separate format first
-        separate_data = load_separate_datasets(stocks, args, data_dir)
+        # Try prediction-type specific separate format first
+        separate_data = load_separate_datasets(stocks, args, data_dir, prediction_type)
         if separate_data != 1:
             return separate_data
         
-        # Fall back to combined format if separate files don't exist
+        # Fall back to prediction-type specific combined format if separate files don't exist
         if os.path.exists(npz_path):
-            print(f"Combined data file {npz_path} exists. Loading .npz ...")
+            print(f"Prediction-type specific data file {npz_path} exists. Loading .npz ...")
             return load_data_from_local(npz_path)
+        
+        # Fall back to old format without prediction type for backward compatibility
+        old_npz_path = os.path.join(data_dir, base + ".npz")
+        if os.path.exists(old_npz_path):
+            print(f"Legacy data file {old_npz_path} exists. Loading .npz ...")
+            return load_data_from_local(old_npz_path)
 
     # Build from raw prices
     dat = yf.Tickers(" ".join(stocks))
@@ -83,7 +92,12 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False):
         raise ValueError("study period too short for chosen lookback")
 
     # Features/targets
-    xdata, ydata, dates = get_feature_input(op, cp, lookback, op.shape[1], len(stocks), date_index)
+    if prediction_type == "classification":
+        xdata, ydata, dates = get_feature_input_classification(op, cp, lookback, op.shape[1], len(stocks), date_index)
+    elif prediction_type == "price" :
+        xdata, ydata, dates = get_feature_input_price(op, cp, lookback, op.shape[1], len(stocks), date_index)
+    else:
+        raise ValueError("Invalid prediction type")
     xdata = torch.from_numpy(xdata).to(torch.float32)  # (S, W, L, F)
     ydata = torch.from_numpy(ydata).to(torch.float32)  # (S, W, 1)
 
@@ -120,10 +134,10 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False):
     # Save datasets separately
     def _to_np(x): return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
     
-    # Create separate file paths for each dataset
-    train_path = os.path.join(data_dir, base + "_train.npz")
-    val_path = os.path.join(data_dir, base + "_val.npz")
-    test_path = os.path.join(data_dir, base + "_test.npz")
+    # Create prediction-type specific separate file paths for each dataset
+    train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
+    val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
+    test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
     
     # Save training dataset
     _save_npz_progress(train_path, {
@@ -146,16 +160,16 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False):
         "D": np.array(Dtest_f, dtype="datetime64[ns]")
     }, desc="Saving test dataset (.npz)")
     
-    print(f"Datasets saved separately:")
+    print(f"{prediction_type.title()} datasets saved separately:")
     print(f"  Training: {train_path}")
     print(f"  Validation: {val_path}")
     print(f"  Test: {test_path}")
 
     return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f)
 
-def save_data_locally(stocks, args, data_dir="data", force=False):
+def save_data_locally(stocks, args, data_dir="data", force=False, prediction_type="classification"):
     # Force a rebuild/save and return the 9-tuple
-    return get_data(stocks, args, data_dir=data_dir, lookback=240, force=True)
+    return get_data(stocks, args, data_dir=data_dir, lookback=240, force=True, prediction_type=prediction_type)
 
 
 def load_data_from_local(filename):
@@ -192,19 +206,20 @@ def load_data_from_local(filename):
     print(f"Unknown data file type: {filename}")
     return 1
 
-def load_separate_datasets(stocks, args, data_dir="data"):
+def load_separate_datasets(stocks, args, data_dir="data", prediction_type="classification"):
     """
     Load train, validation, and test datasets from separate .npz files.
     Returns 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
     """
     base = "_".join(stocks) + "_" + "_".join(args)
-    train_path = os.path.join(data_dir, base + "_train.npz")
-    val_path = os.path.join(data_dir, base + "_val.npz")
-    test_path = os.path.join(data_dir, base + "_test.npz")
+    prediction_suffix = f"_{prediction_type}"
+    train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
+    val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
+    test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
     
     # Check if all separate files exist
     if not all(os.path.exists(path) for path in [train_path, val_path, test_path]):
-        print("Separate dataset files not found. Need to rebuild datasets.")
+        print(f"Separate {prediction_type} dataset files not found. Need to rebuild datasets.")
         return 1
     
     # Load training dataset
@@ -236,15 +251,15 @@ def load_separate_datasets(stocks, args, data_dir="data"):
 # get feature input
 ########################################################
 
-# op[x] is the op vector for stock x
-# op and cp has indices from time 0 to T_study-1
-def get_feature_input(op, cp, lookback, study_period, num_stocks, date_index):
+def get_feature_input_price(op, cp, lookback, study_period, num_stocks, date_index):
 
     T = study_period
     # Precompute elementary series (may contain NaNs)
     f_t1 = np.full((num_stocks, 4, T), np.nan, dtype=float)
-    for n in range(num_stocks):
-        for t in range(2, T):
+    
+    for t in range(2, T):
+        
+        for n in range(num_stocks):
             o_t1, c_t1, c_t2, o_t = op.iloc[n, t-1], cp.iloc[n, t-1], cp.iloc[n, t-2], op.iloc[n, t]
             if pd.notna(c_t1) and pd.notna(o_t1):
                 f_t1[n, 0, t] = c_t1 / o_t1 - 1.0     # ir
@@ -254,6 +269,7 @@ def get_feature_input(op, cp, lookback, study_period, num_stocks, date_index):
                 f_t1[n, 2, t] = o_t / o_t1 - 1.0      # opr
             if pd.notna(o_t):
                 f_t1[n, 3, t] = o_t                   # op
+        
 
     X_list, y_list, d_list = [], [], []
     # --- counters ---
@@ -263,11 +279,126 @@ def get_feature_input(op, cp, lookback, study_period, num_stocks, date_index):
     dropped_feature_nan = 0
     dropped_flat_iqr = 0
     dropped_op_nan = 0
+    
 
-    for n in range(num_stocks):
-        for end_t in range(lookback + 2, T):
+    for end_t in range(lookback + 2, T):
+        for n in range(num_stocks):
             total_candidates += 1
             tgt = cp.iloc[n, end_t]
+            if pd.isna(tgt):
+                dropped_nan_target += 1
+                continue
+            period = np.arange(end_t - lookback + 1, end_t + 1, dtype=int)
+
+            # Build 4-feature window; skip if any feature is invalid over the window
+            window = np.empty((lookback, 4), dtype=float)
+            valid = True
+            for i in range(3):  # ir, cpr, opr (robust z-score)
+                vec = f_t1[n, i, period]
+                if np.isnan(vec).any():
+                    dropped_feature_nan += 1
+                    valid = False; break
+                q1, q2, q3 = np.quantile(vec, [0.25, 0.5, 0.75])
+                iqr = (q3 - q1)
+                if iqr == 0:
+                    dropped_flat_iqr += 1
+                    valid = False
+                    break
+                window[:, i] = (vec - q2) / iqr
+            if not valid:
+                continue
+            vec_op = f_t1[n, 3, period]
+            if np.isnan(vec_op).any():
+                dropped_op_nan += 1
+                continue
+            window[:, 3] = vec_op
+
+            X_list.append(window)
+            y_list.append([tgt])
+            d_list.append(date_index[end_t])
+            kept += 1
+
+    # --- summary (before split) ---
+    removed = total_candidates - kept
+    pct = (kept / total_candidates * 100.0) if total_candidates else 0.0
+    print(f"[windows] candidates: {total_candidates:,} | kept: {kept:,} ({pct:.1f}%) | removed: {removed:,}")
+    if removed:
+        print(f"[windows] removed breakdown — NaN target: {dropped_nan_target:,}, "
+              f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,}, NaN open: {dropped_op_nan:,}")
+
+    X = np.array(X_list, dtype=float)   # (N, lookback, 4)
+    y = np.array(y_list, dtype=float)   # (N, 1)
+    dates = d_list                      # list of length N
+    return X, y, dates
+
+    """
+    trying to get prediction at time t
+    looking back at previous 241 days to predict the 242nd day
+
+    start with opening prices (op) and closing prices(cp)
+    prices for both ordered from 0-t
+
+    intraday returns (ir)= cp/op -1
+    returns wrt to last cp = 
+
+    """
+
+# op[x] is the op vector for stock x
+# op and cp has indices from time 0 to T_study-1
+def get_feature_input_classification(op, cp, lookback, study_period, num_stocks, date_index):
+
+    T = study_period
+    # Precompute elementary series (may contain NaNs)
+    f_t1 = np.full((num_stocks, 4, T), np.nan, dtype=float)
+    rev_labels = np.full((num_stocks, T), np.nan, dtype=float)  # Initialize with NaN for proper alignment
+    
+    for t in range(2, T):
+        rev_t = []
+        valid_stocks = []
+        
+        # First pass: collect valid revenues and their corresponding stock indices
+        for n in range(num_stocks):
+            o_t1, c_t1, c_t2, o_t = op.iloc[n, t-1], cp.iloc[n, t-1], cp.iloc[n, t-2], op.iloc[n, t]
+            if pd.notna(c_t1) and pd.notna(o_t1):
+                f_t1[n, 0, t] = c_t1 / o_t1 - 1.0     # ir
+            if pd.notna(c_t1) and pd.notna(c_t2):
+                f_t1[n, 1, t] = c_t1 / c_t2 - 1.0     # cpr
+            if pd.notna(o_t) and pd.notna(o_t1):
+                f_t1[n, 2, t] = o_t / o_t1 - 1.0      # opr
+            if pd.notna(o_t):
+                f_t1[n, 3, t] = o_t                   # op
+            
+            # Calculate revenue for valid stocks only
+            if pd.notna(cp.iloc[n, t]) and pd.notna(op.iloc[n, t]):
+                revenue = cp.iloc[n, t] - op.iloc[n, t]
+                rev_t.append(revenue)
+                valid_stocks.append(n)
+        
+        # Calculate median revenue at time t
+        if len(rev_t) > 0:
+            median_rev = np.median(rev_t)
+            
+            # Second pass: assign binary labels based on median
+            for i, n in enumerate(valid_stocks):
+                if rev_t[i] > median_rev:
+                    rev_labels[n, t] = 1.0  # Revenue > median
+                else:
+                    rev_labels[n, t] = 0.0  # Revenue <= median
+
+    X_list, y_list, d_list = [], [], []
+    # --- counters ---
+    total_candidates = 0
+    kept = 0
+    dropped_nan_target = 0
+    dropped_feature_nan = 0
+    dropped_flat_iqr = 0
+    dropped_op_nan = 0
+    
+
+    for end_t in range(lookback + 2, T):
+        for n in range(num_stocks):
+            total_candidates += 1
+            tgt = rev_labels[n, end_t]
             if pd.isna(tgt):
                 dropped_nan_target += 1
                 continue
