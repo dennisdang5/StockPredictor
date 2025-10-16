@@ -144,6 +144,10 @@ class Trainer():
         self.persistent_workers = loader_args["persistent_workers"]
         self.pin_memory         = loader_args["pin_memory"]
 
+        # Update loader_args with the overridden num_workers value
+        loader_args["num_workers"] = self.num_workers
+        loader_args["persistent_workers"] = bool(self.num_workers)
+
         # DataLoader doesn't accept None for prefetch_factor, so strip it if absent
         if loader_args.get("prefetch_factor", None) is None:
             loader_args.pop("prefetch_factor", None)
