@@ -231,12 +231,16 @@ class Trainer():
             print("{} total parameters".format(sum(param.numel() for param in self.Model.parameters())))
 
         if saved_model is not None:
-            state_dict = torch.load(saved_model, map_location="cpu")
-            # Load into underlying module if DataParallel/DDP is active
-            target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
-            target_module.load_state_dict(state_dict)
-            if self.is_main:
-                print(f"[load] restored weights from {saved_model}")
+            if os.path.exists(saved_model):
+                state_dict = torch.load(saved_model, map_location="cpu")
+                # Load into underlying module if DataParallel/DDP is active
+                target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
+                target_module.load_state_dict(state_dict)
+                if self.is_main:
+                    print(f"[load] restored weights from {saved_model}")
+            else:
+                if self.is_main:
+                    print(f"[load] No saved model found at {saved_model}, starting with random weights")
 
         self.optimizer = optim.Adam(self.Model.parameters())
         self.loss_fn = nn.MSELoss()
