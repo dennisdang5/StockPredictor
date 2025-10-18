@@ -294,17 +294,47 @@ class ModelEvaluator:
         """
         metrics = {}
 
-        # mean return
+        # Calculate returns for both predictions and actual values
+        pred_returns = np.diff(predictions) / predictions[:-1]
+        true_returns = np.diff(targets) / targets[:-1]
+        
+        # Mean return
+        metrics['mean_prediction_return'] = np.mean(pred_returns)
+        metrics['mean_actual_return'] = np.mean(true_returns)
 
-        # annualized return
+        # Annualized return (assuming daily data, 252 trading days per year)
+        metrics['annualized_prediction_return'] = np.mean(pred_returns) * 252
+        metrics['annualized_actual_return'] = np.mean(true_returns) * 252
 
-        # excess return
+        # Excess return (prediction return - actual return)
+        excess_returns = pred_returns - true_returns
+        metrics['mean_excess_return'] = np.mean(excess_returns)
+        metrics['annualized_excess_return'] = np.mean(excess_returns) * 252
 
-        # share of positive returns
+        # Share of positive returns
+        metrics['share_positive_prediction_returns'] = np.sum(pred_returns > 0) / len(pred_returns) * 100
+        metrics['share_positive_actual_returns'] = np.sum(true_returns > 0) / len(true_returns) * 100
 
-        # cumulative money growth
+        # Cumulative money growth (assuming starting with $1)
+        pred_cumulative_growth = np.cumprod(1 + pred_returns)
+        true_cumulative_growth = np.cumprod(1 + true_returns)
+        
+        metrics['final_prediction_growth'] = pred_cumulative_growth[-1]  # Final value
+        metrics['final_actual_growth'] = true_cumulative_growth[-1]  # Final value
+        metrics['total_prediction_return'] = (pred_cumulative_growth[-1] - 1) * 100  # Total return %
+        metrics['total_actual_return'] = (true_cumulative_growth[-1] - 1) * 100  # Total return %
 
-        # random "monkey" benchmark
+        # Random "monkey" benchmark (random walk with same volatility as actual)
+        np.random.seed(42)  # For reproducibility
+        random_returns = np.random.normal(np.mean(true_returns), np.std(true_returns), len(true_returns))
+        random_cumulative_growth = np.cumprod(1 + random_returns)
+        
+        metrics['random_benchmark_final_growth'] = random_cumulative_growth[-1]
+        metrics['random_benchmark_total_return'] = (random_cumulative_growth[-1] - 1) * 100
+        metrics['random_benchmark_annualized_return'] = np.mean(random_returns) * 252
+        
+        # Performance vs random benchmark
+        metrics['outperformance_vs_random'] = (pred_cumulative_growth[-1] - random_cumulative_growth[-1]) * 100
         
         return metrics
         
