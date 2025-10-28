@@ -53,7 +53,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     
     # Create prediction-type specific file names
     prediction_suffix = f"_{prediction_type}"
-    npz_path = os.path.join(data_dir, base + prediction_suffix + ".npz")
+    npz_data_path = os.path.join(data_dir, base + prediction_suffix + ".npz")
 
     # Fast path: try to load prediction-type specific datasets first, then fall back to combined format
     if not force:
@@ -63,9 +63,9 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
             return separate_data
         
         # Fall back to prediction-type specific combined format if separate files don't exist
-        if os.path.exists(npz_path):
-            print(f"Prediction-type specific data file {npz_path} exists. Loading .npz ...")
-            return load_data_from_local(npz_path)
+        if os.path.exists(npz_data_path):
+            print(f"Prediction-type specific data file {npz_data_path} exists. Loading .npz ...")
+            return load_data_from_local(npz_data_path)
         
         # Fall back to old format without prediction type for backward compatibility
         old_npz_path = os.path.join(data_dir, base + ".npz")
@@ -138,6 +138,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
     val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
     test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
+    metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
     
     # Save training dataset
     _save_npz_progress(train_path, {
@@ -159,6 +160,10 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
         "Y": _to_np(Yte_f),
         "D": np.array(Dtest_f, dtype="datetime64[ns]")
     }, desc="Saving test dataset (.npz)")
+
+    _save_npz_progress(metrics_path, {
+        "D": np.array(Dtest_f, dtype="datetime64[ns]")
+    }, desc="Saving metrics dataset (.npz)")
     
     print(f"{prediction_type.title()} datasets saved separately:")
     print(f"  Training: {train_path}")
@@ -288,7 +293,14 @@ def get_feature_input_price(op, cp, lookback, study_period, num_stocks, date_ind
             if pd.isna(tgt):
                 dropped_nan_target += 1
                 continue
-            period = np.arange(end_t - lookback + 1, end_t + 1, dtype=int)
+
+            # {240, 220, 200, 180, 160, 140, 120, 100, 80, 60, 40} 2017 Fischer
+            period_long = np.arange(end_t - lookback + 1, end_t - 40 + 1, step=20, dtype=int)
+
+            # {20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
+            period_short = np.arange(end_t - 20 + 1, end_t + 1, step=1, dtype=int)
+
+            period = np.concatenate([period_long, period_short])
 
             # Build 4-feature window; skip if any feature is invalid over the window
             window = np.empty((lookback, 4), dtype=float)
@@ -349,11 +361,10 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
 
     T = study_period
     # Precompute elementary series (may contain NaNs)
-    f_t1 = np.full((num_stocks, 4, T), np.nan, dtype=float)
+    f_t1 = np.full((num_stocks,3, T), np.nan, dtype=float)
     rev_labels = np.full((num_stocks, T), np.nan, dtype=float)  # Initialize with NaN for proper alignment
-    
+    rev_t = np.full((num_stocks, T), np.nan, dtype=float)
     for t in range(2, T):
-        rev_t = []
         valid_stocks = []
         
         # First pass: collect valid revenues and their corresponding stock indices
@@ -365,25 +376,17 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
                 f_t1[n, 1, t] = c_t1 / c_t2 - 1.0     # cpr
             if pd.notna(o_t) and pd.notna(o_t1):
                 f_t1[n, 2, t] = o_t / o_t1 - 1.0      # opr
-            if pd.notna(o_t):
-                f_t1[n, 3, t] = o_t                   # op
             
             # Calculate revenue for valid stocks only
             if pd.notna(cp.iloc[n, t]) and pd.notna(op.iloc[n, t]):
-                revenue = cp.iloc[n, t] - op.iloc[n, t]
-                rev_t.append(revenue)
+                rev_t[n, t] = cp.iloc[n, t] - op.iloc[n, t]
                 valid_stocks.append(n)
         
         # Calculate median revenue at time t
-        if len(rev_t) > 0:
-            median_rev = np.median(rev_t)
-            
-            # Second pass: assign binary labels based on median
-            for i, n in enumerate(valid_stocks):
-                if rev_t[i] > median_rev:
-                    rev_labels[n, t] = 1.0  # Revenue > median
-                else:
-                    rev_labels[n, t] = 0.0  # Revenue <= median
+        rev_t_valid = rev_t[valid_stocks, t]
+        if len(rev_t_valid) > 0:
+            median_rev = np.median(rev_t_valid)
+            rev_labels[valid_stocks, t] = np.where(rev_t_valid > median_rev, 1.0, -1.0)
 
     X_list, y_list, d_list = [], [], []
     # --- counters ---
@@ -402,7 +405,14 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
             if pd.isna(tgt):
                 dropped_nan_target += 1
                 continue
-            period = np.arange(end_t - lookback + 1, end_t + 1, dtype=int)
+
+            # {240, 220, 200, 180, 160, 140, 120, 100, 80, 60, 40}
+            period_long = np.arange(end_t - lookback + 1, end_t - 40 + 1, step=20, dtype=int)
+
+            # {20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
+            period_short = np.arange(end_t - 20 + 1, end_t + 1, step=1, dtype=int)
+
+            period = np.concatenate([period_long, period_short])
 
             # Build 4-feature window; skip if any feature is invalid over the window
             window = np.empty((lookback, 4), dtype=float)
@@ -440,9 +450,9 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
         print(f"[windows] removed breakdown — NaN target: {dropped_nan_target:,}, "
               f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,}, NaN open: {dropped_op_nan:,}")
 
-    X = np.array(X_list, dtype=float)   # (N, lookback, 4)
-    y = np.array(y_list, dtype=float)   # (N, 1)
-    dates = d_list                      # list of length N
+    X = np.array(X_list, dtype=float)   # (num_stocks, (lookback-40)/20 + 20, 4)
+    y = np.array(y_list, dtype=float)   # (num_stocks, 1)
+    dates = d_list                      # list of length num_stocks
     return X, y, dates
 
     """
@@ -456,6 +466,19 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     returns wrt to last cp = 
 
     """
+########################################################
+# metrics
+########################################################
+
+# clasification metrics pseudocode 
+# target_differences of shape (num_stocks, 1, T)
+def get_classification_metrics(target_differences):
+    # 
+"""
+return
+
+"""
+
 
 ########################################################
 # model

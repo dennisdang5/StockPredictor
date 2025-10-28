@@ -297,6 +297,9 @@ class ModelEvaluator:
         # Calculate returns for both predictions and actual values
         pred_returns = np.diff(predictions) / predictions[:-1]
         true_returns = np.diff(targets) / targets[:-1]
+
+        #
+        
         
         # Mean return
         metrics['mean_prediction_return'] = np.mean(pred_returns)
