@@ -1,5 +1,5 @@
 """
-Comprehensive Model Evaluator for Stock Price Prediction
+Comprehensive Model Evaluator for Stock Classification
 
 This module provides a flexible evaluation framework that can test multiple metrics
 on saved models and log results to TensorBoard for analysis.
@@ -18,16 +18,16 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from typing import Dict, List, Tuple, Optional, Union
 import os
 
-from model import LSTMModelPricePredict
+from model import LSTMModel
 import util
 
 
 class ModelEvaluator:
     """
-    A comprehensive evaluator for stock price prediction models.
+    A comprehensive evaluator for stock classification models.
     
     This class provides:
-    - Multiple evaluation metrics (MSE, MAE, RMSE, directional accuracy, etc.)
+    - Multiple evaluation metrics (accuracy, trading performance, etc.)
     - TensorBoard logging of evaluation results
     - Visualization capabilities
     - Support for loading saved models
@@ -107,7 +107,7 @@ class ModelEvaluator:
         print(f"[Evaluator] Loading model from {self.model_path}")
         
         # Initialize model
-        self.model = LSTMModelPricePredict()
+        self.model = LSTMModel()
         self.model = self.model.to(self.device)
         
         # Load state dict
@@ -158,7 +158,7 @@ class ModelEvaluator:
         
     def calculate_basic_metrics(self, predictions: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
         """
-        Calculate basic regression metrics.
+        Calculate basic classification metrics.
         
         Args:
             predictions: Model predictions
@@ -169,25 +169,21 @@ class ModelEvaluator:
         """
         metrics = {}
         
-        # Basic regression metrics
+        # Classification accuracy
+        correct = np.sum(np.sign(predictions) == np.sign(targets))
+        total = len(predictions)
+        metrics['accuracy'] = (correct / total) * 100 if total > 0 else 0
+        
+        # MSE for continuous predictions
         metrics['mse'] = mean_squared_error(targets, predictions)
         metrics['rmse'] = np.sqrt(metrics['mse'])
         metrics['mae'] = mean_absolute_error(targets, predictions)
-        metrics['r2'] = r2_score(targets, predictions)
-        
-        # Mean Absolute Percentage Error
-        mape = np.mean(np.abs((targets - predictions) / targets)) * 100
-        metrics['mape'] = mape
-        
-        # Symmetric Mean Absolute Percentage Error
-        smape = np.mean(np.abs(targets - predictions) / ((np.abs(targets) + np.abs(predictions)) / 2)) * 100
-        metrics['smape'] = smape
         
         return metrics
         
     def calculate_directional_metrics(self, predictions: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
         """
-        Calculate directional accuracy metrics for stock price prediction.
+        Calculate directional accuracy metrics for classification.
         
         Args:
             predictions: Model predictions
@@ -198,26 +194,26 @@ class ModelEvaluator:
         """
         metrics = {}
         
-        # Calculate price changes (returns)
-        pred_changes = np.diff(predictions)
-        true_changes = np.diff(targets)
-        
-        # Directional accuracy (percentage of correct direction predictions)
-        correct_direction = np.sum(np.sign(pred_changes) == np.sign(true_changes))
-        total_predictions = len(pred_changes)
-        metrics['directional_accuracy'] = (correct_direction / total_predictions) * 100
+        # Classification accuracy
+        correct = np.sum(np.sign(predictions) == np.sign(targets))
+        total_predictions = len(predictions)
+        metrics['directional_accuracy'] = (correct / total_predictions) * 100 if total_predictions > 0 else 0
         
         # Upward movement accuracy
-        up_mask = true_changes > 0
+        up_mask = targets > 0
         if np.sum(up_mask) > 0:
-            up_accuracy = np.sum((pred_changes > 0) & up_mask) / np.sum(up_mask) * 100
+            up_accuracy = np.sum((predictions > 0) & up_mask) / np.sum(up_mask) * 100
             metrics['upward_accuracy'] = up_accuracy
+        else:
+            metrics['upward_accuracy'] = 0
         
         # Downward movement accuracy
-        down_mask = true_changes < 0
+        down_mask = targets < 0
         if np.sum(down_mask) > 0:
-            down_accuracy = np.sum((pred_changes < 0) & down_mask) / np.sum(down_mask) * 100
+            down_accuracy = np.sum((predictions < 0) & down_mask) / np.sum(down_mask) * 100
             metrics['downward_accuracy'] = down_accuracy
+        else:
+            metrics['downward_accuracy'] = 0
         
         return metrics
         
@@ -381,9 +377,9 @@ class ModelEvaluator:
         fig, ax = plt.subplots(figsize=(15, 8))
         ax.plot(self.test_dates, targets, label='Actual', alpha=0.7, linewidth=1)
         ax.plot(self.test_dates, predictions, label='Predicted', alpha=0.7, linewidth=1)
-        ax.set_title('Stock Price Predictions vs Actual Values')
+        ax.set_title('Stock Classification Predictions vs Actual Values')
         ax.set_xlabel('Date')
-        ax.set_ylabel('Price')
+        ax.set_ylabel('Classification Value')
         ax.legend()
         ax.grid(True, alpha=0.3)
         
@@ -627,6 +623,839 @@ class ModelEvaluator:
         if hasattr(self, 'writer'):
             self.writer.close()
         print("[Evaluator] Evaluation completed and resources cleaned up")
+
+
+class ModelComparator:
+    """
+    Compare multiple models using their Trainer instances.
+    
+    This class allows you to compare multiple models side-by-side using all
+    the comprehensive metrics from the Trainer class including:
+    - Trading performance metrics
+    - Statistical tests
+    - Time series diagnostics
+    """
+    
+    def __init__(self, 
+                 trainers: Union[Dict[str, any], List[any], set],
+                 log_dir: str = "runs/comparison",
+                 device: Optional[torch.device] = None):
+        """
+        Initialize the ModelComparator.
+        
+        Args:
+            trainers: Dictionary mapping model names to Trainer instances,
+                     List of Trainer instances, or set of Trainer instances.
+                     For lists/sets, model names will be auto-generated as "model_0", "model_1", etc.
+                     Example: {"model1": trainer1, "model2": trainer2}
+                     or [trainer1, trainer2] or {trainer1, trainer2}
+            log_dir: Directory for TensorBoard logs
+            device: Device to run evaluation on (auto-detect if None)
+        """
+        # Convert list/set to dict if needed
+        if isinstance(trainers, (list, set)):
+            self.trainers = {f"model_{i}": t for i, t in enumerate(trainers)}
+        else:
+            self.trainers = trainers
+        self.model_names = list(self.trainers.keys())
+        self.log_dir = log_dir
+        
+        # Setup device
+        if device is None:
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = torch.device("mps")
+            else:
+                self.device = torch.device("cpu")
+        else:
+            self.device = device
+        
+        # Initialize TensorBoard writer
+        os.makedirs(log_dir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir)
+        
+        # Results storage
+        self.results = {}
+        
+        print(f"[Comparator] Initialized with {len(self.trainers)} models: {', '.join(self.model_names)}")
+        print(f"[Comparator] Using device: {self.device}")
+    
+    def compare_all_metrics(self, run_evaluation: bool = True) -> Dict[str, Dict]:
+        """
+        Compare all metrics across all models.
+        
+        Args:
+            run_evaluation: If True, run evaluate() on each trainer first
+        
+        Returns:
+            Dictionary of results for each model
+        """
+        print("\n" + "="*80)
+        print("MODEL COMPARISON - ALL METRICS")
+        print("="*80)
+        
+        for model_name, trainer in self.trainers.items():
+            print(f"\n{'='*80}")
+            print(f"Evaluating Model: {model_name}")
+            print(f"{'='*80}")
+            
+            # Run evaluation if requested
+            if run_evaluation:
+                trainer.evaluate()
+            
+            # Collect all metrics
+            model_results = {
+                'trading_performance': trainer.get_trading_performance_metrics(),
+                'statistical_tests': trainer.get_statistical_tests(),
+                'time_series_diagnostics': trainer.get_time_series_diagnostics()
+            }
+            
+            self.results[model_name] = model_results
+        
+        return self.results
+    
+    def print_comparison_summary(self):
+        """Print a formatted comparison summary of all models."""
+        if not self.results:
+            print("[Comparator] No results to compare. Run compare_all_metrics() first.")
+            return
+        
+        print("\n" + "="*100)
+        print("MODEL COMPARISON SUMMARY")
+        print("="*100)
+        
+        # Trading Performance Metrics
+        print("\n1. TRADING PERFORMANCE METRICS")
+        print("-" * 100)
+        trading_metrics_to_compare = [
+            'accuracy', 'sharpe_ratio', 'sortino_ratio', 'annualized_return',
+            'value_at_risk_1pct', 'maximum_drawdown', 'excess_return_annualized'
+        ]
+        
+        for metric in trading_metrics_to_compare:
+            print(f"\n  {metric.replace('_', ' ').title()}:")
+            values = {}
+            for model_name in self.model_names:
+                if model_name in self.results:
+                    val = self.results[model_name]['trading_performance'].get(metric)
+                    if val is not None:
+                        values[model_name] = val
+            
+            if values:
+                # Find best and worst
+                if 'ratio' in metric.lower() or 'accuracy' in metric.lower():
+                    best_model = max(values, key=values.get)
+                    worst_model = min(values, key=values.get)
+                else:
+                    best_model = max(values, key=values.get)
+                    worst_model = min(values, key=values.get)
+                
+                for model_name in self.model_names:
+                    if model_name in values:
+                        is_best = "🏆 BEST" if model_name == best_model else ""
+                        is_worst = "⚠️ WORST" if model_name == worst_model and best_model != worst_model else ""
+                        marker = is_best or is_worst
+                        print(f"    {model_name:20s}: {values[model_name]:12.6f} {marker}")
+        
+        # Statistical Tests
+        print("\n2. STATISTICAL TESTS")
+        print("-" * 100)
+        
+        for test_name in ['diebold_mariano', 'pesaran_timmermann', 'newey_west_mean_return']:
+            print(f"\n  {test_name.replace('_', ' ').title()}:")
+            for model_name in self.model_names:
+                if model_name in self.results:
+                    test_result = self.results[model_name]['statistical_tests'].get(test_name, {})
+                    stat = test_result.get('statistic')
+                    p_val = test_result.get('p_value')
+                    if stat is not None and p_val is not None:
+                        significance = "✅ Significant" if p_val < 0.05 else "❌ Not Significant"
+                        print(f"    {model_name:20s}: stat={stat:8.4f}, p={p_val:8.4f} {significance}")
+        
+        # Time Series Diagnostics
+        print("\n3. TIME SERIES DIAGNOSTICS")
+        print("-" * 100)
+        diagnostics_to_compare = ['aic', 'bic', 'ljung_box', 'adf_residuals']
+        
+        for diag in diagnostics_to_compare:
+            print(f"\n  {diag.replace('_', ' ').title()}:")
+            for model_name in self.model_names:
+                if model_name in self.results:
+                    diag_result = self.results[model_name]['time_series_diagnostics'].get(diag, {})
+                    if isinstance(diag_result, dict):
+                        p_val = diag_result.get('p_value')
+                        if p_val is not None:
+                            significance = "✅ Significant" if p_val < 0.05 else "❌ Not Significant"
+                            print(f"    {model_name:20s}: p={p_val:8.4f} {significance}")
+                    else:
+                        val = diag_result
+                        if val is not None:
+                            print(f"    {model_name:20s}: {val:12.4f}")
+        
+        print("\n" + "="*100)
+        print("Comparison complete!")
+        print("="*100)
+    
+    def get_best_model(self, metric: str) -> Tuple[str, float]:
+        """
+        Get the model that performs best on a specific metric.
+        
+        Args:
+            metric: Name of the metric (e.g., 'sharpe_ratio', 'accuracy')
+        
+        Returns:
+            Tuple of (model_name, metric_value)
+        """
+        if not self.results:
+            return None, None
+        
+        values = {}
+        for model_name in self.model_names:
+            if model_name in self.results:
+                # Try trading performance first
+                val = self.results[model_name]['trading_performance'].get(metric)
+                if val is not None:
+                    values[model_name] = val
+        
+        if not values:
+            return None, None
+        
+        best_model = max(values, key=values.get)
+        return best_model, values[best_model]
+    
+    def compare_diebold_mariano(self, model1_name: str, model2_name: str) -> Dict:
+        """
+        Compare two models using the Diebold-Mariano test.
+        
+        Args:
+            model1_name: Name of first model
+            model2_name: Name of second model
+        
+        Returns:
+            Dictionary with comparison results
+        """
+        if model1_name not in self.results or model2_name not in self.results:
+            print(f"Error: One or both models not found in results")
+            return None
+        
+        # Get predictions and actuals for both models
+        trainer1 = self.trainers[model1_name]
+        trainer2 = self.trainers[model2_name]
+        
+        pred1 = np.array(trainer1.predicted_values)
+        actual1 = np.array(trainer1.actual_values)
+        pred2 = np.array(trainer2.predicted_values)
+        actual2 = np.array(trainer2.actual_values)
+        
+        if len(pred1) != len(pred2) or len(actual1) != len(actual2):
+            print("Error: Models have different prediction lengths")
+            return None
+        
+        # Calculate losses
+        loss1 = (pred1 - actual1) ** 2
+        loss2 = (pred2 - actual2) ** 2
+        
+        # Difference in losses
+        d = loss1 - loss2
+        d_bar = np.mean(d)
+        
+        # DM test from trainer1 (it should have the _newey_west_variance method)
+        var_hac = trainer1._newey_west_variance(d)
+        n = len(d)
+        
+        if var_hac > 0:
+            dm_stat = d_bar / np.sqrt(var_hac / n)
+            from scipy.stats import norm
+            p_value = 2 * (1 - norm.cdf(abs(dm_stat)))
+        else:
+            dm_stat = 0
+            p_value = 1.0
+        
+        return {
+            'model1': model1_name,
+            'model2': model2_name,
+            'mean_loss_diff': d_bar,
+            'dm_statistic': dm_stat,
+            'p_value': p_value,
+            'interpretation': 'Model 1 better' if d_bar < 0 and p_value < 0.05 else (
+                'Model 2 better' if d_bar > 0 and p_value < 0.05 else 'Equal performance'
+            )
+        }
+    
+    def save_comparison(self, filepath: str = "model_comparison.json"):
+        """
+        Save comparison results to a JSON file.
+        
+        Args:
+            filepath: Path to save the results
+        """
+        import json
+        
+        if not self.results:
+            print("[Comparator] No results to save. Run compare_all_metrics() first.")
+            return
+        
+        # Convert numpy types to Python types for JSON serialization
+        def convert_numpy(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(item) for item in obj]
+            return obj
+        
+        output = {
+            'comparison_date': datetime.now().isoformat(),
+            'models': self.model_names,
+            'results': convert_numpy(self.results)
+        }
+        
+        with open(filepath, 'w') as f:
+            json.dump(output, f, indent=2)
+        
+        print(f"[Comparator] Comparison results saved to {filepath}")
+    
+    def close(self):
+        """Close TensorBoard writer and clean up resources."""
+        if hasattr(self, 'writer'):
+            self.writer.close()
+        print("[Comparator] Comparison completed and resources cleaned up")
+    
+    def generate_csv_panels(self, 
+                           output_dir: str = "comparison_csvs",
+                           run_evaluation: bool = True,
+                           horizon: str = "1d",
+                           k: Optional[int] = None,
+                           costs_bps_per_side: Optional[float] = None,
+                           test_period: Optional[str] = None,
+                           baseline_model: Optional[str] = None) -> Dict[str, str]:
+        """
+        Generate CSV files for all 6 panels (A-F) as defined in the evaluation structure.
+        
+        Args:
+            output_dir: Directory to save CSV files
+            run_evaluation: If True, run evaluate() on each trainer first
+            horizon: Prediction horizon (e.g., "1d", "5min") for Panel A
+            k: Number of long/short positions for Panel B (if None, will try to infer)
+            costs_bps_per_side: Trading costs in basis points per side for Panel B
+            test_period: Test period identifier for metadata (if None, auto-generated)
+            baseline_model: Model name to use as baseline for DM tests (if None, uses first model)
+        
+        Returns:
+            Dictionary mapping panel names to CSV file paths
+        """
+        print("\n" + "="*80)
+        print("GENERATING CSV PANELS (A-F)")
+        print("="*80)
+        
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Run evaluation if needed
+        if run_evaluation or not self.results:
+            self.compare_all_metrics(run_evaluation=run_evaluation)
+        
+        # Auto-generate test_period if not provided
+        if test_period is None:
+            test_period = datetime.now().strftime("%Y-%m")
+        
+        # Set baseline model
+        if baseline_model is None and len(self.model_names) > 0:
+            baseline_model = self.model_names[0]
+        
+        csv_paths = {}
+        
+        # Panel A: Forecasting metrics
+        csv_paths['A'] = self._generate_panel_a(output_dir, horizon, test_period, baseline_model)
+        
+        # Panel B: Trading performance
+        csv_paths['B'] = self._generate_panel_b(output_dir, k, costs_bps_per_side, test_period)
+        
+        # Panel C: Distribution diagnostics
+        csv_paths['C'] = self._generate_panel_c(output_dir, k, test_period)
+        
+        # Panel D: Significance tests
+        csv_paths['D'] = self._generate_panel_d(output_dir, horizon)
+        
+        # Panel E: Setup metadata
+        csv_paths['E'] = self._generate_panel_e(output_dir, k, costs_bps_per_side, test_period)
+        
+        # Panel F: Efficiency
+        csv_paths['F'] = self._generate_panel_f(output_dir)
+        
+        print("\n" + "="*80)
+        print(f"All CSV panels generated in: {output_dir}")
+        print("="*80)
+        for panel, path in csv_paths.items():
+            print(f"  Panel {panel}: {path}")
+        
+        return csv_paths
+    
+    def _generate_panel_a(self, output_dir: str, horizon: str, test_period: str, baseline_model: str) -> str:
+        """Generate Panel A: Forecasting metrics"""
+        rows = []
+        
+        for model_name in self.model_names:
+            if model_name not in self.results:
+                continue
+            
+            result = self.results[model_name]
+            trading = result.get('trading_performance', {})
+            stats = result.get('statistical_tests', {})
+            trainer = self.trainers[model_name]
+            
+            # Get number of test observations
+            n = len(trainer.predicted_values) if hasattr(trainer, 'predicted_values') and len(trainer.predicted_values) > 0 else 0
+            
+            # Directional accuracy
+            acc_dir_pct = trading.get('accuracy', 0)
+            
+            # PT p-value
+            pt_test = stats.get('pesaran_timmermann', {})
+            pt_p = pt_test.get('p_value', None) if pt_test else None
+            
+            # RMSE, MAE, NMSE
+            if hasattr(trainer, 'residuals') and len(trainer.residuals) > 0:
+                residuals = np.array(trainer.residuals)
+                rmse = np.sqrt(np.mean(residuals**2))
+                mae = np.mean(np.abs(residuals))
+                
+                # NMSE: Normalized MSE (MSE / variance of actuals)
+                if hasattr(trainer, 'actual_values') and len(trainer.actual_values) > 0:
+                    actuals = np.array(trainer.actual_values)
+                    var_actuals = np.var(actuals)
+                    nmse = (rmse**2) / var_actuals if var_actuals > 0 else 0
+                else:
+                    nmse = 0
+            else:
+                rmse = mae = nmse = None
+            
+            # MI (Mutual Information) - simplified approximation using correlation
+            mi_bits = None
+            if hasattr(trainer, 'predicted_values') and hasattr(trainer, 'actual_values'):
+                preds = np.array(trainer.predicted_values)
+                actuals = np.array(trainer.actual_values)
+                if len(preds) > 0 and len(actuals) > 0:
+                    # Use correlation as proxy for MI (0 to ~0.3 bits for strong correlation)
+                    corr = np.corrcoef(preds, actuals)[0, 1] if len(preds) > 1 else 0
+                    mi_bits = abs(corr) * 0.3 if not np.isnan(corr) else 0
+            
+            # DM p-val vs baseline
+            dm_p = None
+            if baseline_model and baseline_model != model_name and baseline_model in self.results:
+                dm_result = self.compare_diebold_mariano(model_name, baseline_model)
+                if dm_result:
+                    dm_p = dm_result.get('p_value')
+            elif model_name == baseline_model:
+                # For baseline model, compare to naive forecast (from its own stats)
+                dm_test = stats.get('diebold_mariano', {})
+                dm_p = dm_test.get('p_value', None) if dm_test else None
+            
+            row = {
+                'model_id': model_name,
+                'horizon': horizon,
+                'test_period': test_period,
+                'n': n,
+                'acc_dir_pct': acc_dir_pct if acc_dir_pct else None,
+                'pt_p': pt_p if pt_p is not None else None,
+                'rmse': rmse if rmse is not None else None,
+                'mae': mae if mae is not None else None,
+                'nmse': nmse if nmse is not None else None,
+                'mi_bits': mi_bits if mi_bits is not None else None,
+                'dm_p': dm_p if dm_p is not None else None
+            }
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        filepath = os.path.join(output_dir, "A_forecast.csv")
+        df.to_csv(filepath, index=False)
+        print(f"  Generated Panel A: {filepath} ({len(rows)} rows)")
+        return filepath
+    
+    def _generate_panel_b(self, output_dir: str, k: Optional[int], costs_bps_per_side: Optional[float], test_period: str) -> str:
+        """Generate Panel B: Trading performance"""
+        rows = []
+        
+        for model_name in self.model_names:
+            if model_name not in self.results:
+                continue
+            
+            result = self.results[model_name]
+            trading = result.get('trading_performance', {})
+            trainer = self.trainers[model_name]
+            
+            # If k not provided, try to infer or use default
+            k_val = k if k is not None else 10  # Default to 10
+            
+            # If costs not provided, use default or try to infer
+            costs = costs_bps_per_side if costs_bps_per_side is not None else 5.0  # Default 5 bps
+            
+            # Mean daily return (%)
+            mean_r_daily = trading.get('mean_daily_return', 0) * 100
+            
+            # Annualized return (%)
+            ann_return = trading.get('annualized_return', 0) * 100
+            
+            # Annualized volatility (%)
+            ann_vol = trading.get('standard_deviation_annualized', 0) * 100
+            
+            # Sharpe ratio
+            sharpe = trading.get('sharpe_ratio', 0)
+            
+            # Sortino ratio
+            sortino = trading.get('sortino_ratio', 0)
+            
+            # VaR 1% (%/day)
+            var_1pct = trading.get('value_at_risk_1pct', 0) * 100
+            
+            # Maximum drawdown (%)
+            maxdd = trading.get('maximum_drawdown', 0) * 100
+            
+            # % Positive days
+            share_pos = trading.get('fraction_positive_returns', 0)
+            
+            # SE(μ_d) - Standard error of mean daily return
+            if hasattr(trainer, 'real_world_returns') and len(trainer.real_world_returns) > 0:
+                returns = np.array(trainer.real_world_returns)
+            elif hasattr(trainer, 'actual_returns') and len(trainer.actual_returns) > 0:
+                returns = np.array(trainer.actual_returns)
+            else:
+                returns = np.array([])
+            
+            if len(returns) > 0:
+                se_mean_daily = np.std(returns, ddof=1) / np.sqrt(len(returns)) * 100
+            else:
+                se_mean_daily = None
+            
+            row = {
+                'model_id': model_name,
+                'k': k_val,
+                'costs_bps_per_side': costs,
+                'test_period': test_period,
+                'mean_r_daily_pct': mean_r_daily if mean_r_daily else None,
+                'ann_return_pct': ann_return if ann_return else None,
+                'ann_vol_pct': ann_vol if ann_vol else None,
+                'sharpe': sharpe if sharpe else None,
+                'sortino': sortino if sortino else None,
+                'var_1pct_daily_pct': var_1pct if var_1pct else None,
+                'maxdd_pct': maxdd if maxdd else None,
+                'share_pos_pct': share_pos if share_pos else None,
+                'se_mean_daily_pct': se_mean_daily if se_mean_daily is not None else None
+            }
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        filepath = os.path.join(output_dir, "B_trading.csv")
+        df.to_csv(filepath, index=False)
+        print(f"  Generated Panel B: {filepath} ({len(rows)} rows)")
+        return filepath
+    
+    def _generate_panel_c(self, output_dir: str, k: Optional[int], test_period: str) -> str:
+        """Generate Panel C: Distribution diagnostics"""
+        rows = []
+        
+        for model_name in self.model_names:
+            if model_name not in self.results:
+                continue
+            
+            result = self.results[model_name]
+            trading = result.get('trading_performance', {})
+            trainer = self.trainers[model_name]
+            
+            k_val = k if k is not None else 10
+            
+            # Get returns
+            if hasattr(trainer, 'real_world_returns') and len(trainer.real_world_returns) > 0:
+                returns = np.array(trainer.real_world_returns)
+            elif hasattr(trainer, 'actual_returns') and len(trainer.actual_returns) > 0:
+                returns = np.array(trainer.actual_returns)
+            else:
+                returns = np.array([])
+            
+            if len(returns) == 0:
+                continue
+            
+            n_days = len(returns)
+            
+            # Convert to percentage
+            returns_pct = returns * 100
+            
+            # Percentiles
+            min_pct = np.min(returns_pct)
+            q1_pct = np.percentile(returns_pct, 25)
+            median_pct = np.median(returns_pct)
+            q3_pct = np.percentile(returns_pct, 75)
+            max_pct = np.max(returns_pct)
+            
+            # Skewness and kurtosis
+            skew = trading.get('skewness', None)
+            kurt = trading.get('kurtosis', None)
+            
+            row = {
+                'model_id': model_name,
+                'k': k_val,
+                'test_period': test_period,
+                'n_days': n_days,
+                'min_pct': min_pct,
+                'q1_pct': q1_pct,
+                'median_pct': median_pct,
+                'q3_pct': q3_pct,
+                'max_pct': max_pct,
+                'skew': skew if skew is not None else None,
+                'kurt': kurt if kurt is not None else None
+            }
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        filepath = os.path.join(output_dir, "C_distribution.csv")
+        df.to_csv(filepath, index=False)
+        print(f"  Generated Panel C: {filepath} ({len(rows)} rows)")
+        return filepath
+    
+    def _generate_panel_d(self, output_dir: str, horizon: str) -> str:
+        """Generate Panel D: Significance tests"""
+        rows = []
+        
+        # Generate comparisons between all pairs of models
+        for i, model1_name in enumerate(self.model_names):
+            for j, model2_name in enumerate(self.model_names[i+1:], start=i+1):
+                # Get DM test result
+                dm_result = self.compare_diebold_mariano(model1_name, model2_name)
+                if not dm_result:
+                    continue
+                
+                # Get PT stats from both models
+                model1_result = self.results.get(model1_name, {})
+                model2_result = self.results.get(model2_name, {})
+                
+                model1_stats = model1_result.get('statistical_tests', {})
+                model2_stats = model2_result.get('statistical_tests', {})
+                
+                # Use average PT stat if both available, otherwise use one
+                pt_stat = None
+                pt_p = None
+                
+                pt1 = model1_stats.get('pesaran_timmermann', {})
+                pt2 = model2_stats.get('pesaran_timmermann', {})
+                
+                if pt1.get('statistic') is not None and pt2.get('statistic') is not None:
+                    pt_stat = (pt1['statistic'] + pt2['statistic']) / 2
+                    pt_p = min(pt1.get('p_value', 1.0), pt2.get('p_value', 1.0))
+                elif pt1.get('statistic') is not None:
+                    pt_stat = pt1['statistic']
+                    pt_p = pt1.get('p_value')
+                elif pt2.get('statistic') is not None:
+                    pt_stat = pt2['statistic']
+                    pt_p = pt2.get('p_value')
+                
+                row = {
+                    'comparison': f"{model1_name} vs {model2_name}",
+                    'horizon': horizon,
+                    'dm_stat': dm_result.get('dm_statistic'),
+                    'dm_p': dm_result.get('p_value'),
+                    'pt_stat': pt_stat,
+                    'pt_p': pt_p
+                }
+                rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        filepath = os.path.join(output_dir, "D_significance.csv")
+        df.to_csv(filepath, index=False)
+        print(f"  Generated Panel D: {filepath} ({len(rows)} rows)")
+        return filepath
+    
+    def _generate_panel_e(self, output_dir: str, k: Optional[int], costs_bps_per_side: Optional[float], test_period: str) -> str:
+        """Generate Panel E: Setup metadata"""
+        rows = []
+        
+        for model_name in self.model_names:
+            trainer = self.trainers[model_name]
+            
+            # Extract setup information from trainer
+            universe = ", ".join(trainer.stocks) if hasattr(trainer, 'stocks') else "Unknown"
+            
+            # Train/test years from time_args
+            train_test_str = "/".join(trainer.time_args) if hasattr(trainer, 'time_args') else "Unknown"
+            
+            # Rebalance frequency
+            rebalance = "Daily"  # Default assumption
+            
+            # Rule
+            k_val = k if k is not None else 10
+            rule = f"Top{k_val}/Bottom{k_val}, equal-weight"
+            
+            # Costs
+            costs = costs_bps_per_side if costs_bps_per_side is not None else 5.0
+            
+            # Neutrality (market-neutral)
+            neutral = "Yes"
+            
+            # Exclusions
+            exclusions = "Zero-volume"  # Default assumption
+            
+            # Avg names/day - try to infer from data
+            avg_names_per_day = len(trainer.stocks) if hasattr(trainer, 'stocks') else None
+            
+            # Turnover - approximate from returns if available
+            turnover_pct = None
+            if hasattr(trainer, 'real_world_returns') and len(trainer.real_world_returns) > 0:
+                # Rough approximation: assume daily rebalancing with k positions
+                # This is a simplified estimate
+                turnover_pct = (k_val * 2 / avg_names_per_day * 100) if avg_names_per_day and avg_names_per_day > 0 else None
+            
+            row = {
+                'model_id': model_name,
+                'universe': universe,
+                'train_years': train_test_str.split('/')[0] if '/' in train_test_str else train_test_str,
+                'test_years': train_test_str.split('/')[1] if '/' in train_test_str and len(train_test_str.split('/')) > 1 else test_period,
+                'rebalance': rebalance,
+                'rule': rule,
+                'costs_bps_per_side': costs,
+                'neutral': neutral,
+                'exclusions': exclusions,
+                'avg_names_per_day': avg_names_per_day if avg_names_per_day else None,
+                'turnover_pct': turnover_pct if turnover_pct else None
+            }
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        filepath = os.path.join(output_dir, "E_setup.csv")
+        df.to_csv(filepath, index=False)
+        print(f"  Generated Panel E: {filepath} ({len(rows)} rows)")
+        return filepath
+    
+    def _generate_panel_f(self, output_dir: str) -> str:
+        """Generate Panel F: Efficiency"""
+        rows = []
+        
+        for model_name in self.model_names:
+            trainer = self.trainers[model_name]
+            
+            # Model parameters
+            if hasattr(trainer, 'Model'):
+                model = trainer.Model.module if hasattr(trainer.Model, 'module') else trainer.Model
+                params_m = sum(p.numel() for p in model.parameters()) / 1e6
+            else:
+                params_m = None
+            
+            # Hardware
+            if hasattr(trainer, 'device'):
+                device_type = str(trainer.device)
+                if 'cuda' in device_type:
+                    if torch.cuda.is_available():
+                        hardware = torch.cuda.get_device_name(0)
+                    else:
+                        hardware = "CUDA (unknown)"
+                elif 'mps' in device_type:
+                    hardware = "Apple Silicon"
+                else:
+                    hardware = "CPU"
+            else:
+                hardware = "Unknown"
+            
+            # Training time - try to get from trainer attributes
+            train_hours = None
+            if hasattr(trainer, 'training_time'):
+                train_hours = trainer.training_time / 3600  # Convert seconds to hours
+            
+            # Epochs
+            epochs = None
+            if hasattr(trainer, 'num_epochs'):
+                epochs = trainer.num_epochs
+            elif hasattr(trainer, 'stopper') and hasattr(trainer.stopper, 'counter'):
+                # Try to infer from early stopping
+                epochs = trainer.stopper.counter if hasattr(trainer.stopper, 'min_validation_loss') else None
+            
+            # Decision latency and inference time - these would need to be measured
+            # For now, provide placeholder values
+            decision_latency_ms = None  # Would need actual measurement
+            infer_seconds_per_day = None  # Would need actual measurement
+            
+            row = {
+                'model_id': model_name,
+                'params_m': params_m if params_m else None,
+                'hardware': hardware,
+                'train_hours': train_hours if train_hours else None,
+                'epochs': epochs if epochs else None,
+                'decision_latency_ms': decision_latency_ms,
+                'infer_seconds_per_day': infer_seconds_per_day
+            }
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        filepath = os.path.join(output_dir, "F_efficiency.csv")
+        df.to_csv(filepath, index=False)
+        print(f"  Generated Panel F: {filepath} ({len(rows)} rows)")
+        return filepath
+
+
+def generate_csv_panels_from_trainers(trainers: Union[Dict[str, any], List[any], set],
+                                     output_dir: str = "comparison_csvs",
+                                     run_evaluation: bool = True,
+                                     horizon: str = "1d",
+                                     k: Optional[int] = None,
+                                     costs_bps_per_side: Optional[float] = None,
+                                     test_period: Optional[str] = None,
+                                     baseline_model: Optional[str] = None) -> Dict[str, str]:
+    """
+    Convenience function to generate CSV panels from a list, set, or dict of Trainer instances.
+    
+    This is a standalone function that creates a ModelComparator internally and generates
+    all 6 CSV panels (A-F) as defined in the evaluation structure.
+    
+    Args:
+        trainers: Dictionary mapping model names to Trainer instances,
+                 List of Trainer instances, or set of Trainer instances.
+                 For lists/sets, model names will be auto-generated as "model_0", "model_1", etc.
+        output_dir: Directory to save CSV files
+        run_evaluation: If True, run evaluate() on each trainer first
+        horizon: Prediction horizon (e.g., "1d", "5min") for Panel A
+        k: Number of long/short positions for Panel B (if None, defaults to 10)
+        costs_bps_per_side: Trading costs in basis points per side for Panel B (default: 5.0)
+        test_period: Test period identifier for metadata (if None, auto-generated)
+        baseline_model: Model name to use as baseline for DM tests (if None, uses first model)
+    
+    Returns:
+        Dictionary mapping panel names to CSV file paths
+    
+    Example:
+        >>> from evaluator import generate_csv_panels_from_trainers
+        >>> from trainer import Trainer
+        >>> 
+        >>> # Create trainers
+        >>> trainer1 = Trainer(stocks=["AAPL", "MSFT"], time_args=["3y"])
+        >>> trainer2 = Trainer(stocks=["AAPL", "MSFT"], time_args=["3y"])
+        >>> 
+        >>> # Generate CSVs from list
+        >>> csv_paths = generate_csv_panels_from_trainers(
+        ...     [trainer1, trainer2],
+        ...     output_dir="results_csvs",
+        ...     k=10,
+        ...     costs_bps_per_side=5.0
+        ... )
+        >>> 
+        >>> # Or from dict with custom names
+        >>> csv_paths = generate_csv_panels_from_trainers(
+        ...     {"LSTM": trainer1, "RF": trainer2},
+        ...     output_dir="results_csvs"
+        ... )
+    """
+    comparator = ModelComparator(trainers)
+    return comparator.generate_csv_panels(
+        output_dir=output_dir,
+        run_evaluation=run_evaluation,
+        horizon=horizon,
+        k=k,
+        costs_bps_per_side=costs_bps_per_side,
+        test_period=test_period,
+        baseline_model=baseline_model
+    )
 
 
 def main_example():

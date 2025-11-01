@@ -6,15 +6,7 @@ print("my code")
 start = "1989-12-01"
 end = "2015-09-30"
 prediction_type = "classification"
-model_path = None
-
-if prediction_type == "classification":
-    model_path = "savedmodel_classification.pth"
-elif prediction_type == "price":
-    model_path = "savedmodel_price.pth"
-else:
-    print("Invalid prediction type")
-    exit()
+model_path = "savedmodel_classification.pth"
 
 # Top 30 S&P 500 stocks by market cap (subset for testing)
 stocks = [

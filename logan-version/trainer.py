@@ -4,7 +4,7 @@ import torch
 import torch.optim as optim
 from torch import nn
 import torch.utils.data as data
-from model import LSTMModelPricePredict
+from model import LSTMModel
 import util
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
@@ -17,6 +17,11 @@ from helpers_workers import dataloader_kwargs, autotune_num_workers
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler
+from scipy.stats import norm
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.stattools import adfuller, acf, pacf
+import warnings
+warnings.filterwarnings('ignore')
 
 def setup_dist():
     if not torch.cuda.is_available() or os.getenv("RANK") is None:
@@ -104,7 +109,7 @@ class EarlyStopper():
         
 
 class Trainer():
-    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification"):
+    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0):
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
         self.rank = dist.get_rank() if self.is_dist else 0
@@ -115,6 +120,8 @@ class Trainer():
         self.time_args = time_args
         self.batch_size = batch_size
         self.prediction_type = prediction_type
+        self.k = k  # Number of top/bottom positions for long-short portfolio
+        self.cost_bps_per_side = cost_bps_per_side  # Transaction costs per side in basis points
         # Only rank 0 creates TensorBoard writer
         self.writer = SummaryWriter() if self.is_main else None
 
@@ -169,12 +176,12 @@ class Trainer():
         input_data = util.get_data(stocks, time_args, self.prediction_type)
         if isinstance(input_data, int):
             raise RuntimeError("Error getting data from util.get_data()")
-        X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test = input_data
+        X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test = input_data
         # Store dates for later reference (even when data is shuffled)
         self.train_dates = D_train
         self.val_dates = D_val
         self.test_dates = D_test
-        
+        self.test_revenues = Rev_test
         self.train_ds = IndexedDataset(X_train, Y_train, D_train)
         val_ds   = IndexedDataset(X_val,   Y_val,   D_val)
         test_ds  = IndexedDataset(X_test,  Y_test,  D_test)
@@ -211,7 +218,7 @@ class Trainer():
         # =========================
         # MODEL
         # =========================
-        self.Model = LSTMModelPricePredict()
+        self.Model = LSTMModel()
         
         # Move model to device first
         self.Model = self.Model.to(self.device)
@@ -246,6 +253,20 @@ class Trainer():
         self.loss_fn = nn.MSELoss()
         self.stopper = EarlyStopper(patience=50, min_delta=0.001, is_dist=self.is_dist, rank=self.rank)
         self.num_epochs = num_epochs
+        
+        # Storage for evaluation metrics
+        self.predicted_returns = []
+        self.actual_returns = []
+        self.predicted_values = []
+        self.actual_values = []
+        self.evaluation_dates = []
+        self.equity_curve = []
+        self.residuals = []
+        self.real_world_returns = []
+        self.daily_returns = []  # Daily portfolio returns (one per trading day)
+        
+        # Store model parameter count for AIC/BIC
+        self.num_model_parameters = sum(p.numel() for p in self.Model.parameters())
 
     def train_one_epoch(self, epoch):
 
@@ -483,10 +504,7 @@ class Trainer():
         try:
             # Convert dates to datetime objects for proper plotting
             if hasattr(dates[0], 'to_pydatetime'):
-                # pandas DatetimeIndex
-                datetime_dates = [date.to_pydatetime() for date in dates]
-            elif hasattr(dates[0], 'timestamp'):
-                # pandas Timestamp
+                # pandas DatetimeIndex or Timestamp
                 datetime_dates = [date.to_pydatetime() for date in dates]
             else:
                 # Already datetime or string
@@ -519,13 +537,635 @@ class Trainer():
         except Exception as e:
             print(f"Warning: Could not log loss vs date figure to TensorBoard: {e}")
 
+            
+
+
+    def get_trading_performance_metrics(self):
+        """
+        Calculate comprehensive trading performance metrics.
         
+        Returns:
+            dict: Dictionary containing all trading performance metrics
+        """
+        # Use daily portfolio returns if available, otherwise fall back to old data
+        if len(self.daily_returns) > 0:
+            returns = np.array(self.daily_returns)
+        elif len(self.real_world_returns) > 0:
+            returns = np.array(self.real_world_returns)
+        elif len(self.actual_returns) > 0:
+            returns = np.array(self.actual_returns)
+        else:
+            returns = np.array([])
+        
+        if len(returns) == 0:
+            return {}
+        
+        returns = returns.flatten()
+        n = len(returns)
+        
+        # Accuracy (for classification: correct sign predictions)
+        if len(self.predicted_values) > 0 and len(self.actual_values) > 0:
+            pred_vals = np.array(self.predicted_values).flatten()
+            actual_vals = np.array(self.actual_values).flatten()
+            # For classification: check if signs match
+            accuracy = np.mean(np.sign(pred_vals) == np.sign(actual_vals)) * 100
+        else:
+            accuracy = 0
+        
+        # Mean daily return
+        mu_daily = np.mean(returns)
+        
+        # Annualized return (assuming 252 trading days)
+        mu_ann = mu_daily * 252
+        
+        # Total return
+        total_return = (1 + returns).prod() - 1 if len(returns) > 0 else 0
+        
+        # Excess returns: Compare our returns vs baseline (actual returns or S&P 500)
+        # Use actual returns as baseline if available, otherwise use simple mean
+        baseline_returns = None
+        if len(self.actual_returns) > 0:
+            baseline_returns = np.array(self.actual_returns)
+        
+        if baseline_returns is not None and len(baseline_returns) > 0:
+            # Calculate excess returns vs baseline
+            if len(returns) == len(baseline_returns):
+                excess_returns = returns - baseline_returns
+                excess_daily = np.mean(excess_returns)
+            elif len(returns) == len(baseline_returns) + 1:
+                # Returns are one shorter due to diff
+                excess_returns = returns[:-1] - baseline_returns
+                excess_daily = np.mean(excess_returns)
+            else:
+                # Mismatched lengths, fall back to simple comparison
+                baseline_daily = np.mean(baseline_returns)
+                excess_daily = mu_daily - baseline_daily
+        else:
+            # No baseline available, set excess returns to 0
+            excess_daily = 0.0
+        
+        excess_ann = excess_daily * 252
+        
+        # Standard deviation (annualized)
+        sigma_daily = np.std(returns, ddof=1)
+        sigma_ann = sigma_daily * np.sqrt(252)
+        
+        # Risk-free rate (for Sharpe and Sortino ratios)
+        rf_ann = 0.0
+        rf_daily = rf_ann / 252
+        
+        # Sharpe ratio
+        sharpe = (mu_ann - rf_ann) / sigma_ann if sigma_ann > 0 else 0
+        
+        # Downside deviation (annualized) - MAR = 0 (minimum acceptable return)
+        MAR = 0
+        downside_returns = np.minimum(0, returns - MAR)
+        downside_var = np.mean(downside_returns ** 2)
+        downside_ann = np.sqrt(252 * downside_var)
+        
+        # Sortino ratio
+        sortino = (mu_ann - rf_ann) / downside_ann if downside_ann > 0 else 0
+        
+        # Value at Risk (VaR) at 1% (alpha = 0.01)
+        alpha = 0.01
+        var_alpha = -np.percentile(returns, alpha * 100)
+        
+        # Maximum drawdown
+        if len(self.equity_curve) > 0:
+            equity = np.array(self.equity_curve)
+        else:
+            # Build equity curve from returns
+            equity = np.cumprod(1 + returns)
+        
+        peak = np.maximum.accumulate(equity)
+        drawdown = (peak - equity) / peak
+        mdd = np.max(drawdown) if len(drawdown) > 0 else 0
+        
+        # Fraction of days with positive returns
+        share_pos = np.mean(returns > 0) * 100
+        
+        # Distribution summaries
+        rmin = np.min(returns)
+        q1 = np.percentile(returns, 25)
+        med = np.median(returns)
+        q3 = np.percentile(returns, 75)
+        rmax = np.max(returns)
+        
+        # Skewness
+        if sigma_daily > 0:
+            skew = np.mean(((returns - mu_daily) / sigma_daily) ** 3)
+        else:
+            skew = 0
+        
+        # Kurtosis
+        if sigma_daily > 0:
+            kurt = np.mean(((returns - mu_daily) / sigma_daily) ** 4)
+        else:
+            kurt = 0
+        
+        # Outperformance vs random (compare to zero-mean random walk)
+        random_benchmark_return = 0  # Random walk has zero expected return
+        outperformance = mu_ann - random_benchmark_return
+        
+        metrics = {
+            'accuracy': accuracy,
+            'mean_daily_return': mu_daily,
+            'annualized_return': mu_ann,
+            'total_return': total_return,
+            'excess_return_daily': excess_daily,
+            'excess_return_annualized': excess_ann,
+            'standard_deviation_daily': sigma_daily,
+            'standard_deviation_annualized': sigma_ann,
+            'sharpe_ratio': sharpe,
+            'downside_deviation_annualized': downside_ann,
+            'sortino_ratio': sortino,
+            'value_at_risk_1pct': var_alpha,
+            'maximum_drawdown': mdd,
+            'fraction_positive_returns': share_pos,
+            'outperformance_vs_random': outperformance,
+            'quantiles': {'q1': q1, 'median': med, 'q3': q3},
+            'skewness': skew,
+            'kurtosis': kurt,
+            'min_return': rmin,
+            'max_return': rmax
+        }
+        
+        return metrics
+
+    def _newey_west_variance(self, data, max_lag=None):
+        """
+        Compute Newey-West HAC (Heteroskedasticity and Autocorrelation Consistent) variance.
+        
+        Args:
+            data: 1D numpy array
+            max_lag: Maximum lag for autocorrelation (default: floor(4*(n/100)^(2/9)))
+        
+        Returns:
+            float: Newey-West variance estimate
+        """
+        data = np.array(data).flatten()
+        n = len(data)
+        
+        if n < 2:
+            return np.var(data, ddof=1)
+        
+        # Default lag selection rule
+        if max_lag is None:
+            max_lag = int(np.floor(4 * (n / 100) ** (2/9)))
+        
+        max_lag = min(max_lag, n - 1)
+        
+        # Mean-centered data
+        data_centered = data - np.mean(data)
+        
+        # Base variance (sample variance)
+        var_base = np.mean(data_centered ** 2)
+        
+        # Add autocorrelation adjustments
+        for lag in range(1, max_lag + 1):
+            weight = 1 - lag / (max_lag + 1)  # Bartlett kernel
+            autocov = np.mean(data_centered[:-lag] * data_centered[lag:])
+            var_base += 2 * weight * autocov
+        
+        return var_base
+    
+    def _pesaran_timmermann_stat(self, pred_sign, actual_sign):
+        """
+        Compute Pesaran-Timmermann test statistic for sign predictions.
+        
+        Args:
+            pred_sign: Array of predicted signs (+1 or -1)
+            actual_sign: Array of actual signs (+1 or -1)
+        
+        Returns:
+            float: PT test statistic
+        """
+        pred_sign = np.array(pred_sign).flatten()
+        actual_sign = np.array(actual_sign).flatten()
+        
+        n = len(pred_sign)
+        if n == 0:
+            return 0
+        
+        # Count successes (correct predictions)
+        n11 = np.sum((pred_sign > 0) & (actual_sign > 0))  # Pred +, Actual +
+        n12 = np.sum((pred_sign > 0) & (actual_sign <= 0))  # Pred +, Actual -
+        n21 = np.sum((pred_sign <= 0) & (actual_sign > 0))  # Pred -, Actual +
+        n22 = np.sum((pred_sign <= 0) & (actual_sign <= 0))  # Pred -, Actual -
+        
+        # Proportions
+        p1 = (n11 + n12) / n  # Proportion of positive predictions
+        p2 = (n11 + n21) / n  # Proportion of positive actuals
+        p = (n11 + n22) / n   # Proportion of correct predictions
+        
+        # Expected proportion under independence
+        p_star = p1 * p2 + (1 - p1) * (1 - p2)
+        
+        # Variance under independence
+        var_p = p_star * (1 - p_star) / n
+        
+        if var_p <= 0:
+            return 0
+        
+        # PT statistic
+        pt_stat = (p - p_star) / np.sqrt(var_p)
+        
+        return pt_stat
+
+    def get_statistical_tests(self):
+        """
+        Calculate statistical tests for model evaluation.
+        
+        Returns:
+            dict: Dictionary containing test results
+        """
+        tests = {}
+        
+        # Diebold-Mariano test
+        # Compare loss from model predictions vs baseline (e.g., naive forecast or actual mean)
+        if len(self.predicted_values) > 0 and len(self.actual_values) > 0:
+            pred_vals = np.array(self.predicted_values).flatten()
+            actual_vals = np.array(self.actual_values).flatten()
+            
+            # Loss from model predictions
+            loss1 = (pred_vals - actual_vals) ** 2
+            
+            # Baseline loss (e.g., naive forecast: use previous value or mean)
+            if len(actual_vals) > 1:
+                # Naive forecast: use previous actual value
+                baseline_pred = np.concatenate([[actual_vals[0]], actual_vals[:-1]])
+                loss2 = (baseline_pred - actual_vals) ** 2
+            else:
+                # Single value: compare to mean
+                baseline_pred = np.full_like(actual_vals, np.mean(actual_vals))
+                loss2 = (baseline_pred - actual_vals) ** 2
+            
+            # Difference in losses
+            d = loss1 - loss2
+            d_bar = np.mean(d)
+            
+            # Newey-West variance
+            var_hac = self._newey_west_variance(d)
+            n = len(d)
+            
+            # DM statistic
+            if var_hac > 0:
+                dm_stat = d_bar / np.sqrt(var_hac / n)
+                # Two-sided p-value
+                p_value_dm = 2 * (1 - norm.cdf(abs(dm_stat)))
+            else:
+                dm_stat = 0
+                p_value_dm = 1.0
+            
+            tests['diebold_mariano'] = {
+                'statistic': dm_stat,
+                'p_value': p_value_dm,
+                'mean_loss_diff': d_bar,
+                'interpretation': 'H0: Models have equal predictive ability. Reject if p < 0.05'
+            }
+        else:
+            tests['diebold_mariano'] = {'statistic': None, 'p_value': None}
+        
+        # Pesaran-Timmermann test
+        if len(self.predicted_values) > 0 and len(self.actual_values) > 0:
+            pred_vals = np.array(self.predicted_values).flatten()
+            actual_vals = np.array(self.actual_values).flatten()
+            
+            pred_sign = np.sign(pred_vals)
+            actual_sign = np.sign(actual_vals)
+            
+            pt_stat = self._pesaran_timmermann_stat(pred_sign, actual_sign)
+            
+            # Two-sided p-value
+            p_value_pt = 2 * (1 - norm.cdf(abs(pt_stat)))
+            
+            tests['pesaran_timmermann'] = {
+                'statistic': pt_stat,
+                'p_value': p_value_pt,
+                'interpretation': 'H0: No predictive power for sign. Reject if p < 0.05'
+            }
+        else:
+            tests['pesaran_timmermann'] = {'statistic': None, 'p_value': None}
+        
+        # Newey-West test for mean return
+        if len(self.real_world_returns) > 0:
+            returns = np.array(self.real_world_returns).flatten()
+        elif len(self.actual_returns) > 0:
+            returns = np.array(self.actual_returns).flatten()
+        else:
+            returns = np.array([])
+        
+        if len(returns) > 0:
+            mean_return = np.mean(returns)
+            n = len(returns)
+            
+            # Newey-West variance
+            var_nw = self._newey_west_variance(returns)
+            
+            # t-statistic
+            if var_nw > 0:
+                se_nw = np.sqrt(var_nw / n)
+                t_stat = mean_return / se_nw
+                
+                # p-value (two-sided t-test)
+                p_value_nw = 2 * (1 - norm.cdf(abs(t_stat)))
+            else:
+                t_stat = 0
+                p_value_nw = 1.0
+                se_nw = 0
+            
+            tests['newey_west_mean_return'] = {
+                'statistic': t_stat,
+                'p_value': p_value_nw,
+                'mean_return': mean_return,
+                'standard_error': se_nw,
+                'interpretation': 'H0: Mean return is zero. Reject if p < 0.05'
+            }
+        else:
+            tests['newey_west_mean_return'] = {'statistic': None, 'p_value': None}
+        
+        return tests
+
+    def get_time_series_diagnostics(self):
+        """
+        Calculate time series diagnostics for residuals and returns.
+        
+        Returns:
+            dict: Dictionary containing time series diagnostic metrics
+        """
+        diagnostics = {}
+        
+        # Get residuals (prediction errors)
+        if len(self.residuals) > 0:
+            residuals = np.array(self.residuals).flatten()
+        elif len(self.predicted_values) > 0 and len(self.actual_values) > 0:
+            pred_vals = np.array(self.predicted_values).flatten()
+            actual_vals = np.array(self.actual_values).flatten()
+            residuals = actual_vals - pred_vals
+        else:
+            residuals = np.array([])
+        
+        # Get returns for stationarity tests
+        if len(self.real_world_returns) > 0:
+            returns = np.array(self.real_world_returns).flatten()
+        elif len(self.actual_returns) > 0:
+            returns = np.array(self.actual_returns).flatten()
+        else:
+            returns = np.array([])
+        
+        # AIC and BIC (for residuals assuming normal distribution)
+        if len(residuals) > 0:
+            n = len(residuals)
+            
+            # Estimate log-likelihood assuming normal distribution
+            sigma_sq = np.var(residuals, ddof=1)
+            if sigma_sq > 0:
+                loglik = -0.5 * n * (np.log(2 * np.pi * sigma_sq) + 1)
+            else:
+                loglik = 0
+            
+            # Number of parameters - use stored model parameter count
+            k = self.num_model_parameters if hasattr(self, 'num_model_parameters') else 100
+            
+            aic = 2 * k - 2 * loglik
+            bic = k * np.log(n) - 2 * loglik
+            
+            diagnostics['aic'] = aic
+            diagnostics['bic'] = bic
+            diagnostics['log_likelihood'] = loglik
+            diagnostics['num_parameters'] = k  # Should be updated with actual parameter count
+        else:
+            diagnostics['aic'] = None
+            diagnostics['bic'] = None
+            diagnostics['log_likelihood'] = None
+        
+        # Ljung-Box test for autocorrelation in residuals
+        if len(residuals) > 0:
+            try:
+                # Use max lag based on data size (common: min(10, n/5))
+                max_lag = min(10, max(1, len(residuals) // 5))
+                
+                # Use statsmodels acorr_ljungbox
+                lb_result = acorr_ljungbox(residuals, lags=max_lag, return_df=True)
+                
+                # Extract Q statistic and p-value for the maximum lag
+                q_stat = lb_result['lb_stat'].iloc[-1]
+                p_value_lb = lb_result['lb_pvalue'].iloc[-1]
+                
+                diagnostics['ljung_box'] = {
+                    'q_statistic': q_stat,
+                    'p_value': p_value_lb,
+                    'max_lag': max_lag,
+                    'interpretation': 'H0: No autocorrelation. Reject if p < 0.05'
+                }
+            except Exception as e:
+                diagnostics['ljung_box'] = {
+                    'error': str(e),
+                    'interpretation': 'Could not compute Ljung-Box test'
+                }
+        else:
+            diagnostics['ljung_box'] = {'q_statistic': None, 'p_value': None}
+        
+        # ADF (Augmented Dickey-Fuller) stationarity test
+        if len(residuals) > 0:
+            try:
+                adf_result = adfuller(residuals, autolag='AIC')
+                adf_stat = adf_result[0]
+                p_value_adf = adf_result[1]
+                adf_critical = adf_result[4]
+                
+                diagnostics['adf_residuals'] = {
+                    'statistic': adf_stat,
+                    'p_value': p_value_adf,
+                    'critical_values': adf_critical,
+                    'interpretation': 'H0: Series is non-stationary. Reject if p < 0.05'
+                }
+            except Exception as e:
+                diagnostics['adf_residuals'] = {
+                    'error': str(e),
+                    'interpretation': 'Could not compute ADF test for residuals'
+                }
+        else:
+            diagnostics['adf_residuals'] = {'statistic': None, 'p_value': None}
+        
+        # ADF test for returns
+        if len(returns) > 0:
+            try:
+                adf_result_returns = adfuller(returns, autolag='AIC')
+                adf_stat_returns = adf_result_returns[0]
+                p_value_adf_returns = adf_result_returns[1]
+                adf_critical_returns = adf_result_returns[4]
+                
+                diagnostics['adf_returns'] = {
+                    'statistic': adf_stat_returns,
+                    'p_value': p_value_adf_returns,
+                    'critical_values': adf_critical_returns,
+                    'interpretation': 'H0: Series is non-stationary. Reject if p < 0.05'
+                }
+            except Exception as e:
+                diagnostics['adf_returns'] = {
+                    'error': str(e),
+                    'interpretation': 'Could not compute ADF test for returns'
+                }
+        else:
+            diagnostics['adf_returns'] = {'statistic': None, 'p_value': None}
+        
+        # ACF (Autocorrelation Function) and PACF (Partial Autocorrelation Function)
+        if len(residuals) > 0:
+            try:
+                max_lag_acf = min(40, max(1, len(residuals) // 4))
+                
+                # ACF
+                acf_vals = acf(residuals, nlags=max_lag_acf, fft=True)
+                
+                # PACF
+                pacf_vals = pacf(residuals, nlags=max_lag_acf)
+                
+                diagnostics['acf'] = {
+                    'values': acf_vals.tolist(),
+                    'max_lag': max_lag_acf,
+                    'first_lag': acf_vals[1] if len(acf_vals) > 1 else 0
+                }
+                
+                diagnostics['pacf'] = {
+                    'values': pacf_vals.tolist(),
+                    'max_lag': max_lag_acf,
+                    'first_lag': pacf_vals[1] if len(pacf_vals) > 1 else 0
+                }
+            except Exception as e:
+                diagnostics['acf'] = {'error': str(e)}
+                diagnostics['pacf'] = {'error': str(e)}
+        else:
+            diagnostics['acf'] = {'values': None}
+            diagnostics['pacf'] = {'values': None}
+        
+        # ACF/PACF for returns
+        if len(returns) > 0:
+            try:
+                max_lag_acf = min(40, max(1, len(returns) // 4))
+                
+                # ACF
+                acf_returns = acf(returns, nlags=max_lag_acf, fft=True)
+                
+                # PACF
+                pacf_returns = pacf(returns, nlags=max_lag_acf)
+                
+                diagnostics['acf_returns'] = {
+                    'values': acf_returns.tolist(),
+                    'max_lag': max_lag_acf,
+                    'first_lag': acf_returns[1] if len(acf_returns) > 1 else 0
+                }
+                
+                diagnostics['pacf_returns'] = {
+                    'values': pacf_returns.tolist(),
+                    'max_lag': max_lag_acf,
+                    'first_lag': pacf_returns[1] if len(pacf_returns) > 1 else 0
+                }
+            except Exception as e:
+                diagnostics['acf_returns'] = {'error': str(e)}
+                diagnostics['pacf_returns'] = {'error': str(e)}
+        else:
+            diagnostics['acf_returns'] = {'values': None}
+            diagnostics['pacf_returns'] = {'values': None}
+        
+        return diagnostics
+
+    def calculate_real_world_metrics(self, rev_pred, actual_rev=None, indices=None):
+        """
+        Calculate real-world trading metrics based on revenue predictions.
+        
+        Args:
+            rev_pred: Predicted revenue values (tensor or array)
+            actual_rev: Actual revenue values (optional, uses test_revenues if None)
+            indices: Batch indices to map to test data
+        """
+        # Convert to numpy
+        rev_pred = self._tensor_to_numpy(rev_pred)
+        if actual_rev is None:
+            # Use stored test revenues if available
+            if indices is not None and hasattr(self, 'test_revenues') and self.test_revenues is not None:
+                # Convert test_revenues to numpy if it's a tensor
+                if isinstance(self.test_revenues, torch.Tensor):
+                    test_revenues_np = self._tensor_to_numpy(self.test_revenues)
+                else:
+                    test_revenues_np = np.array(self.test_revenues)
+                
+                if hasattr(indices, 'tolist'):
+                    indices_list = indices.tolist()
+                else:
+                    indices_list = indices
+                actual_rev = np.array([test_revenues_np[idx] if idx < len(test_revenues_np) else 0 
+                                     for idx in indices_list])
+            else:
+                # If no actual revenue available, skip
+                return
+        
+        rev_pred = np.array(rev_pred).flatten()
+        actual_rev = np.array(actual_rev).flatten()
+        
+        if len(rev_pred) == 0 or len(actual_rev) == 0:
+            return
+        
+        # Get top k and bottom k stocks by revenue prediction
+        # For now, use k = min(10, len(stocks)//2) or a reasonable fraction
+        k = max(1, min(10, len(rev_pred) // 10))
+        
+        # Get top k indices (highest predicted revenue)
+        top_k_indices = np.argsort(rev_pred)[-k:]
+        # Get bottom k indices (lowest predicted revenue)
+        bottom_k_indices = np.argsort(rev_pred)[:k]
+        
+        # Calculate real revenue for top k and bottom k
+        # For classification: prediction is sign (-1 or 1), actual_rev is actual revenue
+        # Real return = sign(prediction) * actual_rev
+        top_k_real_rev = rev_pred[top_k_indices] * actual_rev[top_k_indices]
+        bottom_k_real_rev = rev_pred[bottom_k_indices] * actual_rev[bottom_k_indices]
+        
+        # Combined real returns (long top k, short bottom k)
+        real_returns = np.concatenate([top_k_real_rev, -bottom_k_real_rev])  # Short bottom k
+        
+        # Keep track of real-world returns
+        self.real_world_returns.extend(real_returns.tolist())
+        
+        # Calculate percentage of accurate predictions (real revenue > 0)
+        if len(real_returns) > 0:
+            accuracy = np.mean(real_returns > 0) * 100
+        else:
+            accuracy = 0
+        
+        # Update equity curve
+        if len(self.equity_curve) == 0:
+            self.equity_curve = [1.0]
+        else:
+            last_equity = self.equity_curve[-1]
+            # Update equity with average return for this batch
+            avg_return = np.mean(real_returns) if len(real_returns) > 0 else 0
+            self.equity_curve.append(last_equity * (1 + avg_return))
+
+
+
+
+
 
     def evaluate(self):
         self.Model.eval()
         test_loss = 0
         individual_losses = []
         individual_dates = []
+        
+        # Clear previous evaluation data
+        self.predicted_values = []
+        self.actual_values = []
+        self.predicted_returns = []
+        self.actual_returns = []
+        self.residuals = []
+        self.evaluation_dates = []
+        self.real_world_returns = []
+        self.equity_curve = []
+        self.daily_returns = []
+        
+        # Collect data by date for cross-sectional ranking
+        by_date = {}  # date -> list of (score, realized_return)
         
         with torch.no_grad():
             tbar = tqdm(self.testLoader, total=len(self.testLoader), 
@@ -536,18 +1176,49 @@ class Trainer():
                 
                 # Get dates for this batch
                 batch_dates = [self.test_dates[idx] for idx in indices.tolist()]
+                self.evaluation_dates.extend(batch_dates)
                 
                 if self.use_amp:
                     with torch.amp.autocast(device_type=self.device.type):
                         Y_pred = self.Model(X_batch)
-                        loss = self.loss_fn(Y_pred, Y_batch)
                 else:
                     Y_pred = self.Model(X_batch)
-                    loss = self.loss_fn(Y_pred, Y_batch)
                 
+                # Store predictions and actual values
+                Y_pred_np = self._tensor_to_numpy(Y_pred)
+                Y_batch_np = self._tensor_to_numpy(Y_batch)
+                
+                self.predicted_values.extend(Y_pred_np.flatten().tolist())
+                self.actual_values.extend(Y_batch_np.flatten().tolist())
+                
+                # Store residuals
+                residuals_np = Y_batch_np.flatten() - Y_pred_np.flatten()
+                self.residuals.extend(residuals_np.tolist())
+                
+                # Collect (date, score, realized_return) for cross-sectional ranking
+                if hasattr(self, 'test_revenues') and self.test_revenues is not None:
+                    # Convert test_revenues to numpy if it's a tensor
+                    if isinstance(self.test_revenues, torch.Tensor):
+                        test_revenues_np = self._tensor_to_numpy(self.test_revenues)
+                    else:
+                        test_revenues_np = np.array(self.test_revenues)
+                    
+                    # Get actual revenues for this batch
+                    indices_list = indices.tolist()
+                    scores = Y_pred_np.flatten()
+                    realized_rets = np.array([test_revenues_np[idx] if idx < len(test_revenues_np) else 0 
+                                            for idx in indices_list])
+                    
+                    # Collect by date
+                    for d, score, ret in zip(batch_dates, scores, realized_rets):
+                        by_date.setdefault(d, []).append((score, ret))
+                
+                # Calculate test loss
+                loss = self.loss_fn(Y_pred, Y_batch)
                 test_loss += loss.item()
+                
                 if self.is_main:
-                    tbar.set_postfix(avg_test=test_loss/(tbar.n or 1))
+                    tbar.set_postfix(avg_loss=test_loss/(tbar.n or 1))
                 
                 # Calculate individual losses for each sample in the batch
                 # Y_pred and Y_batch have shape [batch_size, 1], so we squeeze to [batch_size]
@@ -567,6 +1238,33 @@ class Trainer():
         
         avg_test_loss = test_loss / test_samples
         
+        # Build daily portfolio returns from cross-sectional ranking
+        if len(by_date) > 0 and self.is_main:
+            for d in sorted(by_date.keys()):
+                pairs = by_date[d]
+                # Rank by score (ascending order)
+                pairs.sort(key=lambda x: x[0])
+                # Get top-k and bottom-k returns (but adjust k if not enough data)
+                # Need at least 2 stocks (one to long, one to short)
+                if len(pairs) >= 2:
+                    # Use k or adjust down if necessary
+                    actual_k = min(self.k, len(pairs) // 2)
+                    top_k_returns = [r for (_, r) in pairs[-actual_k:]]
+                    bottom_k_returns = [r for (_, r) in pairs[:actual_k]]
+                    
+                    # Equal-weight long-short portfolio return
+                    r_d = np.mean(top_k_returns) - np.mean(bottom_k_returns)
+                    
+                    # Subtract transaction costs
+                    if self.cost_bps_per_side > 0:
+                        r_d -= 2 * self.cost_bps_per_side / 10000.0
+                    
+                    self.daily_returns.append(r_d)
+        
+        # Build equity curve from daily returns
+        if len(self.daily_returns) > 0:
+            self.equity_curve = np.cumprod(1 + np.array(self.daily_returns)).tolist()
+        
         # Only rank 0 prints and logs
         if self.is_main:
             print("Test Loss: {}".format(avg_test_loss))
@@ -575,6 +1273,44 @@ class Trainer():
             # Log individual losses against dates to TensorBoard
             if individual_losses and individual_dates and self.writer is not None:
                 self._log_loss_vs_date_to_tensorboard(individual_losses, individual_dates)
+            
+            # Calculate and print all metrics
+            print("\n" + "="*60)
+            print("TRADING PERFORMANCE METRICS")
+            print("="*60)
+            trading_metrics = self.get_trading_performance_metrics()
+            for key, value in trading_metrics.items():
+                if isinstance(value, dict):
+                    print(f"{key}:")
+                    for sub_key, sub_value in value.items():
+                        print(f"  {sub_key}: {sub_value}")
+                else:
+                    print(f"{key}: {value}")
+            
+            print("\n" + "="*60)
+            print("STATISTICAL TESTS")
+            print("="*60)
+            statistical_tests = self.get_statistical_tests()
+            for test_name, test_results in statistical_tests.items():
+                print(f"{test_name}:")
+                if isinstance(test_results, dict):
+                    for key, value in test_results.items():
+                        print(f"  {key}: {value}")
+                else:
+                    print(f"  {test_results}")
+            
+            print("\n" + "="*60)
+            print("TIME SERIES DIAGNOSTICS")
+            print("="*60)
+            diagnostics = self.get_time_series_diagnostics()
+            for key, value in diagnostics.items():
+                if isinstance(value, dict):
+                    print(f"{key}:")
+                    for sub_key, sub_value in value.items():
+                        if sub_key != 'values' or len(str(sub_value)) < 100:  # Don't print full ACF/PACF arrays
+                            print(f"  {sub_key}: {sub_value}")
+                else:
+                    print(f"{key}: {value}")
             
             if self.writer is not None:
                 self.writer.flush()
@@ -598,3 +1334,4 @@ class Trainer():
         # Clean up distributed process group
         if self.is_dist:
             dist.destroy_process_group()
+

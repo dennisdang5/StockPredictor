@@ -1,6 +1,6 @@
 # https://doi.org/10.1016/j.frl.2021.102280
 # "Forecasting directional movements of stock prices for intraday trading using LSTM and random forests" Ghosh, Neufeld, Sahoo 2022
-# modifications since our model predicts price not 
+# modifications for classification model
 
 import pandas as pd
 import torch
@@ -93,11 +93,9 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
 
     # Features/targets
     if prediction_type == "classification":
-        xdata, ydata, dates = get_feature_input_classification(op, cp, lookback, op.shape[1], len(stocks), date_index)
-    elif prediction_type == "price" :
-        xdata, ydata, dates = get_feature_input_price(op, cp, lookback, op.shape[1], len(stocks), date_index)
+        xdata, ydata, dates, revenues = get_feature_input_classification(op, cp, lookback, op.shape[1], len(stocks), date_index)
     else:
-        raise ValueError("Invalid prediction type")
+        raise ValueError("Invalid prediction type - only 'classification' is supported")
     xdata = torch.from_numpy(xdata).to(torch.float32)  # (S, W, L, F)
     ydata = torch.from_numpy(ydata).to(torch.float32)  # (S, W, 1)
 
@@ -125,6 +123,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     Xtr_f, Ytr_f, Dtrain_f = _sel(train_mask)
     Xva_f, Yva_f, Dvalidation_f = _sel(val_mask)
     Xte_f, Yte_f, Dtest_f = _sel(test_mask)
+    Rev_f = revenues[test_mask]
 
     # --- split summary ---
     n_tr, n_va, n_te = len(Dtrain_f), len(Dvalidation_f), len(Dtest_f)
@@ -162,15 +161,16 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     }, desc="Saving test dataset (.npz)")
 
     _save_npz_progress(metrics_path, {
-        "D": np.array(Dtest_f, dtype="datetime64[ns]")
+        "Rev": _to_np(Rev_f)
     }, desc="Saving metrics dataset (.npz)")
     
     print(f"{prediction_type.title()} datasets saved separately:")
     print(f"  Training: {train_path}")
     print(f"  Validation: {val_path}")
     print(f"  Test: {test_path}")
-
-    return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f)
+    print(f"  Metrics: {metrics_path}")
+    
+    return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f)
 
 def save_data_locally(stocks, args, data_dir="data", force=False, prediction_type="classification"):
     # Force a rebuild/save and return the 9-tuple
@@ -198,7 +198,8 @@ def load_data_from_local(filename):
                 Dtr = [pd.Timestamp(d).to_pydatetime() for d in z["D_train"]]
                 Dva = [pd.Timestamp(d).to_pydatetime() for d in z["D_val"]]
                 Dte = [pd.Timestamp(d).to_pydatetime() for d in z["D_test"]]
-                return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte)
+                Rev = torch.from_numpy(z["Rev"]).to(torch.float32)  #revenue dates same as test dates
+                return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev)
             else:
                 # New separate format - this shouldn't happen with the current filename
                 print("Error: Trying to load separate format with combined filename")
@@ -221,9 +222,10 @@ def load_separate_datasets(stocks, args, data_dir="data", prediction_type="class
     train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
     val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
     test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
+    metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
     
     # Check if all separate files exist
-    if not all(os.path.exists(path) for path in [train_path, val_path, test_path]):
+    if not all(os.path.exists(path) for path in [train_path, val_path, test_path, metrics_path]):
         print(f"Separate {prediction_type} dataset files not found. Need to rebuild datasets.")
         return 1
     
@@ -245,115 +247,20 @@ def load_separate_datasets(stocks, args, data_dir="data", prediction_type="class
     Yte = torch.from_numpy(test_data["Y"]).to(torch.float32)
     Dte = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
     
+    # Load metrics dataset
+    metrics_data = _load_npz_progress(metrics_path, ["Rev"], desc="Loading metrics dataset")
+    Rev = torch.from_numpy(metrics_data["Rev"]).to(torch.float32)
+    
     print(f"Loaded separate datasets:")
     print(f"  Training: {len(Xtr)} samples from {train_path}")
     print(f"  Validation: {len(Xva)} samples from {val_path}")
     print(f"  Test: {len(Xte)} samples from {test_path}")
     
-    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte)
+    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev)
 
 ########################################################
 # get feature input
 ########################################################
-
-def get_feature_input_price(op, cp, lookback, study_period, num_stocks, date_index):
-
-    T = study_period
-    # Precompute elementary series (may contain NaNs)
-    f_t1 = np.full((num_stocks, 4, T), np.nan, dtype=float)
-    
-    for t in range(2, T):
-        
-        for n in range(num_stocks):
-            o_t1, c_t1, c_t2, o_t = op.iloc[n, t-1], cp.iloc[n, t-1], cp.iloc[n, t-2], op.iloc[n, t]
-            if pd.notna(c_t1) and pd.notna(o_t1):
-                f_t1[n, 0, t] = c_t1 / o_t1 - 1.0     # ir
-            if pd.notna(c_t1) and pd.notna(c_t2):
-                f_t1[n, 1, t] = c_t1 / c_t2 - 1.0     # cpr
-            if pd.notna(o_t) and pd.notna(o_t1):
-                f_t1[n, 2, t] = o_t / o_t1 - 1.0      # opr
-            if pd.notna(o_t):
-                f_t1[n, 3, t] = o_t                   # op
-        
-
-    X_list, y_list, d_list = [], [], []
-    # --- counters ---
-    total_candidates = 0
-    kept = 0
-    dropped_nan_target = 0
-    dropped_feature_nan = 0
-    dropped_flat_iqr = 0
-    dropped_op_nan = 0
-    
-
-    for end_t in range(lookback + 2, T):
-        for n in range(num_stocks):
-            total_candidates += 1
-            tgt = cp.iloc[n, end_t]
-            if pd.isna(tgt):
-                dropped_nan_target += 1
-                continue
-
-            # {240, 220, 200, 180, 160, 140, 120, 100, 80, 60, 40} 2017 Fischer
-            period_long = np.arange(end_t - lookback + 1, end_t - 40 + 1, step=20, dtype=int)
-
-            # {20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
-            period_short = np.arange(end_t - 20 + 1, end_t + 1, step=1, dtype=int)
-
-            period = np.concatenate([period_long, period_short])
-
-            # Build 4-feature window; skip if any feature is invalid over the window
-            window = np.empty((lookback, 4), dtype=float)
-            valid = True
-            for i in range(3):  # ir, cpr, opr (robust z-score)
-                vec = f_t1[n, i, period]
-                if np.isnan(vec).any():
-                    dropped_feature_nan += 1
-                    valid = False; break
-                q1, q2, q3 = np.quantile(vec, [0.25, 0.5, 0.75])
-                iqr = (q3 - q1)
-                if iqr == 0:
-                    dropped_flat_iqr += 1
-                    valid = False
-                    break
-                window[:, i] = (vec - q2) / iqr
-            if not valid:
-                continue
-            vec_op = f_t1[n, 3, period]
-            if np.isnan(vec_op).any():
-                dropped_op_nan += 1
-                continue
-            window[:, 3] = vec_op
-
-            X_list.append(window)
-            y_list.append([tgt])
-            d_list.append(date_index[end_t])
-            kept += 1
-
-    # --- summary (before split) ---
-    removed = total_candidates - kept
-    pct = (kept / total_candidates * 100.0) if total_candidates else 0.0
-    print(f"[windows] candidates: {total_candidates:,} | kept: {kept:,} ({pct:.1f}%) | removed: {removed:,}")
-    if removed:
-        print(f"[windows] removed breakdown — NaN target: {dropped_nan_target:,}, "
-              f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,}, NaN open: {dropped_op_nan:,}")
-
-    X = np.array(X_list, dtype=float)   # (N, lookback, 4)
-    y = np.array(y_list, dtype=float)   # (N, 1)
-    dates = d_list                      # list of length N
-    return X, y, dates
-
-    """
-    trying to get prediction at time t
-    looking back at previous 241 days to predict the 242nd day
-
-    start with opening prices (op) and closing prices(cp)
-    prices for both ordered from 0-t
-
-    intraday returns (ir)= cp/op -1
-    returns wrt to last cp = 
-
-    """
 
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
@@ -388,34 +295,37 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
             median_rev = np.median(rev_t_valid)
             rev_labels[valid_stocks, t] = np.where(rev_t_valid > median_rev, 1.0, -1.0)
 
-    X_list, y_list, d_list = [], [], []
+    X_list, y_list, d_list, rev_list = [], [], [], []
     # --- counters ---
     total_candidates = 0
     kept = 0
     dropped_nan_target = 0
     dropped_feature_nan = 0
     dropped_flat_iqr = 0
-    dropped_op_nan = 0
-    
+    dropped_rev_nan = 0
 
     for end_t in range(lookback + 2, T):
         for n in range(num_stocks):
             total_candidates += 1
             tgt = rev_labels[n, end_t]
-            if pd.isna(tgt):
-                dropped_nan_target += 1
+            rev = rev_t[n, end_t]
+            if pd.isna(tgt) or pd.isna(rev):
+                if pd.isna(tgt):
+                    dropped_nan_target += 1
+                if pd.isna(rev):
+                    dropped_rev_nan += 1
                 continue
 
             # {240, 220, 200, 180, 160, 140, 120, 100, 80, 60, 40}
-            period_long = np.arange(end_t - lookback + 1, end_t - 40 + 1, step=20, dtype=int)
+            period_long = np.arange(end_t - lookback + 1, end_t - 40 + 2, step=20, dtype=int)
 
             # {20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
             period_short = np.arange(end_t - 20 + 1, end_t + 1, step=1, dtype=int)
 
             period = np.concatenate([period_long, period_short])
 
-            # Build 4-feature window; skip if any feature is invalid over the window
-            window = np.empty((lookback, 4), dtype=float)
+            # Build 3-feature window; skip if any feature is invalid over the window
+            window = np.empty((len(period), 3), dtype=float)
             valid = True
             for i in range(3):  # ir, cpr, opr (robust z-score)
                 vec = f_t1[n, i, period]
@@ -431,15 +341,11 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
                 window[:, i] = (vec - q2) / iqr
             if not valid:
                 continue
-            vec_op = f_t1[n, 3, period]
-            if np.isnan(vec_op).any():
-                dropped_op_nan += 1
-                continue
-            window[:, 3] = vec_op
 
             X_list.append(window)
             y_list.append([tgt])
             d_list.append(date_index[end_t])
+            rev_list.append(rev)
             kept += 1
 
     # --- summary (before split) ---
@@ -448,12 +354,14 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     print(f"[windows] candidates: {total_candidates:,} | kept: {kept:,} ({pct:.1f}%) | removed: {removed:,}")
     if removed:
         print(f"[windows] removed breakdown — NaN target: {dropped_nan_target:,}, "
-              f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,}, NaN open: {dropped_op_nan:,}")
+              f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,}")
 
-    X = np.array(X_list, dtype=float)   # (num_stocks, (lookback-40)/20 + 20, 4)
+    X = np.array(X_list, dtype=float)   # (num_stocks, (lookback-40)/20 + 20, 3)
     y = np.array(y_list, dtype=float)   # (num_stocks, 1)
     dates = d_list                      # list of length num_stocks
-    return X, y, dates
+    revenues = np.array(rev_list, dtype=float)
+
+    return X, y, dates, revenues
 
     """
     trying to get prediction at time t
@@ -466,18 +374,8 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     returns wrt to last cp = 
 
     """
-########################################################
-# metrics
-########################################################
 
-# clasification metrics pseudocode 
-# target_differences of shape (num_stocks, 1, T)
-def get_classification_metrics(target_differences):
-    # 
-"""
-return
 
-"""
 
 
 ########################################################
@@ -485,4 +383,4 @@ return
 ########################################################
 
 def get_model_summary(model):
-    torchsummary.summary(model,(240,3),batch_size=8)
+    torchsummary.summary(model,(31,3),batch_size=8)
