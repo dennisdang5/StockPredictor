@@ -9,6 +9,8 @@ import numpy as np
 import statistics
 import torchsummary
 import os
+import json
+import hashlib
 from tqdm import tqdm
 from zipfile import ZipFile, ZIP_STORED
 from io import BytesIO
@@ -42,6 +44,180 @@ def _load_npz_progress(path: str, names: list, desc="Loading dataset"):
 # data management
 ########################################################
 
+def _get_data_id(stocks, args):
+    """
+    Generate a short hash-based ID for a unique combination of stocks and time args.
+    
+    Args:
+        stocks: List of stock symbols
+        args: Time arguments
+        
+    Returns:
+        A short 10-character hash string
+    """
+    # Create a stable string representation
+    stocks_str = ",".join(sorted(stocks))  # Sort for consistency
+    args_str = ",".join(str(a) for a in args)
+    combined = f"{stocks_str}|{args_str}"
+    
+    # Generate a short hash
+    hash_obj = hashlib.sha256(combined.encode())
+    return hash_obj.hexdigest()[:10]
+
+def _load_id_mapping(data_dir="data"):
+    """
+    Load the ID to (stocks, args) mapping from disk.
+    
+    Returns:
+        Dictionary mapping data_id -> {'stocks': [...], 'args': [...], 'full_name': '...'}
+    """
+    mapping_path = os.path.join(data_dir, "_data_mapping.json")
+    
+    if os.path.exists(mapping_path):
+        try:
+            with open(mapping_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load data mapping: {e}")
+            return {}
+    return {}
+
+def _save_id_mapping(data_id, stocks, args, data_dir="data"):
+    """
+    Save the ID to (stocks, args) mapping to disk.
+    
+    Args:
+        data_id: Short hash ID
+        stocks: List of stock symbols
+        args: Time arguments
+        data_dir: Directory for data files
+    """
+    os.makedirs(data_dir, exist_ok=True)  # Ensure directory exists
+    mapping_path = os.path.join(data_dir, "_data_mapping.json")
+    
+    try:
+        mapping = _load_id_mapping(data_dir)
+        mapping[data_id] = {
+            'stocks': stocks,
+            'args': args,
+            'full_name': "_".join(stocks[:5]) + (f"_{len(stocks)-5}_more" if len(stocks) > 5 else "")
+        }
+        
+        with open(mapping_path, 'w') as f:
+            json.dump(mapping, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save data mapping: {e}")
+
+def handle_yfinance_errors(stocks, args, max_retries=3):
+    """
+    Utility function to handle yfinance errors gracefully.
+    
+    This function attempts to fetch stock data with error handling for:
+    - YFPricesMissingError: Stock may be delisted or has no data for the date range
+    - YFTzMissingError: Missing timezone information
+    - Other yfinance errors
+    
+    Args:
+        stocks: List of stock tickers
+        args: Date range arguments (either period string or [start, end] tuple)
+        max_retries: Maximum number of retry attempts per stock (default: 3)
+    
+    Returns:
+        tuple: (open_close_dataframe, failed_stocks)
+               - open_close_dataframe: DataFrame with MultiIndex columns (Open/Close, stock_symbols)
+               - failed_stocks: Dictionary mapping error types to lists of failed stocks with details
+    """
+    import time
+    
+    failed_stocks = {'YFPricesMissingError': [], 'YFTzMissingError': [], 'Other': []}
+    valid_stocks_data = []
+    valid_stocks = []
+    
+    # Try downloading each stock individually to handle errors gracefully
+    print(f"Fetching data for {len(stocks)} stocks...")
+    for i, stock in enumerate(stocks, 1):
+        if (i % 25 == 0) or (i == 1) or (i == len(stocks)):  # Print every 25 stocks, first, and last
+            print(f"  Progress: {i}/{len(stocks)} stocks processed...")
+        success = False
+        for attempt in range(max_retries):
+            try:
+                # Create a Ticker object for individual download
+                ticker = yf.Ticker(stock)
+                
+                if len(args) == 1:
+                    stock_data = ticker.history(period=args[0], repair=True)
+                elif len(args) == 2:
+                    stock_data = ticker.history(period=None, start=args[0], end=args[1], interval="1d", repair=True)
+                else:
+                    failed_stocks['Other'].append((stock, 'InvalidArgs', f'Invalid args: {args}'))
+                    break
+                
+                # Check if we have valid data with required columns
+                if stock_data is not None and not stock_data.empty:
+                    if "Open" in stock_data.columns and "Close" in stock_data.columns:
+                        # Check that we have some valid data (not all NaN)
+                        if not stock_data[["Open", "Close"]].isna().all().all():
+                            valid_stocks_data.append(stock_data[["Open", "Close"]])
+                            valid_stocks.append(stock)
+                            success = True
+                            break
+                        else:
+                            failed_stocks['YFPricesMissingError'].append((stock, 'AllNaN', 'All data is NaN'))
+                            break
+                    else:
+                        failed_stocks['Other'].append((stock, 'MissingColumns', 'Open or Close columns not found'))
+                        break
+                else:
+                    failed_stocks['YFPricesMissingError'].append((stock, 'EmptyData', 'No data returned'))
+                    break
+                    
+            except Exception as stock_error:
+                error_type = type(stock_error).__name__
+                error_msg = str(stock_error)
+                
+                # Last attempt, log the error
+                if attempt == max_retries - 1:
+                    if 'YFPricesMissingError' in error_type or 'no price data' in error_msg.lower() or 'delisted' in error_msg.lower():
+                        failed_stocks['YFPricesMissingError'].append((stock, error_type, error_msg))
+                    elif 'YFTzMissingError' in error_type or 'no timezone' in error_msg.lower():
+                        failed_stocks['YFTzMissingError'].append((stock, error_type, error_msg))
+                    else:
+                        failed_stocks['Other'].append((stock, error_type, error_msg))
+                else:
+                    # Wait before retrying
+                    time.sleep(0.5 * (attempt + 1))
+    
+    # Print summary of failures
+    total_failed = sum(len(failed_stocks[key]) for key in failed_stocks)
+    if total_failed > 0:
+        print(f"\n{total_failed} Failed downloads:")
+        for error_type, failures in failed_stocks.items():
+            if failures:
+                symbols = [f[0] for f in failures if isinstance(f, tuple)]
+                if len(symbols) <= 50:  # Only print if not too many
+                    print(f"{symbols}: {error_type}")
+                else:
+                    print(f"{len(symbols)} stocks: {error_type}")
+    else:
+        print("All downloads successful!")
+    
+    # Combine successful downloads into MultiIndex DataFrame
+    if valid_stocks_data:
+        # Combine all successful stock data
+        # yfinance Tickers.history() creates MultiIndex with (Open/Close, StockSymbol)
+        # So we need to replicate that structure
+        combined = pd.concat(valid_stocks_data, axis=1, keys=valid_stocks, names=['Stock', 'PriceType'])
+        # Swap levels to match yfinance format: (PriceType, Stock)
+        combined = combined.swaplevel(axis=1)
+        # Reorganize to match expected format: columns are (Level1: Open/Close, Level2: StockSymbol)
+        open_close = combined[["Open", "Close"]]
+        
+        print(f"Successfully fetched data for {len(valid_stocks)} stocks: {valid_stocks}")
+        return open_close, failed_stocks
+    else:
+        print("ERROR: No stocks were successfully downloaded!")
+        return None, failed_stocks
+
 def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification"):
     """
     Return 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
@@ -49,38 +225,27 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     saves .npz, and returns the tuple.
     """
     os.makedirs(data_dir, exist_ok=True)
-    base = "_".join(stocks) + "_" + "_".join(args)
     
-    # Create prediction-type specific file names
     prediction_suffix = f"_{prediction_type}"
-    npz_data_path = os.path.join(data_dir, base + prediction_suffix + ".npz")
 
-    # Fast path: try to load prediction-type specific datasets first, then fall back to combined format
-    if not force:
-        # Try prediction-type specific separate format first
-        separate_data = load_separate_datasets(stocks, args, data_dir, prediction_type)
-        if separate_data != 1:
-            return separate_data
-        
-        # Fall back to prediction-type specific combined format if separate files don't exist
-        if os.path.exists(npz_data_path):
-            print(f"Prediction-type specific data file {npz_data_path} exists. Loading .npz ...")
-            return load_data_from_local(npz_data_path)
-        
-        # Fall back to old format without prediction type for backward compatibility
-        old_npz_path = os.path.join(data_dir, base + ".npz")
-        if os.path.exists(old_npz_path):
-            print(f"Legacy data file {old_npz_path} exists. Loading .npz ...")
-            return load_data_from_local(old_npz_path)
+    # No cache loading here since we need to know which stocks actually downloaded successfully
+    # This would require matching the input stocks/args to stored mappings which is complex
+    # So we always download first, then save with the correct ID
+    # Cache reuse happens naturally when the same stocks/args are used
 
-    # Build from raw prices
-    dat = yf.Tickers(" ".join(stocks))
-    if len(args) == 1:
-        open_close = dat.history(period=args[0])[["Open", "Close"]]
-    elif len(args) == 2:
-        open_close = dat.history(period=None, start=args[0], end=args[1], interval="1d")[["Open", "Close"]]
-    else:
+    # Build from raw prices using error-handled download
+    if len(args) not in [1, 2]:
         print("Invalid Data Input Arguments")
+        return 1
+    
+    # For large stock lists, use fewer retries to speed up the download
+    # Most errors are permanent (delisted, no data for date range), so 1 retry is sufficient
+    max_retries = 1 if len(stocks) > 50 else 3
+    
+    open_close, failed_stocks = handle_yfinance_errors(stocks, args, max_retries=max_retries)
+    
+    if open_close is None:
+        print("ERROR: Failed to download any stock data. Cannot proceed.")
         return 1
 
     # Now build op/cp/date_index from the cleaned frame
@@ -88,12 +253,15 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     cp = open_close["Close"].T  # (S, T)
     date_index = open_close.index
 
+    # Update stocks list to only include successfully downloaded stocks
+    successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+
     if lookback >= op.shape[1]:
         raise ValueError("study period too short for chosen lookback")
 
     # Features/targets
     if prediction_type == "classification":
-        xdata, ydata, dates, revenues = get_feature_input_classification(op, cp, lookback, op.shape[1], len(stocks), date_index)
+        xdata, ydata, dates, revenues = get_feature_input_classification(op, cp, lookback, op.shape[1], len(successfully_downloaded_stocks), date_index)
     else:
         raise ValueError("Invalid prediction type - only 'classification' is supported")
     xdata = torch.from_numpy(xdata).to(torch.float32)  # (S, W, L, F)
@@ -130,6 +298,10 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     n_tot = n_tr + n_va + n_te
     print(f"[split] train/val/test sizes = {n_tr:,} / {n_va:,} / {n_te:,}  | total kept = {n_tot:,}")
 
+    # NOW create the ID based on successfully downloaded stocks (after error handling)
+    data_id = _get_data_id(successfully_downloaded_stocks, args)
+    base = f"data_{data_id}"
+    
     # Save datasets separately
     def _to_np(x): return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
     
@@ -170,93 +342,15 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     print(f"  Test: {test_path}")
     print(f"  Metrics: {metrics_path}")
     
+    # Save ID mapping so we can reference this data later (using successfully downloaded stocks)
+    _save_id_mapping(data_id, successfully_downloaded_stocks, args, data_dir)
+    
     return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f)
 
 def save_data_locally(stocks, args, data_dir="data", force=False, prediction_type="classification"):
     # Force a rebuild/save and return the 9-tuple
     return get_data(stocks, args, data_dir=data_dir, lookback=240, force=True, prediction_type=prediction_type)
 
-
-def load_data_from_local(filename):
-    """
-    Load from .npz (fast path). Handles both old combined format and new separate format.
-    If a legacy .pkl is passed accidentally, refuse and return 1 so the caller can rebuild.
-    """
-    if filename.endswith(".npz"):
-        # Check if this is the old combined format
-        with np.load(filename, allow_pickle=False) as z:
-            if "X_train" in z:
-                # Old combined format
-                names = ["X_train","X_val","X_test","Y_train","Y_val","Y_test","D_train","D_val","D_test"]
-                z = _load_npz_progress(filename, names, desc="Loading dataset (.npz)")
-                Xtr = torch.from_numpy(z["X_train"]).to(torch.float32)
-                Xva = torch.from_numpy(z["X_val"]).to(torch.float32)
-                Xte = torch.from_numpy(z["X_test"]).to(torch.float32)
-                Ytr = torch.from_numpy(z["Y_train"]).to(torch.float32)
-                Yva = torch.from_numpy(z["Y_val"]).to(torch.float32)
-                Yte = torch.from_numpy(z["Y_test"]).to(torch.float32)
-                Dtr = [pd.Timestamp(d).to_pydatetime() for d in z["D_train"]]
-                Dva = [pd.Timestamp(d).to_pydatetime() for d in z["D_val"]]
-                Dte = [pd.Timestamp(d).to_pydatetime() for d in z["D_test"]]
-                Rev = torch.from_numpy(z["Rev"]).to(torch.float32)  #revenue dates same as test dates
-                return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev)
-            else:
-                # New separate format - this shouldn't happen with the current filename
-                print("Error: Trying to load separate format with combined filename")
-                return 1
-
-    if filename.endswith(".pkl"):
-        print("Legacy pickle file detected. Ignoring it—rebuilding .npz instead.")
-        return 1
-
-    print(f"Unknown data file type: {filename}")
-    return 1
-
-def load_separate_datasets(stocks, args, data_dir="data", prediction_type="classification"):
-    """
-    Load train, validation, and test datasets from separate .npz files.
-    Returns 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
-    """
-    base = "_".join(stocks) + "_" + "_".join(args)
-    prediction_suffix = f"_{prediction_type}"
-    train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
-    val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
-    test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
-    metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
-    
-    # Check if all separate files exist
-    if not all(os.path.exists(path) for path in [train_path, val_path, test_path, metrics_path]):
-        print(f"Separate {prediction_type} dataset files not found. Need to rebuild datasets.")
-        return 1
-    
-    # Load training dataset
-    train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset")
-    Xtr = torch.from_numpy(train_data["X"]).to(torch.float32)
-    Ytr = torch.from_numpy(train_data["Y"]).to(torch.float32)
-    Dtr = [pd.Timestamp(d).to_pydatetime() for d in train_data["D"]]
-    
-    # Load validation dataset
-    val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset")
-    Xva = torch.from_numpy(val_data["X"]).to(torch.float32)
-    Yva = torch.from_numpy(val_data["Y"]).to(torch.float32)
-    Dva = [pd.Timestamp(d).to_pydatetime() for d in val_data["D"]]
-    
-    # Load test dataset
-    test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset")
-    Xte = torch.from_numpy(test_data["X"]).to(torch.float32)
-    Yte = torch.from_numpy(test_data["Y"]).to(torch.float32)
-    Dte = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
-    
-    # Load metrics dataset
-    metrics_data = _load_npz_progress(metrics_path, ["Rev"], desc="Loading metrics dataset")
-    Rev = torch.from_numpy(metrics_data["Rev"]).to(torch.float32)
-    
-    print(f"Loaded separate datasets:")
-    print(f"  Training: {len(Xtr)} samples from {train_path}")
-    print(f"  Validation: {len(Xva)} samples from {val_path}")
-    print(f"  Test: {len(Xte)} samples from {test_path}")
-    
-    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev)
 
 ########################################################
 # get feature input
