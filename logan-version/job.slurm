@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH -J test_train_lstm_model
-#SBATCH --ntasks=2
+#SBATCH --ntasks=4
 #SBATCH --gpus-per-task=2
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --mem=0
 #SBATCH --partition=gpu
-#SBATCH --time=06:00:00
+#SBATCH --time=12:00:00
 #SBATCH --account=liu32_1378
-#SBATCH --constraint=a40
+#SBATCH --constraint=v100
 
 set -euo pipefail
 
@@ -40,6 +40,14 @@ command -v nvidia-smi >/dev/null && nvidia-smi || echo "nvidia-smi not found"
 # Keep threads reasonable; let DataLoader workers do the I/O
 export OMP_NUM_THREADS=1
 export NCCL_DEBUG=WARN
+
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_DEBUG=INFO
+export NCCL_ASYNC_ERROR_HANDLING=1
+# Choose your site’s right interface (examples: bond0, ib0, eno1)
+export NCCL_SOCKET_IFNAME=bond0
+# If your cluster has no IB or IB is flaky, try:
+# export NCCL_IB_DISABLE=1
 
 # Master addr/port for rendezvous
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)

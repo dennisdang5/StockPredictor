@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 def setup_dist():
     if not torch.cuda.is_available() or os.getenv("RANK") is None:
         return None, torch.device("cuda" if torch.cuda.is_available() else "cpu"), False
-    dist.init_process_group("nccl")
+    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=30))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     return local_rank, torch.device(f"cuda:{local_rank}"), True

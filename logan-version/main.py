@@ -80,7 +80,7 @@ for name, param in train_obj.Model.named_parameters():
     print()
 
 #total_epochs = train_obj.num_epochs
-total_epochs = 100
+total_epochs = 1000
 
 stop = False  # Initialize stop condition
 for epoch in range(total_epochs):
@@ -143,4 +143,3 @@ else:
 print("\n" + "=" * 60)
 print("PROGRAM COMPLETED")
 print("=" * 60)
-
