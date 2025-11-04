@@ -26,9 +26,19 @@ warnings.filterwarnings('ignore')
 def setup_dist():
     if not torch.cuda.is_available() or os.getenv("RANK") is None:
         return None, torch.device("cuda" if torch.cuda.is_available() else "cpu"), False
-    dist.init_process_group(backend="nccl", timeout=dt.timedelta(minutes=30))
+    
+    # CRITICAL: Set device BEFORE initializing process group to avoid device mapping issues
+    # This prevents NCCL from guessing which GPU to use, which can cause hangs
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
+    
+    # Now initialize process group with explicit device_id to ensure correct GPU mapping
+    dist.init_process_group(
+        backend="nccl", 
+        timeout=dt.timedelta(minutes=30),
+        device_id=torch.cuda.current_device()  # Explicitly specify the device
+    )
+    
     return local_rank, torch.device(f"cuda:{local_rank}"), True
 
 class IndexedDataset(data.Dataset):
