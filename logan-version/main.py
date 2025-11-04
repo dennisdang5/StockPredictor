@@ -9,7 +9,7 @@ prediction_type = "classification"
 model_path = "savedmodel_classification.pth"
 
 # Top 30 S&P 500 stocks by market cap (subset for testing)
-"""
+
 stocks = [
     # Top Technology & Growth
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
@@ -26,8 +26,8 @@ stocks = [
     # Industrial & Energy Leaders
     "BA", "CAT", "XOM", "CVX"
 ]
-"""
 
+"""
 stocks = [
     # Communication Services
     "GOOGL", "GOOG", "T", "CHTR", "CMCSA", "EA", "FOXA", "FOX", "IPG", "LYV", "MTCH", "META", "NFLX", "NWSA", "NWS", "OMC", "PSKY", "TMUS", "TTWO", "TKO", "TTD", "VZ", "DIS", "WBD",
@@ -61,7 +61,7 @@ stocks = [
 
     # Utilities
     "AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE", "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW", "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
-]
+]"""
 
 # Training phase
 print("=" * 60)

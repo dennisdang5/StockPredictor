@@ -45,8 +45,33 @@ export NCCL_DEBUG=WARN
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export NCCL_DEBUG=INFO
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-# Choose your site’s right interface (examples: bond0, ib0, eno1)
-export NCCL_SOCKET_IFNAME=bond0
+
+# Network interface detection for NCCL
+# Try to auto-detect the correct interface if bond0 doesn't exist
+if ! ip link show bond0 >/dev/null 2>&1; then
+    # bond0 doesn't exist, try common alternatives
+    if ip link show ib0 >/dev/null 2>&1; then
+        export NCCL_SOCKET_IFNAME=ib0
+        echo "[NCCL] Using ib0 interface (InfiniBand)"
+    elif ip link show eth0 >/dev/null 2>&1; then
+        export NCCL_SOCKET_IFNAME=eth0
+        echo "[NCCL] Using eth0 interface"
+    else
+        # Try to find any non-lo interface
+        INTERFACE=$(ip link show | grep -E "^[0-9]+:" | grep -v lo | head -1 | awk '{print $2}' | sed 's/:$//')
+        if [ -n "$INTERFACE" ]; then
+            export NCCL_SOCKET_IFNAME=$INTERFACE
+            echo "[NCCL] Auto-detected interface: $INTERFACE"
+        else
+            export NCCL_SOCKET_IFNAME=bond0  # Fallback (will show warning but may still work)
+            echo "[NCCL] Warning: Could not detect interface, using bond0 (may fail)"
+        fi
+    fi
+else
+    export NCCL_SOCKET_IFNAME=bond0
+    echo "[NCCL] Using bond0 interface"
+fi
+
 # If your cluster has no IB or IB is flaky, try:
 # export NCCL_IB_DISABLE=1
 

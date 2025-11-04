@@ -337,10 +337,11 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     }, desc="Saving metrics dataset (.npz)")
     
     print(f"{prediction_type.title()} datasets saved separately:")
-    print(f"  Training: {train_path}")
-    print(f"  Validation: {val_path}")
-    print(f"  Test: {test_path}")
-    print(f"  Metrics: {metrics_path}")
+    # Use absolute paths for clarity and to avoid confusion with relative paths
+    print(f"  Training: {os.path.abspath(train_path)}")
+    print(f"  Validation: {os.path.abspath(val_path)}")
+    print(f"  Test: {os.path.abspath(test_path)}")
+    print(f"  Metrics: {os.path.abspath(metrics_path)}")
     
     # Save ID mapping so we can reference this data later (using successfully downloaded stocks)
     _save_id_mapping(data_id, successfully_downloaded_stocks, args, data_dir)
@@ -376,6 +377,7 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
         # No exact match - try to find a cache from mapping file
         # This handles the case where some stocks failed to download
         mapping = _load_id_mapping(data_dir)
+        
         stocks_set = set(stocks)
         args_str = ",".join(str(a) for a in args)
         
@@ -390,7 +392,6 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
                 # Check if cached stocks are a subset of input stocks
                 # (meaning we can use this cache even if some input stocks failed)
                 if cached_stocks.issubset(stocks_set):
-                    # Found a matching cache - verify files exist
                     cached_base = f"data_{cached_id}"
                     cached_train = os.path.join(data_dir, cached_base + prediction_suffix + "_train.npz")
                     cached_val = os.path.join(data_dir, cached_base + prediction_suffix + "_val.npz")
