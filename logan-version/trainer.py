@@ -10,7 +10,7 @@ from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
 import time
 import matplotlib.pyplot as plt
-from datetime import datetime
+import datetime as dt
 import matplotlib.dates as mdates
 from tqdm import tqdm
 from helpers_workers import dataloader_kwargs, autotune_num_workers
@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 def setup_dist():
     if not torch.cuda.is_available() or os.getenv("RANK") is None:
         return None, torch.device("cuda" if torch.cuda.is_available() else "cpu"), False
-    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=30))
+    dist.init_process_group(backend="nccl", timeout=dt.timedelta(minutes=30))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     return local_rank, torch.device(f"cuda:{local_rank}"), True
@@ -74,11 +74,12 @@ class EarlyStopper():
     def early_stop(self, validation_loss, model):
         # In distributed mode, we need to synchronize early stopping across all ranks
         if self.is_dist:
-            # Create tensors for synchronization
+            # Create tensors for synchronization on the model's device
             device = next(model.parameters()).device
             should_stop_tensor = torch.tensor(0, dtype=torch.int, device=device)
             
             # Check if this rank should stop
+            # All ranks must evaluate the same condition to maintain synchronization
             if validation_loss < self.min_validation_loss:
                 self.min_validation_loss = validation_loss
                 self.counter = 0
@@ -89,12 +90,27 @@ class EarlyStopper():
                 if self.counter >= self.patience:
                     should_stop_tensor = torch.tensor(1, dtype=torch.int, device=device)
             
-            # Broadcast the early stopping decision from rank 0 to all ranks
-            # First, gather all ranks' decisions
-            dist.all_reduce(should_stop_tensor, op=dist.ReduceOp.MAX)
+            # Synchronize validation loss across all ranks first to ensure consistent state
+            # This ensures all ranks see the same min_validation_loss
+            val_loss_tensor = torch.tensor(validation_loss, device=device)
+            dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.MIN)
             
-            # If any rank wants to stop, all ranks should stop
-            return should_stop_tensor.item() == 1
+            # If any rank has a lower validation loss, update all ranks
+            if val_loss_tensor.item() < self.min_validation_loss:
+                self.min_validation_loss = val_loss_tensor.item()
+                self.counter = 0
+            
+            # Broadcast the early stopping decision from all ranks
+            # Use MAX to ensure if any rank wants to stop, all ranks stop
+            try:
+                dist.all_reduce(should_stop_tensor, op=dist.ReduceOp.MAX)
+                # If any rank wants to stop, all ranks should stop
+                return should_stop_tensor.item() == 1
+            except Exception as e:
+                if self.is_main:
+                    print(f"[ERROR] Failed to synchronize early stopping decision: {e}")
+                # On error, don't stop to avoid hanging
+                return False
         else:
             # Non-distributed mode - original logic
             if validation_loss < self.min_validation_loss:
@@ -171,11 +187,42 @@ class Trainer():
                 print("[mps] Apple Metal Performance Shaders backend")
             print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
 
-        # data - now using local data loading (includes dates)
-        # This will automatically try separate format first, then fall back to combined format
-        input_data = util.get_data(stocks, time_args, self.prediction_type)
-        if isinstance(input_data, int):
-            raise RuntimeError("Error getting data from util.get_data()")
+        # data - distributed loading: only rank 0 downloads/processes, all ranks load from cache
+        if self.is_dist:
+            # Only rank 0 downloads and processes data
+            if self.is_main:
+                # Try to load from cache first
+                input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type)
+                if input_data is None:
+                    # Cache doesn't exist, download and process data
+                    if self.is_main:
+                        print("[data] Cache not found, downloading and processing data (rank 0 only)...")
+                    input_data = util.get_data(stocks, time_args, self.prediction_type)
+                    if isinstance(input_data, int):
+                        raise RuntimeError("Error getting data from util.get_data()")
+                else:
+                    if self.is_main:
+                        print("[data] Loaded from cache (rank 0 only)")
+            
+            # Synchronize - ensure rank 0 finishes downloading/processing before others proceed
+            dist.barrier()
+            
+            # Now all ranks load from cache (more efficient than broadcasting large tensors)
+            if not self.is_main:
+                input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type)
+                if input_data is None:
+                    raise RuntimeError(f"Cache files not found after rank 0 processing. Expected cache should exist.")
+            
+            # Synchronize again - ensure all ranks have loaded data
+            dist.barrier()
+        else:
+            # Non-distributed: try cache first, then download if needed
+            input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type)
+            if input_data is None:
+                input_data = util.get_data(stocks, time_args, self.prediction_type)
+                if isinstance(input_data, int):
+                    raise RuntimeError("Error getting data from util.get_data()")
+        
         X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test = input_data
         # Store dates for later reference (even when data is shuffled)
         self.train_dates = D_train
@@ -187,8 +234,8 @@ class Trainer():
         test_ds  = IndexedDataset(X_test,  Y_test,  D_test)
 
         self.train_sampler = DistributedSampler(self.train_ds, shuffle=True) if self.is_dist else None
-        val_sampler   = DistributedSampler(val_ds,   shuffle=False, drop_last=False) if self.is_dist else None
-        test_sampler   = DistributedSampler(test_ds,   shuffle=False, drop_last=False) if self.is_dist else None
+        self.val_sampler   = DistributedSampler(val_ds,   shuffle=False, drop_last=False) if self.is_dist else None
+        self.test_sampler   = DistributedSampler(test_ds,   shuffle=False, drop_last=False) if self.is_dist else None
 
         # (Optional) quick autotune once; uncomment if you want to probe
         #tuned = autotune_num_workers(self.train_ds, self.batch_size, self.device, candidates=(0,1,2,4,8))
@@ -209,11 +256,45 @@ class Trainer():
             self.train_ds, shuffle=False, sampler=self.train_sampler,  batch_size=self.batch_size, **self.loader_args
         )
         self.validationLoader = data.DataLoader(
-            val_ds,   shuffle=False, sampler=val_sampler, batch_size=self.batch_size, **self.loader_args
+            val_ds,   shuffle=False, sampler=self.val_sampler, batch_size=self.batch_size, **self.loader_args
         )
         self.testLoader = data.DataLoader(
-            test_ds,  shuffle=False, sampler=test_sampler, batch_size=self.batch_size, **self.loader_args
+            test_ds,  shuffle=False, sampler=self.test_sampler, batch_size=self.batch_size, **self.loader_args
         )
+        
+        # Validate dataloader lengths are equal across ranks in distributed mode
+        if self.is_dist:
+            train_len = len(self.trainLoader)
+            val_len = len(self.validationLoader)
+            test_len = len(self.testLoader)
+            
+            # Gather lengths from all ranks
+            train_len_tensor = torch.tensor(train_len, device=self.device)
+            val_len_tensor = torch.tensor(val_len, device=self.device)
+            test_len_tensor = torch.tensor(test_len, device=self.device)
+            
+            train_lens = [torch.zeros_like(train_len_tensor) for _ in range(self.world_size)]
+            val_lens = [torch.zeros_like(val_len_tensor) for _ in range(self.world_size)]
+            test_lens = [torch.zeros_like(test_len_tensor) for _ in range(self.world_size)]
+            
+            dist.all_gather(train_lens, train_len_tensor)
+            dist.all_gather(val_lens, val_len_tensor)
+            dist.all_gather(test_lens, test_len_tensor)
+            
+            # Check if all ranks have the same length
+            train_uniform = all(t.item() == train_len for t in train_lens)
+            val_uniform = all(v.item() == val_len for v in val_lens)
+            test_uniform = all(t.item() == test_len for t in test_lens)
+            
+            if self.is_main and not (train_uniform and val_uniform and test_uniform):
+                print(f"[WARNING] Dataloader lengths differ across ranks!")
+                print(f"  Train: {[t.item() for t in train_lens]}")
+                print(f"  Val: {[v.item() for v in val_lens]}")
+                print(f"  Test: {[t.item() for t in test_lens]}")
+                print(f"  This may cause DDP synchronization issues.")
+            
+            # Synchronize before continuing
+            dist.barrier()
 
         # =========================
         # MODEL
@@ -270,9 +351,13 @@ class Trainer():
 
     def train_one_epoch(self, epoch):
 
-        # Ensure DDP shuffles differently each epoch
-        if self.is_dist and self.train_sampler is not None:
-            self.train_sampler.set_epoch(epoch)
+        # Ensure DDP shuffles differently each epoch for all samplers
+        if self.is_dist:
+            if self.train_sampler is not None:
+                self.train_sampler.set_epoch(epoch)
+            if self.val_sampler is not None:
+                self.val_sampler.set_epoch(epoch)
+            # Note: test_sampler doesn't need set_epoch as it's only used during evaluation
 
         if self.is_main:
             print("Epoch: {}".format(epoch+1))
@@ -319,10 +404,16 @@ class Trainer():
         
         # Aggregate training loss across all ranks
         if self.is_dist:
-            train_loss_tensor = torch.tensor(train_loss, device=self.device)
-            dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
-            train_loss = train_loss_tensor.item()
-            train_samples = len(self.trainLoader) * self.world_size
+            try:
+                train_loss_tensor = torch.tensor(train_loss, device=self.device)
+                dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+                train_loss = train_loss_tensor.item()
+                train_samples = len(self.trainLoader) * self.world_size
+            except Exception as e:
+                if self.is_main:
+                    print(f"[ERROR] Failed to aggregate training loss: {e}")
+                # Fallback: use local loss only (not ideal but prevents hang)
+                train_samples = len(self.trainLoader)
         else:
             train_samples = len(self.trainLoader)
         
@@ -352,10 +443,16 @@ class Trainer():
             
             # Aggregate validation loss across all ranks
             if self.is_dist:
-                val_loss_tensor = torch.tensor(val_loss, device=self.device)
-                dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-                val_loss = val_loss_tensor.item()
-                val_samples = len(self.validationLoader) * self.world_size
+                try:
+                    val_loss_tensor = torch.tensor(val_loss, device=self.device)
+                    dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+                    val_loss = val_loss_tensor.item()
+                    val_samples = len(self.validationLoader) * self.world_size
+                except Exception as e:
+                    if self.is_main:
+                        print(f"[ERROR] Failed to aggregate validation loss: {e}")
+                    # Fallback: use local loss only (not ideal but prevents hang)
+                    val_samples = len(self.validationLoader)
             else:
                 val_samples = len(self.validationLoader)
             
@@ -363,13 +460,21 @@ class Trainer():
             
             # Synchronize before early stopping check
             if self.is_dist:
-                dist.barrier()
+                try:
+                    dist.barrier()
+                except Exception as e:
+                    if self.is_main:
+                        print(f"[ERROR] Barrier failed before early stopping check: {e}")
             
             stop_condition = self.stopper.early_stop(avg_val, self.Model)   
             
             # If early stopping is triggered, synchronize all ranks before exiting
             if stop_condition and self.is_dist:
-                dist.barrier()  # Ensure all ranks are synchronized before any rank exits
+                try:
+                    dist.barrier()  # Ensure all ranks are synchronized before any rank exits
+                except Exception as e:
+                    if self.is_main:
+                        print(f"[ERROR] Barrier failed after early stopping: {e}")
 
         end_time = time.perf_counter()
         

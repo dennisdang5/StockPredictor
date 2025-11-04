@@ -347,6 +347,47 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     
     return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f)
 
+def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classification"):
+    """
+    Load data from cache files if they exist.
+    Returns data tuple if cache exists, None otherwise.
+    """
+    prediction_suffix = f"_{prediction_type}"
+    data_id = _get_data_id(stocks, args)
+    base = f"data_{data_id}"
+    
+    train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
+    val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
+    test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
+    metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
+    
+    # Check if all cache files exist
+    if not all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
+        return None
+    
+    # Load from cache
+    train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)")
+    val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset (.npz)")
+    test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset (.npz)")
+    metrics_data = _load_npz_progress(metrics_path, ["Rev"], desc="Loading metrics dataset (.npz)")
+    
+    # Convert back to torch tensors and Python datetime objects
+    Xtr = torch.from_numpy(train_data["X"]).to(torch.float32)
+    Ytr = torch.from_numpy(train_data["Y"]).to(torch.float32)
+    Xva = torch.from_numpy(val_data["X"]).to(torch.float32)
+    Yva = torch.from_numpy(val_data["Y"]).to(torch.float32)
+    Xte = torch.from_numpy(test_data["X"]).to(torch.float32)
+    Yte = torch.from_numpy(test_data["Y"]).to(torch.float32)
+    
+    # Convert datetime64 back to Python datetime objects
+    Dtr = [pd.Timestamp(d).to_pydatetime() for d in train_data["D"]]
+    Dva = [pd.Timestamp(d).to_pydatetime() for d in val_data["D"]]
+    Dte = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
+    
+    Rev = metrics_data["Rev"]
+    
+    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev)
+
 def save_data_locally(stocks, args, data_dir="data", force=False, prediction_type="classification"):
     # Force a rebuild/save and return the 9-tuple
     return get_data(stocks, args, data_dir=data_dir, lookback=240, force=True, prediction_type=prediction_type)
