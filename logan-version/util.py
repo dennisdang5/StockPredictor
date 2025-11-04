@@ -584,10 +584,13 @@ def save_data_locally(stocks, args, data_dir="data", force=False, prediction_typ
 def get_feature_input_classification(op, cp, lookback, study_period, num_stocks, date_index):
 
     T = study_period
+    print(f"[features] Computing features for {num_stocks} stocks over {T} time periods...")
     # Precompute elementary series (may contain NaNs)
     f_t1 = np.full((num_stocks,3, T), np.nan, dtype=float)
     rev_labels = np.full((num_stocks, T), np.nan, dtype=float)  # Initialize with NaN for proper alignment
     rev_t = np.full((num_stocks, T), np.nan, dtype=float)
+    
+    print(f"[features] Step 1/2: Precomputing elementary series...")
     for t in range(2, T):
         valid_stocks = []
         
@@ -611,7 +614,8 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
         if len(rev_t_valid) > 0:
             median_rev = np.median(rev_t_valid)
             rev_labels[valid_stocks, t] = np.where(rev_t_valid > median_rev, 1.0, -1.0)
-
+    
+    print(f"[features] Step 1/2 complete. Step 2/2: Building feature windows (this may take several minutes)...")
     X_list, y_list, d_list, rev_list = [], [], [], []
     # --- counters ---
     total_candidates = 0
@@ -621,6 +625,11 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     dropped_flat_iqr = 0
     dropped_rev_nan = 0
 
+    # Add progress indicator for the heavy computation loop
+    total_windows = (T - lookback - 2) * num_stocks
+    window_count = 0
+    last_progress_print = 0
+    
     for end_t in range(lookback + 2, T):
         for n in range(num_stocks):
             total_candidates += 1
@@ -664,6 +673,13 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
             d_list.append(date_index[end_t])
             rev_list.append(rev)
             kept += 1
+        
+        window_count += num_stocks
+        # Print progress every 5% completion
+        progress_pct = (window_count / total_windows * 100) if total_windows > 0 else 0
+        if progress_pct - last_progress_print >= 5.0:
+            print(f"[features] Progress: {progress_pct:.1f}% ({window_count:,}/{total_windows:,} windows processed)")
+            last_progress_print = progress_pct
 
     # --- summary (before split) ---
     removed = total_candidates - kept
