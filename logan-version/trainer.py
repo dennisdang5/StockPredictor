@@ -199,40 +199,110 @@ class Trainer():
             print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
 
         # data - distributed loading: only rank 0 downloads/processes, all ranks load from cache
+        # Optimized flow:
+        # Step 1: Check cache first (if exact match exists, use it - saves all time!)
+        # Step 2: If cache doesn't exist, download once to identify problematic stocks AND get data
+        # Step 3: Filter out problematic stocks
+        # Step 4: Check cache again with filtered stocks (for future runs)
+        # Step 5: Process and save data
         if self.is_dist:
-            # Only rank 0 downloads and processes data
+            # Only rank 0 processes data
             if self.is_main:
-                # Try to load from cache first
+                # Step 1: Check cache first with full stock list (optimization: if exact match exists, use it)
                 input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+                
                 if input_data is None:
-                    # Cache doesn't exist, download and process data
-                    if self.is_main:
-                        print("[data] Cache not found, downloading and processing data (rank 0 only)...")
-                    input_data = util.get_data(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
-                    if isinstance(input_data, int):
-                        raise RuntimeError("Error getting data from util.get_data()")
+                    # Step 2: Cache doesn't exist - download once to identify problematic stocks AND get data
+                    print("[data] Cache not found, downloading data to identify problematic stocks (rank 0 only)...")
+                    open_close, failed_stocks_dict = util.handle_yfinance_errors(stocks, time_args, max_retries=1)
+                    
+                    if open_close is None:
+                        raise RuntimeError("ERROR: Failed to download any stock data. Cannot proceed.")
+                    
+                    # Step 3: Filter out problematic stocks
+                    valid_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+                    
+                    if len(valid_stocks) == 0:
+                        raise RuntimeError("No valid stocks found after filtering problematic stocks.")
+                    
+                    problematic_stocks = [stock for stock in stocks if stock not in valid_stocks]
+                    if len(problematic_stocks) > 0:
+                        print(f"[data] Filtered out {len(problematic_stocks)} problematic stocks. Using {len(valid_stocks)} valid stocks.")
+                    
+                    # Step 4: Check cache again with filtered stocks (might exist from previous run)
+                    input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+                    
+                    if input_data is None:
+                        # Step 5: Process and save data (we already have the downloaded data, so pass it)
+                        print("[data] Processing downloaded data and saving to cache...")
+                        input_data = util.get_data(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type, open_close_data=open_close)
+                        if isinstance(input_data, int):
+                            raise RuntimeError("Error getting data from util.get_data()")
+                    else:
+                        print("[data] Found cache for filtered stocks after download (rank 0 only)")
                 else:
-                    if self.is_main:
-                        print("[data] Loaded from cache (rank 0 only)")
+                    print("[data] Loaded from cache (rank 0 only)")
             
             # Synchronize - ensure rank 0 finishes downloading/processing before others proceed
             dist.barrier()
             
-            # Now all ranks load from cache (more efficient than broadcasting large tensors)
+            # Now all ranks load from cache (they need to filter the same way to get the same cache key)
             if not self.is_main:
-                input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+                # Download to identify problematic stocks (same as rank 0, but we don't save)
+                open_close, failed_stocks_dict = util.handle_yfinance_errors(stocks, time_args, max_retries=1)
+                
+                if open_close is None:
+                    raise RuntimeError("ERROR: Failed to download any stock data. Cannot proceed.")
+                
+                # Filter to get valid stocks (same as rank 0)
+                valid_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+                
+                if len(valid_stocks) == 0:
+                    raise RuntimeError("No valid stocks found after filtering problematic stocks.")
+                
+                # Load from cache with filtered stocks
+                input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
                 if input_data is None:
                     raise RuntimeError(f"Cache files not found after rank 0 processing. Expected cache should exist.")
             
             # Synchronize again - ensure all ranks have loaded data
             dist.barrier()
         else:
-            # Non-distributed: try cache first, then download if needed
+            # Non-distributed: optimized flow
+            # Step 1: Check cache first with full stock list
             input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+            
             if input_data is None:
-                input_data = util.get_data(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
-                if isinstance(input_data, int):
-                    raise RuntimeError("Error getting data from util.get_data()")
+                # Step 2: Cache doesn't exist - download once to identify problematic stocks AND get data
+                print("[data] Cache not found, downloading data to identify problematic stocks...")
+                open_close, failed_stocks_dict = util.handle_yfinance_errors(stocks, time_args, max_retries=1)
+                
+                if open_close is None:
+                    raise RuntimeError("ERROR: Failed to download any stock data. Cannot proceed.")
+                
+                # Step 3: Filter out problematic stocks
+                valid_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+                
+                if len(valid_stocks) == 0:
+                    raise RuntimeError("No valid stocks found after filtering problematic stocks.")
+                
+                problematic_stocks = [stock for stock in stocks if stock not in valid_stocks]
+                if len(problematic_stocks) > 0:
+                    print(f"[data] Filtered out {len(problematic_stocks)} problematic stocks. Using {len(valid_stocks)} valid stocks.")
+                
+                # Step 4: Check cache again with filtered stocks (might exist from previous run)
+                input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+                
+                if input_data is None:
+                    # Step 5: Process and save data (we already have the downloaded data, so pass it)
+                    print("[data] Processing downloaded data and saving to cache...")
+                    input_data = util.get_data(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type, open_close_data=open_close)
+                    if isinstance(input_data, int):
+                        raise RuntimeError("Error getting data from util.get_data()")
+                else:
+                    print("[data] Found cache for filtered stocks after download")
+            else:
+                print("[data] Loaded from cache")
         
         X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test = input_data
         # Store dates for later reference (even when data is shuffled)

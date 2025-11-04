@@ -108,6 +108,79 @@ def _save_id_mapping(data_id, stocks, args, data_dir="data"):
     except Exception as e:
         print(f"Warning: Could not save data mapping: {e}")
 
+def identify_problematic_stocks(stocks, args, max_retries=1):
+    """
+    Identify which stocks from the input list are problematic (cannot be downloaded).
+    This is a lightweight check that only validates downloadability without processing data.
+    
+    Args:
+        stocks: List of stock tickers
+        args: Date range arguments (either period string or [start, end] tuple)
+        max_retries: Maximum number of retry attempts per stock (default: 1 for speed)
+    
+    Returns:
+        tuple: (valid_stocks, problematic_stocks)
+               - valid_stocks: List of stocks that can be downloaded
+               - problematic_stocks: List of stocks that failed to download
+    """
+    import time
+    
+    valid_stocks = []
+    problematic_stocks = []
+    
+    print(f"[check] Identifying problematic stocks from {len(stocks)} stocks...")
+    for i, stock in enumerate(stocks, 1):
+        if (i % 50 == 0) or (i == 1) or (i == len(stocks)):
+            print(f"  Progress: {i}/{len(stocks)} stocks checked...")
+        
+        success = False
+        for attempt in range(max_retries):
+            try:
+                ticker = yf.Ticker(stock)
+                
+                if len(args) == 1:
+                    stock_data = ticker.history(period=args[0], repair=True)
+                elif len(args) == 2:
+                    stock_data = ticker.history(period=None, start=args[0], end=args[1], interval="1d", repair=True)
+                else:
+                    problematic_stocks.append(stock)
+                    break
+                
+                # Check if we have valid data with required columns
+                if stock_data is not None and not stock_data.empty:
+                    if "Open" in stock_data.columns and "Close" in stock_data.columns:
+                        # Check that we have some valid data (not all NaN)
+                        if not stock_data[["Open", "Close"]].isna().all().all():
+                            valid_stocks.append(stock)
+                            success = True
+                            break
+                        else:
+                            problematic_stocks.append(stock)
+                            break
+                    else:
+                        problematic_stocks.append(stock)
+                        break
+                else:
+                    problematic_stocks.append(stock)
+                    break
+                    
+            except Exception:
+                # Last attempt, mark as problematic
+                if attempt == max_retries - 1:
+                    problematic_stocks.append(stock)
+                else:
+                    time.sleep(0.5 * (attempt + 1))
+    
+    if problematic_stocks:
+        print(f"[check] Found {len(problematic_stocks)} problematic stocks (will be excluded)")
+        if len(problematic_stocks) <= 50:
+            print(f"  Problematic: {problematic_stocks}")
+    else:
+        print(f"[check] All stocks are valid!")
+    
+    print(f"[check] {len(valid_stocks)} valid stocks identified")
+    return valid_stocks, problematic_stocks
+
 def handle_yfinance_errors(stocks, args, max_retries=3):
     """
     Utility function to handle yfinance errors gracefully.
@@ -218,43 +291,53 @@ def handle_yfinance_errors(stocks, args, max_retries=3):
         print("ERROR: No stocks were successfully downloaded!")
         return None, failed_stocks
 
-def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification"):
+def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification", open_close_data=None):
     """
     Return 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
     Loads from .npz if present (and not force); otherwise builds from yfinance,
     saves .npz, and returns the tuple.
+    
+    Args:
+        stocks: List of stock tickers (should already be filtered to remove problematic stocks)
+        args: Date range arguments
+        data_dir: Directory for data files
+        lookback: Lookback period for features
+        force: Force rebuild even if cache exists
+        prediction_type: Type of prediction (default: "classification")
+        open_close_data: Optional pre-downloaded open_close DataFrame to avoid redundant download
     """
     os.makedirs(data_dir, exist_ok=True)
     
     prediction_suffix = f"_{prediction_type}"
-
-    # No cache loading here since we need to know which stocks actually downloaded successfully
-    # This would require matching the input stocks/args to stored mappings which is complex
-    # So we always download first, then save with the correct ID
-    # Cache reuse happens naturally when the same stocks/args are used
 
     # Build from raw prices using error-handled download
     if len(args) not in [1, 2]:
         print("Invalid Data Input Arguments")
         return 1
     
-    # For large stock lists, use fewer retries to speed up the download
-    # Most errors are permanent (delisted, no data for date range), so 1 retry is sufficient
-    max_retries = 1 if len(stocks) > 50 else 3
-    
-    open_close, failed_stocks = handle_yfinance_errors(stocks, args, max_retries=max_retries)
-    
-    if open_close is None:
-        print("ERROR: Failed to download any stock data. Cannot proceed.")
-        return 1
+    # If open_close_data is provided, use it (avoids redundant download)
+    if open_close_data is not None:
+        open_close = open_close_data
+        # Get successfully downloaded stocks from the DataFrame columns
+        successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+    else:
+        # For large stock lists, use fewer retries to speed up the download
+        # Most errors are permanent (delisted, no data for date range), so 1 retry is sufficient
+        max_retries = 1 if len(stocks) > 50 else 3
+        
+        open_close, failed_stocks = handle_yfinance_errors(stocks, args, max_retries=max_retries)
+        
+        if open_close is None:
+            print("ERROR: Failed to download any stock data. Cannot proceed.")
+            return 1
+
+        # Update stocks list to only include successfully downloaded stocks
+        successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
 
     # Now build op/cp/date_index from the cleaned frame
     op = open_close["Open"].T   # (S, T)
     cp = open_close["Close"].T  # (S, T)
     date_index = open_close.index
-
-    # Update stocks list to only include successfully downloaded stocks
-    successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
 
     if lookback >= op.shape[1]:
         raise ValueError("study period too short for chosen lookback")
@@ -352,15 +435,21 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     """
     Load data from cache files if they exist.
     
-    This function handles the case where the input stocks list may include stocks
-    that failed to download. It first tries an exact match, then searches the
-    mapping file to find a cache that was created from a subset of these stocks.
+    This function only checks for exact matches of the input stocks and args.
+    It does NOT use subset matching - the cached stocks must exactly match the input stocks.
     
-    Returns data tuple if cache exists, None otherwise.
+    Args:
+        stocks: List of stock tickers (should already be filtered to remove problematic stocks)
+        args: Date range arguments
+        data_dir: Directory where cache files are stored
+        prediction_type: Type of prediction (default: "classification")
+    
+    Returns:
+        data tuple if cache exists, None otherwise.
     """
     prediction_suffix = f"_{prediction_type}"
     
-    # First, try exact match with the input stocks list
+    # Generate data ID for exact match check
     data_id = _get_data_id(stocks, args)
     base = f"data_{data_id}"
     
@@ -374,44 +463,10 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
         # Exact match found - use it
         pass  # Will load below
     else:
-        # No exact match - try to find a cache from mapping file
-        # This handles the case where some stocks failed to download
-        mapping = _load_id_mapping(data_dir)
-        
-        stocks_set = set(stocks)
-        args_str = ",".join(str(a) for a in args)
-        
-        # Find a mapping entry where:
-        # 1. The stored args match
-        # 2. The stored stocks are a subset of the input stocks (some may have failed)
-        found_data_id = None
-        for cached_id, cached_info in mapping.items():
-            cached_args_str = ",".join(str(a) for a in cached_info.get('args', []))
-            if cached_args_str == args_str:
-                cached_stocks = set(cached_info.get('stocks', []))
-                # Check if cached stocks are a subset of input stocks
-                # (meaning we can use this cache even if some input stocks failed)
-                if cached_stocks.issubset(stocks_set):
-                    cached_base = f"data_{cached_id}"
-                    cached_train = os.path.join(data_dir, cached_base + prediction_suffix + "_train.npz")
-                    cached_val = os.path.join(data_dir, cached_base + prediction_suffix + "_val.npz")
-                    cached_test = os.path.join(data_dir, cached_base + prediction_suffix + "_test.npz")
-                    cached_metrics = os.path.join(data_dir, cached_base + prediction_suffix + "_metrics.npz")
-                    
-                    if all(os.path.exists(p) for p in [cached_train, cached_val, cached_test, cached_metrics]):
-                        found_data_id = cached_id
-                        base = cached_base
-                        train_path = cached_train
-                        val_path = cached_val
-                        test_path = cached_test
-                        metrics_path = cached_metrics
-                        break
-        
-        if found_data_id is None:
-            # No matching cache found
-            return None
+        # No exact match found
+        return None
     
-    # At this point, we have valid cache paths (either exact match or found via mapping)
+    # At this point, we have valid cache paths (exact match found)
     
     # Load from cache
     train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)")
