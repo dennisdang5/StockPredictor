@@ -108,6 +108,74 @@ def _save_id_mapping(data_id, stocks, args, data_dir="data"):
     except Exception as e:
         print(f"Warning: Could not save data mapping: {e}")
 
+def _get_args_key(args):
+    """
+    Generate a stable key for time arguments to use for storing problematic stocks.
+    
+    Args:
+        args: Time arguments (either period string or [start, end] tuple)
+    
+    Returns:
+        A string key representing the time arguments
+    """
+    if len(args) == 1:
+        return f"period_{args[0]}"
+    elif len(args) == 2:
+        return f"start_{args[0]}_end_{args[1]}"
+    else:
+        return f"args_{hash(tuple(args))}"
+
+def _load_problematic_stocks(args, data_dir="data"):
+    """
+    Load the list of problematic stocks for given time arguments.
+    
+    Args:
+        args: Time arguments
+        data_dir: Directory for data files
+    
+    Returns:
+        Set of problematic stock symbols, or empty set if not found
+    """
+    args_key = _get_args_key(args)
+    problematic_path = os.path.join(data_dir, f"_problematic_stocks_{args_key}.json")
+    
+    if os.path.exists(problematic_path):
+        try:
+            with open(problematic_path, 'r') as f:
+                data = json.load(f)
+                return set(data.get('problematic_stocks', []))
+        except Exception as e:
+            print(f"Warning: Could not load problematic stocks: {e}")
+            return set()
+    return set()
+
+def _save_problematic_stocks(problematic_stocks, args, data_dir="data"):
+    """
+    Save the list of problematic stocks for given time arguments.
+    
+    Args:
+        problematic_stocks: List or set of problematic stock symbols
+        args: Time arguments
+        data_dir: Directory for data files
+    """
+    os.makedirs(data_dir, exist_ok=True)  # Ensure directory exists
+    args_key = _get_args_key(args)
+    problematic_path = os.path.join(data_dir, f"_problematic_stocks_{args_key}.json")
+    
+    try:
+        # Convert to list and sort for consistency
+        stocks_list = sorted(list(set(problematic_stocks)))
+        data = {
+            'args': args,
+            'problematic_stocks': stocks_list,
+            'count': len(stocks_list)
+        }
+        
+        with open(problematic_path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save problematic stocks: {e}")
+
 def identify_problematic_stocks(stocks, args, max_retries=1):
     """
     Identify which stocks from the input list are problematic (cannot be downloaded).
@@ -291,7 +359,7 @@ def handle_yfinance_errors(stocks, args, max_retries=3):
         print("ERROR: No stocks were successfully downloaded!")
         return None, failed_stocks
 
-def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification", open_close_data=None):
+def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None):
     """
     Return 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
     Loads from .npz if present (and not force); otherwise builds from yfinance,
@@ -305,6 +373,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
         force: Force rebuild even if cache exists
         prediction_type: Type of prediction (default: "classification")
         open_close_data: Optional pre-downloaded open_close DataFrame to avoid redundant download
+        problematic_stocks: Optional list of problematic stocks to save (needed when open_close_data is provided)
     """
     os.makedirs(data_dir, exist_ok=True)
     
@@ -320,6 +389,10 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
         open_close = open_close_data
         # Get successfully downloaded stocks from the DataFrame columns
         successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+        # Use provided problematic_stocks if available, otherwise calculate from input
+        if problematic_stocks is None:
+            # This shouldn't happen if called correctly, but calculate as fallback
+            problematic_stocks = [stock for stock in stocks if stock not in successfully_downloaded_stocks]
     else:
         # For large stock lists, use fewer retries to speed up the download
         # Most errors are permanent (delisted, no data for date range), so 1 retry is sufficient
@@ -333,6 +406,12 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
 
         # Update stocks list to only include successfully downloaded stocks
         successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+        # Calculate problematic stocks
+        problematic_stocks = [stock for stock in stocks if stock not in successfully_downloaded_stocks]
+    
+    # Save problematic stocks for this time period (so we can skip checking them in future runs)
+    if problematic_stocks:
+        _save_problematic_stocks(problematic_stocks, args, data_dir)
 
     # Now build op/cp/date_index from the cleaned frame
     op = open_close["Open"].T   # (S, T)
