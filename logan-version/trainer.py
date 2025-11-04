@@ -202,12 +202,12 @@ class Trainer():
             # Only rank 0 downloads and processes data
             if self.is_main:
                 # Try to load from cache first
-                input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type)
+                input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
                 if input_data is None:
                     # Cache doesn't exist, download and process data
                     if self.is_main:
                         print("[data] Cache not found, downloading and processing data (rank 0 only)...")
-                    input_data = util.get_data(stocks, time_args, self.prediction_type)
+                    input_data = util.get_data(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
                     if isinstance(input_data, int):
                         raise RuntimeError("Error getting data from util.get_data()")
                 else:
@@ -219,7 +219,7 @@ class Trainer():
             
             # Now all ranks load from cache (more efficient than broadcasting large tensors)
             if not self.is_main:
-                input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type)
+                input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
                 if input_data is None:
                     raise RuntimeError(f"Cache files not found after rank 0 processing. Expected cache should exist.")
             
@@ -227,9 +227,9 @@ class Trainer():
             dist.barrier()
         else:
             # Non-distributed: try cache first, then download if needed
-            input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type)
+            input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
             if input_data is None:
-                input_data = util.get_data(stocks, time_args, self.prediction_type)
+                input_data = util.get_data(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
                 if isinstance(input_data, int):
                     raise RuntimeError("Error getting data from util.get_data()")
         
@@ -1437,9 +1437,10 @@ class Trainer():
         Load train, validation, and test datasets from separate .npz files.
         This method can be used to explicitly load separate datasets.
         """
-        input_data = util.load_separate_datasets(stocks, time_args, data_dir)
-        if isinstance(input_data, int):
-            raise RuntimeError("Error loading separate datasets from util.load_separate_datasets()")
+        # Use load_data_from_cache which handles separate .npz files
+        input_data = util.load_data_from_cache(stocks, time_args, data_dir=data_dir, prediction_type=self.prediction_type)
+        if input_data is None:
+            raise RuntimeError(f"Could not load separate datasets from cache in {data_dir}. Data may need to be downloaded first.")
         return input_data
 
     def stop(self):

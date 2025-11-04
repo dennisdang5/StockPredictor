@@ -89,7 +89,10 @@ class ModelEvaluator:
         print("[Evaluator] Loading test data...")
         
         # Load data using the same method as training
-        input_data = util.get_data(self.stocks, self.time_args)
+        # Try cache first, then download if needed
+        input_data = util.load_data_from_cache(self.stocks, self.time_args, data_dir=self.data_dir, prediction_type="classification")
+        if input_data is None:
+            input_data = util.get_data(self.stocks, self.time_args, data_dir=self.data_dir, prediction_type="classification")
         if isinstance(input_data, int):
             raise RuntimeError("Error getting data from util.get_data()")
         
