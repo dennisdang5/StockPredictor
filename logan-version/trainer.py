@@ -72,7 +72,7 @@ def pick_device():
         return torch.device("cpu")
 
 class EarlyStopper():
-    def __init__(self, patience=10, min_delta=0, is_dist=False, rank=0):
+    def __init__(self, patience=10, min_delta=0, is_dist=False, rank=0, save_path="savedmodel.pth"):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
@@ -80,6 +80,7 @@ class EarlyStopper():
         self.is_dist = is_dist
         self.rank = rank
         self.is_main = (rank == 0)
+        self.save_path = save_path
 
     def early_stop(self, validation_loss, model):
         # In distributed mode, we need to synchronize early stopping across all ranks
@@ -94,7 +95,7 @@ class EarlyStopper():
                 self.min_validation_loss = validation_loss
                 self.counter = 0
                 if self.is_main:
-                    torch.save((model.module if hasattr(model, "module") else model).state_dict(), "savedmodel.pth")
+                    torch.save((model.module if hasattr(model, "module") else model).state_dict(), self.save_path)
             elif validation_loss > (self.min_validation_loss + self.min_delta):
                 self.counter += 1
                 if self.counter >= self.patience:
@@ -126,7 +127,7 @@ class EarlyStopper():
             if validation_loss < self.min_validation_loss:
                 self.min_validation_loss = validation_loss
                 self.counter = 0
-                torch.save(model.state_dict(), "savedmodel.pth")
+                torch.save(model.state_dict(), self.save_path)
             elif validation_loss > (self.min_validation_loss + self.min_delta):
                 self.counter += 1
                 if self.counter >= self.patience:
@@ -328,6 +329,14 @@ class Trainer():
         if self.is_main:
             print("{} total parameters".format(sum(param.numel() for param in self.Model.parameters())))
 
+        # Determine the save path for the model
+        # If saved_model is provided, use it for both loading and saving
+        # Otherwise, default to "savedmodel.pth"
+        if saved_model is not None:
+            self.save_path = saved_model
+        else:
+            self.save_path = "savedmodel.pth"
+        
         if saved_model is not None:
             if os.path.exists(saved_model):
                 state_dict = torch.load(saved_model, map_location="cpu")
@@ -342,7 +351,7 @@ class Trainer():
 
         self.optimizer = optim.Adam(self.Model.parameters())
         self.loss_fn = nn.MSELoss()
-        self.stopper = EarlyStopper(patience=50, min_delta=0.001, is_dist=self.is_dist, rank=self.rank)
+        self.stopper = EarlyStopper(patience=50, min_delta=0.001, is_dist=self.is_dist, rank=self.rank, save_path=self.save_path)
         self.num_epochs = num_epochs
         
         # Storage for evaluation metrics
