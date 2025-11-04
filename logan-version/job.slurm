@@ -1,13 +1,14 @@
 #!/bin/bash
-#SBATCH -J test_train_lstm_model
-#SBATCH --ntasks=4
+#SBATCH -J lstm_train
+#SBATCH --ntasks=2
 #SBATCH --gpus-per-task=2
-#SBATCH --nodes=4
+#SBATCH --nodes=2
 #SBATCH --mem=0
 #SBATCH --partition=gpu
 #SBATCH --time=12:00:00
 #SBATCH --account=liu32_1378
 #SBATCH --constraint=v100
+#SBATCH --exclusive
 
 set -euo pipefail
 
@@ -43,7 +44,7 @@ export NCCL_DEBUG=WARN
 
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export NCCL_DEBUG=INFO
-export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 # Choose your site’s right interface (examples: bond0, ib0, eno1)
 export NCCL_SOCKET_IFNAME=bond0
 # If your cluster has no IB or IB is flaky, try:
