@@ -350,9 +350,16 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
 def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classification"):
     """
     Load data from cache files if they exist.
+    
+    This function handles the case where the input stocks list may include stocks
+    that failed to download. It first tries an exact match, then searches the
+    mapping file to find a cache that was created from a subset of these stocks.
+    
     Returns data tuple if cache exists, None otherwise.
     """
     prediction_suffix = f"_{prediction_type}"
+    
+    # First, try exact match with the input stocks list
     data_id = _get_data_id(stocks, args)
     base = f"data_{data_id}"
     
@@ -361,9 +368,49 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
     metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
     
-    # Check if all cache files exist
-    if not all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
-        return None
+    # Check if exact match cache exists
+    if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
+        # Exact match found - use it
+        pass  # Will load below
+    else:
+        # No exact match - try to find a cache from mapping file
+        # This handles the case where some stocks failed to download
+        mapping = _load_id_mapping(data_dir)
+        stocks_set = set(stocks)
+        args_str = ",".join(str(a) for a in args)
+        
+        # Find a mapping entry where:
+        # 1. The stored args match
+        # 2. The stored stocks are a subset of the input stocks (some may have failed)
+        found_data_id = None
+        for cached_id, cached_info in mapping.items():
+            cached_args_str = ",".join(str(a) for a in cached_info.get('args', []))
+            if cached_args_str == args_str:
+                cached_stocks = set(cached_info.get('stocks', []))
+                # Check if cached stocks are a subset of input stocks
+                # (meaning we can use this cache even if some input stocks failed)
+                if cached_stocks.issubset(stocks_set):
+                    # Found a matching cache - verify files exist
+                    cached_base = f"data_{cached_id}"
+                    cached_train = os.path.join(data_dir, cached_base + prediction_suffix + "_train.npz")
+                    cached_val = os.path.join(data_dir, cached_base + prediction_suffix + "_val.npz")
+                    cached_test = os.path.join(data_dir, cached_base + prediction_suffix + "_test.npz")
+                    cached_metrics = os.path.join(data_dir, cached_base + prediction_suffix + "_metrics.npz")
+                    
+                    if all(os.path.exists(p) for p in [cached_train, cached_val, cached_test, cached_metrics]):
+                        found_data_id = cached_id
+                        base = cached_base
+                        train_path = cached_train
+                        val_path = cached_val
+                        test_path = cached_test
+                        metrics_path = cached_metrics
+                        break
+        
+        if found_data_id is None:
+            # No matching cache found
+            return None
+    
+    # At this point, we have valid cache paths (either exact match or found via mapping)
     
     # Load from cache
     train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)")
