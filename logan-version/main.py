@@ -10,6 +10,7 @@ model_path = "savedmodel_classification.pth"
 
 # Top 30 S&P 500 stocks by market cap (subset for testing)
 
+"""
 stocks = [
     # Top Technology & Growth
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
@@ -61,14 +62,16 @@ stocks = [
 
     # Utilities
     "AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE", "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW", "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
-]"""
+]
 
 # Training phase
 print("=" * 60)
 print("TRAINING PHASE")
 print("=" * 60)
 
-train_obj = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=5000, prediction_type=prediction_type, saved_model=model_path)
+total_epochs = 1000
+
+train_obj = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=total_epochs, prediction_type=prediction_type, saved_model=model_path)
 
 if type(train_obj) == int:
     print("Error getting data")
@@ -80,7 +83,6 @@ for name, param in train_obj.Model.named_parameters():
     print()
 
 #total_epochs = train_obj.num_epochs
-total_epochs = 1000
 
 stop = False  # Initialize stop condition
 for epoch in range(total_epochs):
