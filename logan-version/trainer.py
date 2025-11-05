@@ -602,11 +602,24 @@ class Trainer():
                 self.writer.add_scalars('Loss/trainVSvalidation', {"Training":(avg_train), "Validation":(avg_val)}, epoch+1)
                 self.writer.add_scalar('Train Time', (end_time-start_time), epoch+1)
                 self.writer.flush()
-
+        
         # Periodic save regardless of validation loss improvement
-        # Save at epoch 0 and every save_every_epochs epochs
-        if self.save_every_epochs > 0 and ((epoch == 0) or ((epoch + 1) % self.save_every_epochs == 0)):
-            self._save_model_periodic(epoch + 1)
+        # Check on all ranks, but only save on main rank after synchronization
+        should_save_periodic = (self.save_every_epochs > 0 and 
+                               ((epoch == 0) or ((epoch + 1) % self.save_every_epochs == 0)))
+        
+        if should_save_periodic:
+            # Synchronize all ranks before saving (in distributed mode)
+            if self.is_dist:
+                try:
+                    dist.barrier()
+                except Exception as e:
+                    if self.is_main:
+                        print(f"[ERROR] Barrier failed before periodic save: {e}")
+            
+            # Only main rank saves the model
+            if self.is_main:
+                self._save_model_periodic(epoch + 1)
         
         return stop_condition
     
