@@ -136,7 +136,7 @@ class EarlyStopper():
         
 
 class Trainer():
-    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0):
+    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0, save_every_epochs=10):
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
         self.rank = dist.get_rank() if self.is_dist else 0
@@ -442,6 +442,7 @@ class Trainer():
         self.loss_fn = nn.MSELoss()
         self.stopper = EarlyStopper(patience=50, min_delta=0.001, is_dist=self.is_dist, rank=self.rank, save_path=self.save_path)
         self.num_epochs = num_epochs
+        self.save_every_epochs = save_every_epochs
         
         # Storage for evaluation metrics
         self.predicted_returns = []
@@ -602,7 +603,28 @@ class Trainer():
                 self.writer.add_scalar('Train Time', (end_time-start_time), epoch+1)
                 self.writer.flush()
 
+        # Periodic save regardless of validation loss improvement
+        # Save at epoch 0 and every save_every_epochs epochs
+        if self.save_every_epochs > 0 and ((epoch == 0) or ((epoch + 1) % self.save_every_epochs == 0)):
+            self._save_model_periodic(epoch + 1)
+        
         return stop_condition
+    
+    def _save_model_periodic(self, epoch):
+        """
+        Save the model periodically regardless of validation loss improvement.
+        This ensures we have checkpoints even if the model doesn't improve.
+        """
+        if not self.is_main:
+            return  # Only main rank saves
+        
+        try:
+            # Get the underlying model (unwrap DDP/DataParallel if needed)
+            model_to_save = self.Model.module if hasattr(self.Model, "module") else self.Model
+            torch.save(model_to_save.state_dict(), self.save_path)
+            print(f"[periodic save] Model saved at epoch {epoch} to {self.save_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save model periodically at epoch {epoch}: {e}")
     
     def get_summary(self):
         summary(self.Model, (240,3), self.batch_size, device=self.device.type)
