@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J lstm_train
-#SBATCH --ntasks=2
+#SBATCH --ntasks=4
 #SBATCH --gpus-per-task=2
 #SBATCH --nodes=4
 #SBATCH --mem=0
