@@ -439,10 +439,11 @@ class Trainer():
                     print(f"[load] No saved model found at {saved_model}, starting with random weights")
 
         # Use a lower learning rate to prevent instability
-        self.optimizer = optim.Adam(self.Model.parameters(), lr=1e-4)
+        # Even lower learning rate for more stability
+        self.optimizer = optim.Adam(self.Model.parameters(), lr=5e-5, weight_decay=1e-5)
         self.loss_fn = nn.MSELoss()
-        # Gradient clipping to prevent exploding gradients
-        self.max_grad_norm = 1.0
+        # More aggressive gradient clipping to prevent exploding gradients
+        self.max_grad_norm = 0.5
         self.stopper = EarlyStopper(patience=50, min_delta=0.001, is_dist=self.is_dist, rank=self.rank, save_path=self.save_path)
         self.num_epochs = num_epochs
         self.save_every_epochs = save_every_epochs
@@ -460,6 +461,14 @@ class Trainer():
         
         # Store model parameter count for AIC/BIC
         self.num_model_parameters = sum(p.numel() for p in self.Model.parameters())
+    
+    def _has_nan_weights(self):
+        """Check if any model parameters contain NaN or Inf values."""
+        model = self.Model.module if hasattr(self.Model, "module") else self.Model
+        for param in model.parameters():
+            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                return True
+        return False
 
     def train_one_epoch(self, epoch):
 
@@ -536,6 +545,15 @@ class Trainer():
                 torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                
+                # Check for NaN in model weights after optimizer step
+                if self._has_nan_weights():
+                    train_nan_model_output += 1
+                    if self.is_main:
+                        print(f"[ERROR] NaN detected in model weights after batch {pbar.n}! Stopping training.")
+                    # Reset optimizer state and skip this batch
+                    self.optimizer.zero_grad(set_to_none=True)
+                    continue
             else:
                 Y_pred = self.Model(X_batch)
                 # Check for NaN/Inf in model output
@@ -555,6 +573,15 @@ class Trainer():
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
                 self.optimizer.step()
+                
+                # Check for NaN in model weights after optimizer step
+                if self._has_nan_weights():
+                    train_nan_model_output += 1
+                    if self.is_main:
+                        print(f"[ERROR] NaN detected in model weights after batch {pbar.n}! Stopping training.")
+                    # Reset optimizer state and skip this batch
+                    self.optimizer.zero_grad(set_to_none=True)
+                    continue
 
 
             train_loss += loss.item()
