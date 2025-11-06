@@ -136,7 +136,7 @@ class EarlyStopper():
         
 
 class Trainer():
-    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0, save_every_epochs=10):
+    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0, save_every_epochs=25):
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
         self.rank = dist.get_rank() if self.is_dist else 0
@@ -438,8 +438,11 @@ class Trainer():
                 if self.is_main:
                     print(f"[load] No saved model found at {saved_model}, starting with random weights")
 
-        self.optimizer = optim.Adam(self.Model.parameters())
+        # Use a lower learning rate to prevent instability
+        self.optimizer = optim.Adam(self.Model.parameters(), lr=1e-4)
         self.loss_fn = nn.MSELoss()
+        # Gradient clipping to prevent exploding gradients
+        self.max_grad_norm = 1.0
         self.stopper = EarlyStopper(patience=50, min_delta=0.001, is_dist=self.is_dist, rank=self.rank, save_path=self.save_path)
         self.num_epochs = num_epochs
         self.save_every_epochs = save_every_epochs
@@ -476,6 +479,13 @@ class Trainer():
         train_loss = 0
         val_loss = 0
         stop_condition=None
+        train_batches_processed = 0  # Track actual batches processed (excluding skipped NaN batches)
+        
+        # Count NaN/Inf occurrences in training
+        train_nan_x_batch = 0
+        train_nan_y_batch = 0
+        train_nan_model_output = 0
+        train_nan_loss = 0
 
         start_time = time.perf_counter()
 
@@ -488,6 +498,18 @@ class Trainer():
             X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
             Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
             
+            # Check for NaN/Inf in input data
+            if torch.isnan(X_batch).any() or torch.isinf(X_batch).any():
+                train_nan_x_batch += 1
+                if self.is_main:
+                    print(f"[WARNING] NaN/Inf found in X_batch at batch {pbar.n}")
+                continue
+            if torch.isnan(Y_batch).any() or torch.isinf(Y_batch).any():
+                train_nan_y_batch += 1
+                if self.is_main:
+                    print(f"[WARNING] NaN/Inf found in Y_batch at batch {pbar.n}")
+                continue
+            
             # Get dates for this batch (for debugging/analysis)
             batch_dates = [self.train_dates[idx] for idx in indices.tolist()]
 
@@ -495,40 +517,96 @@ class Trainer():
             if self.use_amp:
                 with torch.amp.autocast(device_type=self.device.type):
                     Y_pred = self.Model(X_batch)
+                    # Check for NaN/Inf in model output
+                    if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
+                        train_nan_model_output += 1
+                        if self.is_main:
+                            print(f"[WARNING] NaN/Inf in model output at batch {pbar.n}")
+                        continue
                     loss = self.loss_fn(Y_pred, Y_batch)
+                # Check for NaN/Inf in loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    train_nan_loss += 1
+                    if self.is_main:
+                        print(f"[WARNING] NaN/Inf loss at batch {pbar.n}, skipping")
+                    continue
                 self.scaler.scale(loss).backward()
+                # Gradient clipping
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 Y_pred = self.Model(X_batch)
+                # Check for NaN/Inf in model output
+                if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
+                    train_nan_model_output += 1
+                    if self.is_main:
+                        print(f"[WARNING] NaN/Inf in model output at batch {pbar.n}")
+                    continue
                 loss = self.loss_fn(Y_pred, Y_batch)
+                # Check for NaN/Inf in loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    train_nan_loss += 1
+                    if self.is_main:
+                        print(f"[WARNING] NaN/Inf loss at batch {pbar.n}, skipping")
+                    continue
                 loss.backward()
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
 
             train_loss += loss.item()
+            train_batches_processed += 1
             
             if self.is_main:
-                pbar.set_postfix(avg_train=train_loss/(pbar.n or 1))
+                pbar.set_postfix(avg_train=train_loss/(train_batches_processed or 1))
         
-        # Aggregate training loss across all ranks
+        # Aggregate training loss and NaN counts across all ranks
         if self.is_dist:
             try:
                 train_loss_tensor = torch.tensor(train_loss, device=self.device)
+                train_batches_tensor = torch.tensor(train_batches_processed, device=self.device, dtype=torch.int)
+                train_nan_x_tensor = torch.tensor(train_nan_x_batch, device=self.device, dtype=torch.int)
+                train_nan_y_tensor = torch.tensor(train_nan_y_batch, device=self.device, dtype=torch.int)
+                train_nan_output_tensor = torch.tensor(train_nan_model_output, device=self.device, dtype=torch.int)
+                train_nan_loss_tensor = torch.tensor(train_nan_loss, device=self.device, dtype=torch.int)
+                
                 dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(train_batches_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(train_nan_x_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(train_nan_y_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(train_nan_output_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(train_nan_loss_tensor, op=dist.ReduceOp.SUM)
+                
                 train_loss = train_loss_tensor.item()
-                train_samples = len(self.trainLoader) * self.world_size
+                train_batches_processed = train_batches_tensor.item()
+                train_nan_x_batch = train_nan_x_tensor.item()
+                train_nan_y_batch = train_nan_y_tensor.item()
+                train_nan_model_output = train_nan_output_tensor.item()
+                train_nan_loss = train_nan_loss_tensor.item()
             except Exception as e:
                 if self.is_main:
                     print(f"[ERROR] Failed to aggregate training loss: {e}")
-                # Fallback: use local loss only (not ideal but prevents hang)
-                train_samples = len(self.trainLoader)
-        else:
-            train_samples = len(self.trainLoader)
+                # Fallback: use local values only
+                pass
         
-        avg_train = train_loss / train_samples
+        if train_batches_processed == 0:
+            if self.is_main:
+                print("[ERROR] No valid batches processed in training! All batches contained NaN/Inf.")
+            avg_train = float('nan')
+        else:
+            avg_train = train_loss / train_batches_processed
 
         self.Model.eval()
+        val_batches_processed = 0  # Track actual batches processed (excluding skipped NaN batches)
+        
+        # Count NaN/Inf occurrences in validation
+        val_nan_x_batch = 0
+        val_nan_y_batch = 0
+        val_nan_model_output = 0
+        val_nan_loss = 0
         
         with torch.no_grad():
             vbar = tqdm(self.validationLoader, total=len(self.validationLoader), 
@@ -537,35 +615,73 @@ class Trainer():
                 X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
                 Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
                 
+                # Check for NaN/Inf in validation data
+                if torch.isnan(X_batch).any() or torch.isinf(X_batch).any():
+                    val_nan_x_batch += 1
+                    continue
+                if torch.isnan(Y_batch).any() or torch.isinf(Y_batch).any():
+                    val_nan_y_batch += 1
+                    continue
+                
                 # Get dates for this batch (for debugging/analysis)
                 batch_dates = [self.val_dates[idx] for idx in indices.tolist()]
                 if self.use_amp:
                     with torch.amp.autocast(device_type=self.device.type):
                         Y_pred = self.Model(X_batch)
+                        if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
+                            val_nan_model_output += 1
+                            continue
                         loss = self.loss_fn(Y_pred, Y_batch)
                 else:
                     Y_pred = self.Model(X_batch)
+                    if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
+                        val_nan_model_output += 1
+                        continue
                     loss = self.loss_fn(Y_pred, Y_batch)
+                
+                if torch.isnan(loss) or torch.isinf(loss):
+                    val_nan_loss += 1
+                    continue
                 val_loss += loss.item()
+                val_batches_processed += 1
                 if self.is_main:
-                    vbar.set_postfix(avg_val=val_loss/(vbar.n or 1))
+                    vbar.set_postfix(avg_val=val_loss/(val_batches_processed or 1))
             
-            # Aggregate validation loss across all ranks
+            # Aggregate validation loss and NaN counts across all ranks
             if self.is_dist:
                 try:
                     val_loss_tensor = torch.tensor(val_loss, device=self.device)
+                    val_batches_tensor = torch.tensor(val_batches_processed, device=self.device, dtype=torch.int)
+                    val_nan_x_tensor = torch.tensor(val_nan_x_batch, device=self.device, dtype=torch.int)
+                    val_nan_y_tensor = torch.tensor(val_nan_y_batch, device=self.device, dtype=torch.int)
+                    val_nan_output_tensor = torch.tensor(val_nan_model_output, device=self.device, dtype=torch.int)
+                    val_nan_loss_tensor = torch.tensor(val_nan_loss, device=self.device, dtype=torch.int)
+                    
                     dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(val_batches_tensor, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(val_nan_x_tensor, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(val_nan_y_tensor, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(val_nan_output_tensor, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(val_nan_loss_tensor, op=dist.ReduceOp.SUM)
+                    
                     val_loss = val_loss_tensor.item()
-                    val_samples = len(self.validationLoader) * self.world_size
+                    val_batches_processed = val_batches_tensor.item()
+                    val_nan_x_batch = val_nan_x_tensor.item()
+                    val_nan_y_batch = val_nan_y_tensor.item()
+                    val_nan_model_output = val_nan_output_tensor.item()
+                    val_nan_loss = val_nan_loss_tensor.item()
                 except Exception as e:
                     if self.is_main:
                         print(f"[ERROR] Failed to aggregate validation loss: {e}")
-                    # Fallback: use local loss only (not ideal but prevents hang)
-                    val_samples = len(self.validationLoader)
-            else:
-                val_samples = len(self.validationLoader)
+                    # Fallback: use local values only
+                    pass
             
-            avg_val = val_loss / val_samples
+            if val_batches_processed == 0:
+                if self.is_main:
+                    print("[ERROR] No valid batches processed in validation! All batches contained NaN/Inf.")
+                avg_val = float('nan')
+            else:
+                avg_val = val_loss / val_batches_processed
             
             # Synchronize before early stopping check
             if self.is_dist:
@@ -592,6 +708,24 @@ class Trainer():
             print("Training Loss: {}".format(avg_train))
             print("Validation Loss: {}".format(avg_val))
             print("Training Time: {:.6f}s".format(end_time-start_time))
+            
+            # Print NaN/Inf statistics
+            total_train_batches = len(self.trainLoader) * (self.world_size if self.is_dist else 1)
+            total_val_batches = len(self.validationLoader) * (self.world_size if self.is_dist else 1)
+            
+            print("\n[NaN/Inf Statistics]")
+            print(f"Training - Batches skipped due to NaN/Inf:")
+            print(f"  X_batch: {train_nan_x_batch}/{total_train_batches} ({100*train_nan_x_batch/max(total_train_batches,1):.2f}%)")
+            print(f"  Y_batch: {train_nan_y_batch}/{total_train_batches} ({100*train_nan_y_batch/max(total_train_batches,1):.2f}%)")
+            print(f"  Model output: {train_nan_model_output}/{total_train_batches} ({100*train_nan_model_output/max(total_train_batches,1):.2f}%)")
+            print(f"  Loss: {train_nan_loss}/{total_train_batches} ({100*train_nan_loss/max(total_train_batches,1):.2f}%)")
+            print(f"Validation - Batches skipped due to NaN/Inf:")
+            print(f"  X_batch: {val_nan_x_batch}/{total_val_batches} ({100*val_nan_x_batch/max(total_val_batches,1):.2f}%)")
+            print(f"  Y_batch: {val_nan_y_batch}/{total_val_batches} ({100*val_nan_y_batch/max(total_val_batches,1):.2f}%)")
+            print(f"  Model output: {val_nan_model_output}/{total_val_batches} ({100*val_nan_model_output/max(total_val_batches,1):.2f}%)")
+            print(f"  Loss: {val_nan_loss}/{total_val_batches} ({100*val_nan_loss/max(total_val_batches,1):.2f}%)")
+            print(f"Valid batches processed - Training: {train_batches_processed}, Validation: {val_batches_processed}")
+            
             if stop_condition:
                 print("Early stop at epoch: {}".format(epoch))
             print("--------------------------------------------")
