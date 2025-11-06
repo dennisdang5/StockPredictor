@@ -8,8 +8,20 @@ import torch.nn.init as init
 class LSTMModel(nn.Module):
     def __init__(self, input_dim=(31,3), hidden_size=25, num_layers=1, batch_first=True, dropout=0.1):
         super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+        self.input_dim = input_dim
+        self.hidden_size = hidden_size
+        
+        # Input normalization layer - helps stabilize inputs
+        # Normalizes across features at each time step
+        self.input_norm = nn.LayerNorm(input_dim[1])
+        
+        # LSTM layers
         self.lstm = nn.LSTM(input_size=input_dim[1], hidden_size=hidden_size, num_layers=num_layers, batch_first=batch_first, dtype=torch.float32)
+        
+        # Layer normalization after LSTM - stabilizes activations and gradients
+        self.lstm_norm = nn.LayerNorm(hidden_size)
+        
+        self.dropout = nn.Dropout(p=dropout)
         self.linear = nn.Linear(hidden_size, 1)
         
         # Initialize weights properly to prevent NaN
@@ -39,6 +51,20 @@ class LSTMModel(nn.Module):
         self.linear.bias.data.fill_(0)
 
     def forward(self, x):
+        # Normalize input features at each time step
+        # This helps stabilize training even if input normalization varies
+        x = self.input_norm(x)
+        
+        # Pass through LSTM
         x, _ = self.lstm(x)
-        x = self.linear(x[:,-1,:])
+        
+        # Normalize LSTM output (applied to last time step only)
+        # This stabilizes the hidden state before the final linear layer
+        x = self.lstm_norm(x[:,-1,:])
+        
+        # Apply dropout for regularization
+        x = self.dropout(x)
+        
+        # Final linear layer
+        x = self.linear(x)
         return x

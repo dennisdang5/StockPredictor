@@ -461,6 +461,11 @@ class Trainer():
         
         # Store model parameter count for AIC/BIC
         self.num_model_parameters = sum(p.numel() for p in self.Model.parameters())
+        
+        # Track recovery attempts to prevent infinite loops
+        self.nan_recovery_attempts = 0
+        self.max_recovery_attempts = 3
+        self.last_good_checkpoint = None  # Track last known good checkpoint path
     
     def _has_nan_weights(self):
         """Check if any model parameters contain NaN or Inf values."""
@@ -469,6 +474,61 @@ class Trainer():
             if torch.isnan(param.data).any() or torch.isinf(param.data).any():
                 return True
         return False
+    
+    def _recover_from_nan(self):
+        """
+        Attempt to recover from NaN by reloading from checkpoint and reducing learning rate.
+        Returns True if recovery was successful, False otherwise.
+        """
+        self.nan_recovery_attempts += 1
+        
+        if self.nan_recovery_attempts > self.max_recovery_attempts:
+            if self.is_main:
+                print(f"[ERROR] Maximum recovery attempts ({self.max_recovery_attempts}) reached. Stopping training.")
+            return False
+        
+        # Try to reload from checkpoint
+        checkpoint_path = self.save_path
+        if not os.path.exists(checkpoint_path):
+            # Try to find the last periodic save
+            if self.is_main:
+                print(f"[WARNING] No checkpoint found at {checkpoint_path}. Cannot recover from NaN.")
+            return False
+        
+        try:
+            if self.is_main:
+                print(f"[RECOVERY] Attempt {self.nan_recovery_attempts}/{self.max_recovery_attempts}: "
+                      f"Reloading from checkpoint {checkpoint_path}")
+            
+            # Load checkpoint
+            state_dict = torch.load(checkpoint_path, map_location="cpu")
+            target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
+            target_module.load_state_dict(state_dict)
+            
+            # Reduce learning rate by factor of 2
+            current_lr = self.optimizer.param_groups[0]['lr']
+            new_lr = current_lr * 0.5
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = new_lr
+            
+            # Reset optimizer state to avoid carrying over corrupted momentum
+            self.optimizer = optim.Adam(self.Model.parameters(), lr=new_lr, weight_decay=1e-5)
+            
+            if self.is_main:
+                print(f"[RECOVERY] Successfully reloaded checkpoint. Reduced learning rate: {current_lr:.2e} -> {new_lr:.2e}")
+            
+            # Verify weights are good now
+            if self._has_nan_weights():
+                if self.is_main:
+                    print(f"[ERROR] Checkpoint also contains NaN weights! Cannot recover.")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            if self.is_main:
+                print(f"[ERROR] Failed to recover from NaN: {e}")
+            return False
 
     def train_one_epoch(self, epoch):
 
@@ -529,9 +589,27 @@ class Trainer():
                     # Check for NaN/Inf in model output
                     if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                         train_nan_model_output += 1
-                        if self.is_main:
-                            print(f"[WARNING] NaN/Inf in model output at batch {pbar.n}")
-                        continue
+                        # Check if weights are corrupted
+                        if self._has_nan_weights():
+                            if self.is_main:
+                                print(f"[ERROR] NaN in model output and weights detected at batch {pbar.n}!")
+                            # Attempt recovery
+                            if self._recover_from_nan():
+                                if self.is_main:
+                                    print(f"[RECOVERY] Continuing training after recovery...")
+                                self.optimizer.zero_grad(set_to_none=True)
+                                continue
+                            else:
+                                if self.is_main:
+                                    print(f"[ERROR] Cannot recover from NaN. Stopping training.")
+                                avg_train = float('nan')
+                                avg_val = float('nan')
+                                break
+                        else:
+                            # Output is NaN but weights are OK - might be a numerical issue with this specific batch
+                            if self.is_main:
+                                print(f"[WARNING] NaN/Inf in model output at batch {pbar.n} (weights OK, skipping batch)")
+                            continue
                     loss = self.loss_fn(Y_pred, Y_batch)
                 # Check for NaN/Inf in loss
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -550,18 +628,48 @@ class Trainer():
                 if self._has_nan_weights():
                     train_nan_model_output += 1
                     if self.is_main:
-                        print(f"[ERROR] NaN detected in model weights after batch {pbar.n}! Stopping training.")
-                    # Reset optimizer state and skip this batch
-                    self.optimizer.zero_grad(set_to_none=True)
-                    continue
+                        print(f"[ERROR] NaN detected in model weights after batch {pbar.n}!")
+                    # Attempt recovery
+                    if self._recover_from_nan():
+                        if self.is_main:
+                            print(f"[RECOVERY] Continuing training after recovery...")
+                        # Skip this batch and continue
+                        self.optimizer.zero_grad(set_to_none=True)
+                        continue
+                    else:
+                        # Recovery failed, stop training
+                        if self.is_main:
+                            print(f"[ERROR] Cannot recover from NaN. Stopping training.")
+                        # Mark epoch as failed
+                        avg_train = float('nan')
+                        avg_val = float('nan')
+                        break
             else:
                 Y_pred = self.Model(X_batch)
                 # Check for NaN/Inf in model output
                 if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                     train_nan_model_output += 1
-                    if self.is_main:
-                        print(f"[WARNING] NaN/Inf in model output at batch {pbar.n}")
-                    continue
+                    # Check if weights are corrupted
+                    if self._has_nan_weights():
+                        if self.is_main:
+                            print(f"[ERROR] NaN in model output and weights detected at batch {pbar.n}!")
+                        # Attempt recovery
+                        if self._recover_from_nan():
+                            if self.is_main:
+                                print(f"[RECOVERY] Continuing training after recovery...")
+                            self.optimizer.zero_grad(set_to_none=True)
+                            continue
+                        else:
+                            if self.is_main:
+                                print(f"[ERROR] Cannot recover from NaN. Stopping training.")
+                            avg_train = float('nan')
+                            avg_val = float('nan')
+                            break
+                    else:
+                        # Output is NaN but weights are OK - might be a numerical issue with this specific batch
+                        if self.is_main:
+                            print(f"[WARNING] NaN/Inf in model output at batch {pbar.n} (weights OK, skipping batch)")
+                        continue
                 loss = self.loss_fn(Y_pred, Y_batch)
                 # Check for NaN/Inf in loss
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -578,10 +686,22 @@ class Trainer():
                 if self._has_nan_weights():
                     train_nan_model_output += 1
                     if self.is_main:
-                        print(f"[ERROR] NaN detected in model weights after batch {pbar.n}! Stopping training.")
-                    # Reset optimizer state and skip this batch
-                    self.optimizer.zero_grad(set_to_none=True)
-                    continue
+                        print(f"[ERROR] NaN detected in model weights after batch {pbar.n}!")
+                    # Attempt recovery
+                    if self._recover_from_nan():
+                        if self.is_main:
+                            print(f"[RECOVERY] Continuing training after recovery...")
+                        # Skip this batch and continue
+                        self.optimizer.zero_grad(set_to_none=True)
+                        continue
+                    else:
+                        # Recovery failed, stop training
+                        if self.is_main:
+                            print(f"[ERROR] Cannot recover from NaN. Stopping training.")
+                        # Mark epoch as failed
+                        avg_train = float('nan')
+                        avg_val = float('nan')
+                        break
 
 
             train_loss += loss.item()
@@ -792,11 +912,19 @@ class Trainer():
         if not self.is_main:
             return  # Only main rank saves
         
+        # Check for NaN weights before saving
+        if self._has_nan_weights():
+            print(f"[WARNING] Skipping periodic save at epoch {epoch} - model contains NaN weights!")
+            return
+        
         try:
             # Get the underlying model (unwrap DDP/DataParallel if needed)
             model_to_save = self.Model.module if hasattr(self.Model, "module") else self.Model
             torch.save(model_to_save.state_dict(), self.save_path)
             print(f"[periodic save] Model saved at epoch {epoch} to {self.save_path}")
+            # Reset recovery counter on successful save (model is stable)
+            self.nan_recovery_attempts = 0
+            self.last_good_checkpoint = self.save_path
         except Exception as e:
             print(f"[ERROR] Failed to save model periodically at epoch {epoch}: {e}")
     
