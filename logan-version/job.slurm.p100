@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH -J test_train_lstm_model
+#SBATCH --nodes=1
+#SBATCH --gpus-per-task=1
+#SBATCH --mem=0
+#SBATCH --partition=gpu
+#SBATCH --time=00:30:00
+#SBATCH --account=liu32_1378
+# allow any of these GPUs (so P100 jobs can land)
+#SBATCH --constraint=v100|a40|p100
+#SBATCH --constraint=xeon-2640v4
+
+set -euo pipefail
+
+# 1) Minimal modules
+module purge
+module load ver/2506
+
+# predefine defaults so nounset doesn't complain
+export MKL_INTERFACE_LAYER=${MKL_INTERFACE_LAYER:-LP64}
+export MKL_THREADING_LAYER=${MKL_THREADING_LAYER:-GNU}
+
+# 2) Initialize conda for batch shells
+source /apps/conda/miniforge3/24.11.3/etc/profile.d/conda.sh
+
+# 3) Detect GPU and choose env
+GPU_NAME="$(command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name --format=csv,noheader | head -1 || echo UNKNOWN)"
+
+# default envs (edit paths if yours differ)
+ENV_P100="/home1/lkyamamo/.conda/envs/csci566-project-p100"
+ENV_VA40="/home1/lkyamamo/.conda/envs/csci566-project"
+
+case "${GPU_NAME}" in
+  *P100*)  ENV="${ENV_P100}" ;;
+  *V100*|*A40*) ENV="${ENV_VA40}" ;;
+  *)       echo "WARN: Unknown GPU '${GPU_NAME}', defaulting to ${ENV_VA40}"; ENV="${ENV_VA40}" ;;
+esac
+
+echo "=== GPU detected: ${GPU_NAME}"
+echo "=== Activating conda env: ${ENV}"
+conda activate "${ENV}"
+
+echo "=== Environment sanity checks ==="
+echo "HOST: $(hostname)"
+echo "Python: $(which python)"
+python -c "import sys; print('Python', sys.version)"
+python - <<'PY'
+try:
+    import torch
+    print('torch', torch.__version__, '| CUDA available?', torch.cuda.is_available())
+    print('CUDA device count:', torch.cuda.device_count())
+    if torch.cuda.is_available():
+        print('Device 0:', torch.cuda.get_device_name(0))
+except Exception as e:
+    print('Torch check failed:', e)
+PY
+command -v nvidia-smi >/dev/null && nvidia-smi || echo "nvidia-smi not found"
+
+# 4) Run under srun so it inherits GPU cgroup cleanly
+srun -u python -u main.py
