@@ -4,7 +4,7 @@ import torch
 import torch.optim as optim
 from torch import nn
 import torch.utils.data as data
-from model import LSTMModel
+from model import LSTMModel, CNNLSTMModel
 import util
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
@@ -407,7 +407,7 @@ class Trainer():
         # =========================
         # MODEL
         # =========================
-        self.Model = LSTMModel()
+        self.Model = CNNLSTMModel()
         
         # Move model to device first
         self.Model = self.Model.to(self.device)

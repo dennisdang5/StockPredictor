@@ -68,3 +68,28 @@ class LSTMModel(nn.Module):
         # Final linear layer
         x = self.linear(x)
         return x
+
+class CNNLSTMModel(nn.Module):
+    def __init__(self, input_dim=(31,3), kernel_size=3, hidden_size=25, num_layers=1, batch_first=True, dropout=0.1):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_size = hidden_size
+        self.input_norm = nn.LayerNorm(input_dim[1])
+        # first 11 of input should get one cnn kernel and last 20 should have a different kernel size
+        self.cnn1 = nn.Conv1d(input_dim[1], hidden_size, kernel_size=kernel_size, padding=kernel_size//2)
+        self.cnn2 = nn.Conv1d(input_dim[1], hidden_size, kernel_size=kernel_size, padding=kernel_size//2)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers=num_layers, batch_first=batch_first, dtype=torch.float32)
+        self.lstm_norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(p=dropout)
+        self.linear = nn.Linear(hidden_size, 1)
+        
+        
+        
+    def forward(self, x):
+        x = self.input_norm(x)
+        # first 11 of input should get one cnn kernel and last 20 should have a different kernel size
+        x1 = self.cnn1(x[:, :11, :])
+        x2 = self.cnn2(x[:, 11:, :])
+        x = torch.cat((x1, x2), dim=1)
+        x = self.lstm(x)
+        x = self.linear(x)

@@ -6,7 +6,7 @@ print("my code")
 start = "1989-12-01"
 end = "2015-09-30"
 prediction_type = "classification"
-model_path = "savedmodel_classification.pth"
+model_path = "savedmodel_classification_cnn_lstm.pth"
 
 # Top 30 S&P 500 stocks by market cap (subset for testing)
 
