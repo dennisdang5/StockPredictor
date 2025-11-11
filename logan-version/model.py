@@ -91,5 +91,7 @@ class CNNLSTMModel(nn.Module):
         x1 = self.cnn1(x[:, :11, :])
         x2 = self.cnn2(x[:, 11:, :])
         x = torch.cat((x1, x2), dim=1)
-        x = self.lstm(x)
+        x, _ = self.lstm(x)
+        x = self.lstm_norm(x[:,-1,:]) # apply layer normalization to last time step only
+        x = self.dropout(x)
         x = self.linear(x)
