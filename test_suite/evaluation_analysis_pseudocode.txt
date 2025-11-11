@@ -1,0 +1,57 @@
+read evaluation json file
+analyze the timeseries data by the following methods:
+    Cross-sectional rank skill (IC)
+        •	Median IC (robust) + IQR and 5/95% quantiles (tail risk).
+        •	%IC > 0 and streaks (longest positive/negative runs).
+        •	NW-t of mean(IC) (use your Newey–West): test if mean(IC) > 0.
+        •	IR for IC: \text{IR} = \frac{\overline{\text{IC}}}{\text{sd}(\text{IC})}\sqrt{252}.
+        •	Fisher z-average (better aggregation):
+    z_i=\tfrac12\ln\frac{1+\text{IC}_i}{1-\text{IC}_i}, average with weights w_i\approx n_i-3, then back-transform.
+
+    Classification quality (AUC, LogLoss, Brier)
+        •	Median AUC + BCa bootstrap CI (resample days).
+        •	Brier decomposition (reliability vs resolution) + ECE (calibration drift) on rolling windows.
+        •	Baseline-adjusted hit-rate: report topk_hit_rate − base rate (base ≈ daily % above-median). A raw 0.40 reads differently if the base is 0.35 vs 0.55.
+
+    Portfolio edge (long_short_spread)
+        •	Mean daily spread (net), Sharpe, Sortino, max drawdown, VaR/CVaR (you already compute these).
+        •	Deflated Sharpe (optional, guards multiple-testing).
+        •	Percentile rank vs random (you already produce): show where your mean sits vs the random distribution median and 5/95% bands.
+
+    How to analyze over time (find when/why it breaks)
+
+    Rolling & change-points
+        •	Rolling 60-day IC, AUC, hit-rate with bands; mark change-points (CUSUM or simple threshold on regime shift of rolling mean).
+        •	Calendar heatmaps of IC; weekday × hour IC heatmaps (already scaffolded).
+
+    Conditional performance
+        •	Market regime: condition on SPX up vs down days; on |SPX| terciles; on cross-sectional dispersion (std of returns across tickers). Report IC/AUC/Spread per bucket.
+        •	Sector buckets: daily IC by sector; surface “bad-day book” = worst 10 days with sector contributions.
+        •	K-sensitivity: plot spread and hit-rate vs k (5..50). Pick k where edge is most stable.
+
+    Stability & turnover
+        •	Rank stability: Kendall-τ / top-k overlap between day t and t−1 (churn hurts costs).
+        •	Prediction drift: correlation of today’s scores with yesterday’s. Too low ⇒ unstable; too high ⇒ stale.
+
+    Error anatomy
+        •	FP/FN mix aggregated over worst 10% IC days vs best 10%: do you over-long in down markets or over-short in momentum snaps?
+        •	Threshold scan (if not pure ranking): Precision–Recall and Youden-J across pooled days to choose a global threshold (if you ever need one).
+
+    Simple regressions (why skill moves)
+        •	Regress daily IC (or spread) on: SPX return, |SPX|, VIX change, cross-sectional dispersion, n (coverage), and dummy for event days (FOMC/CPI/quad-witching). Use NW errors. Coefs tell you where the model thrives/fails.
+
+    Visualization shortlist
+        •	ECDF/violin for IC/AUC distributions.
+        •	Rolling report (small multiples): IC, AUC, spread, hit-rate, with event overlays.
+        •	K-sensitivity curve (spread vs k).
+        •	Calibration: reliability curve + ECE over time.
+        •	Bad-day panel: for the 10 hardest dates—IC, spread, FP/FN, sector heatmap.
+
+    One-liner “report card” you can print
+        •	IC: median / 5–95% / %>0 / NW-t.
+        •	AUC: median (CI).
+        •	Top-k: (hit-rate − base) at chosen k.
+        •	Portfolio: mean daily net, Sharpe, max DD, percentile vs random, excess vs S&P.
+        •	Stability: τ(top-k overlap).
+        •	Regimes: IC when SPX↓ vs SPX↑; low vs high dispersion.
+save the compiled data above into a single file

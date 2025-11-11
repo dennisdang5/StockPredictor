@@ -1,0 +1,30 @@
+Group,Metric,Model,Before costs,After costs
+Panel A,Mean return (long),savedmodel_classification,0.0021311804890315404,0.00113118048903154
+Panel A,Mean return (short),savedmodel_classification,0.0009661884464313763,-3.381155356862412e-05
+Panel A,Mean return (portfolio),savedmodel_classification,0.003097368935462917,0.0010973689354629166
+Panel A,Std. dev.,savedmodel_classification,0.010647342364877875,0.010647342364877875
+Panel A,Share > 0,savedmodel_classification,0.6342747726184778,0.5351842987075156
+Panel A,Minimum return,savedmodel_classification,-0.0752181771627117,-0.0772181771627117
+Panel A,First quartile,savedmodel_classification,-0.0025220123574903543,-0.004522012357490354
+Panel A,Median return,savedmodel_classification,0.002679131526908256,0.0006791315269082561
+Panel A,Third quartile,savedmodel_classification,0.007448683660063,0.005448683660063
+Panel A,Maximum return,savedmodel_classification,0.09233158094299022,0.09033158094299022
+Panel A,Kurtosis,savedmodel_classification,9.960800418733502,9.960800418733502
+Panel A,Newey-West SE,savedmodel_classification,0.0003052163260514062,0.0003052163260514062
+Panel A,Newey-West t-stat,savedmodel_classification,10.148110278154782,3.595380855472625
+Panel A,Standard error,savedmodel_classification,0.00023295498000042858,0.00023295498000042858
+Panel A,t-stat (iid),savedmodel_classification,13.29599794542799,4.710648106603678
+Panel B,VaR (5%),savedmodel_classification,-0.011494924604506334,-0.013494924604506334
+Panel B,CVaR (5%),savedmodel_classification,-0.018074194859611592,-0.02007419485961159
+Panel B,VaR (1%),savedmodel_classification,-0.0212929948228273,-0.023292994822827297
+Panel B,CVaR (1%),savedmodel_classification,-0.031195315376082028,-0.03319531537608203
+Panel B,Max drawdown (%),savedmodel_classification,12.529334679276158,46.48475940418603
+Panel C,Return p.a.,savedmodel_classification,0.780536971736655,0.276536971736655
+Panel C,Excess return p.a.,savedmodel_classification,0.733434154111799,0.22943415411179896
+Panel C,Std. dev. p.a.,savedmodel_classification,0.1690213201273752,0.1690213201273752
+Panel C,Downside dev. p.a.,savedmodel_classification,0.10261964263969958,0.10212541196059423
+Panel C,Sharpe ratio,savedmodel_classification,4.61797938359752,1.636107039799805
+Panel C,Sortino ratio,savedmodel_classification,7.606116642572437,2.7078174415918994
+Benchmarks,Return p.a. (S&P 500),S&P 500,0.04710281762485601,0.04710281762485601
+Benchmarks,Volatility p.a. (S&P 500),S&P 500,0.22222494005731233,0.22222494005731233
+Benchmarks,Sharpe (S&P 500),S&P 500,0.21196008698532257,0.21196008698532257

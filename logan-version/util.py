@@ -176,6 +176,72 @@ def _save_problematic_stocks(problematic_stocks, args, data_dir="data"):
     except Exception as e:
         print(f"Warning: Could not save problematic stocks: {e}")
 
+def _get_sp500_returns_for_dates(test_dates, date_index, study_period):
+    """
+    Fetch S&P 500 returns aligned with test dates.
+    
+    Args:
+        test_dates: List of test dates (datetime objects)
+        date_index: Original date index from the data
+        study_period: Study period length
+        
+    Returns:
+        numpy array of S&P 500 returns aligned with test_dates
+    """
+    if not test_dates or len(test_dates) == 0:
+        print("[util] No test dates available for S&P 500")
+        return np.array([])
+    
+    try:
+        print("[util] Fetching S&P 500 data for metrics...")
+        
+        # Get date range from test dates
+        min_date = min(test_dates)
+        max_date = max(test_dates)
+        
+        # Fetch S&P 500 data (^GSPC is the ticker for S&P 500)
+        sp500 = yf.Ticker("^GSPC")
+        sp500_data = sp500.history(start=min_date, end=max_date, repair=True)
+        
+        if sp500_data is None or sp500_data.empty:
+            print("[util] Warning: Could not fetch S&P 500 data, using zeros")
+            return np.zeros(len(test_dates))
+        
+        # Calculate daily returns from S&P 500 close prices
+        sp500_close = sp500_data['Close']
+        sp500_daily_returns = sp500_close.pct_change().dropna()
+
+        if isinstance(sp500_daily_returns.index, pd.DatetimeIndex) and sp500_daily_returns.index.tz is not None:
+            sp500_daily_returns.index = sp500_daily_returns.index.tz_localize(None)
+        
+        # Convert test dates to pandas Timestamp for alignment
+        test_dates_pd = pd.to_datetime(test_dates)
+        if isinstance(test_dates_pd, pd.DatetimeIndex) and test_dates_pd.tz is not None:
+            test_dates_pd = test_dates_pd.tz_localize(None)
+        
+        # Align S&P 500 returns with test dates
+        # Use forward fill to match each test date with the most recent S&P 500 return
+        sp500_returns = []
+        for test_date in test_dates_pd:
+            # Find S&P 500 return for this date or previous trading day
+            # Use reindex with method='ffill' to forward fill from previous trading day
+            date_returns = sp500_daily_returns.reindex([test_date], method='ffill')
+            
+            if len(date_returns) > 0 and not pd.isna(date_returns.iloc[0]):
+                sp500_returns.append(date_returns.iloc[0])
+            else:
+                # If no data available, use 0 (no return)
+                sp500_returns.append(0.0)
+        
+        sp500_returns = np.array(sp500_returns, dtype=float)
+        
+        print(f"[util] S&P 500 returns fetched: {len(sp500_returns)} values, mean={np.mean(sp500_returns):.6f}, std={np.std(sp500_returns):.6f}")
+        return sp500_returns
+        
+    except Exception as e:
+        print(f"[util] Warning: Error fetching S&P 500 data: {e}, using zeros")
+        return np.zeros(len(test_dates))
+
 def identify_problematic_stocks(stocks, args, max_retries=1):
     """
     Identify which stocks from the input list are problematic (cannot be downloaded).
@@ -423,7 +489,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
 
     # Features/targets
     if prediction_type == "classification":
-        xdata, ydata, dates, revenues = get_feature_input_classification(op, cp, lookback, op.shape[1], len(successfully_downloaded_stocks), date_index)
+        xdata, ydata, dates, revenues, returns = get_feature_input_classification(op, cp, lookback, op.shape[1], len(successfully_downloaded_stocks), date_index)
     else:
         raise ValueError("Invalid prediction type - only 'classification' is supported")
     xdata = torch.from_numpy(xdata).to(torch.float32)  # (S, W, L, F)
@@ -454,6 +520,10 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     Xva_f, Yva_f, Dvalidation_f = _sel(val_mask)
     Xte_f, Yte_f, Dtest_f = _sel(test_mask)
     Rev_f = revenues[test_mask]
+    Returns_f = returns[test_mask]
+
+    # Fetch S&P 500 returns aligned with test dates
+    Sp500_f = _get_sp500_returns_for_dates(Dtest_f, date_index, op.shape[1])
 
     # --- split summary ---
     n_tr, n_va, n_te = len(Dtrain_f), len(Dvalidation_f), len(Dtest_f)
@@ -495,7 +565,9 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     }, desc="Saving test dataset (.npz)")
 
     _save_npz_progress(metrics_path, {
-        "Rev": _to_np(Rev_f)
+        "Rev": _to_np(Rev_f),
+        "Returns": _to_np(Returns_f),
+        "Sp500": _to_np(Sp500_f)
     }, desc="Saving metrics dataset (.npz)")
     
     print(f"{prediction_type.title()} datasets saved separately:")
@@ -508,17 +580,18 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     # Save ID mapping so we can reference this data later (using successfully downloaded stocks)
     _save_id_mapping(data_id, successfully_downloaded_stocks, args, data_dir)
     
-    return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f)
+    return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f, Returns_f, Sp500_f)
 
 def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classification"):
     """
     Load data from cache files if they exist.
     
-    This function only checks for exact matches of the input stocks and args.
-    It does NOT use subset matching - the cached stocks must exactly match the input stocks.
+    This function filters out problematic stocks before checking for cache,
+    matching the behavior of get_data() which saves cache with filtered stocks.
+    It also uses the mapping file to find cache by matching stocks and args.
     
     Args:
-        stocks: List of stock tickers (should already be filtered to remove problematic stocks)
+        stocks: List of stock tickers (may include problematic stocks - will be filtered)
         args: Date range arguments
         data_dir: Directory where cache files are stored
         prediction_type: Type of prediction (default: "classification")
@@ -528,8 +601,15 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     """
     prediction_suffix = f"_{prediction_type}"
     
-    # Generate data ID for exact match check
-    data_id = _get_data_id(stocks, args)
+    # Step 1: Load problematic stocks for this time period (if they exist)
+    problematic_stocks = _load_problematic_stocks(args, data_dir)
+    
+    # Step 2: Filter out problematic stocks from input stocks (matching get_data behavior)
+    filtered_stocks = [stock for stock in stocks if stock not in problematic_stocks]
+    
+    # Step 3: Try to find cache using filtered stocks
+    # First, try direct match with filtered stocks
+    data_id = _get_data_id(filtered_stocks, args)
     base = f"data_{data_id}"
     
     train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
@@ -537,13 +617,43 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
     metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
     
-    # Check if exact match cache exists
+    # Check if exact match cache exists with filtered stocks
     if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
         # Exact match found - use it
         pass  # Will load below
     else:
-        # No exact match found
-        return None
+        # Step 4: Try to find cache using the mapping file
+        # This handles cases where the cache was created with a different stock list
+        # but the filtered stocks match
+        mapping = _load_id_mapping(data_dir)
+        found_cache = False
+        
+        for cached_id, cached_info in mapping.items():
+            cached_stocks = set(cached_info.get('stocks', []))
+            cached_args = cached_info.get('args', [])
+            
+            # Normalize args for comparison (convert to list if needed)
+            cached_args_list = list(cached_args) if cached_args else []
+            args_list = list(args) if args else []
+            
+            # Check if args match and filtered stocks match cached stocks
+            if cached_args_list == args_list and set(filtered_stocks) == cached_stocks:
+                # Found matching cache - use this data_id
+                data_id = cached_id
+                base = f"data_{data_id}"
+                
+                train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
+                val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
+                test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
+                metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
+                
+                if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
+                    found_cache = True
+                    break
+        
+        if not found_cache:
+            # No cache found
+            return None
     
     # At this point, we have valid cache paths (exact match found)
     
@@ -551,7 +661,28 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)")
     val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset (.npz)")
     test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset (.npz)")
-    metrics_data = _load_npz_progress(metrics_path, ["Rev"], desc="Loading metrics dataset (.npz)")
+    
+    # Load metrics - handle both old format and new format (Rev + Returns + Sp500)
+    try:
+        metrics_data = _load_npz_progress(metrics_path, ["Rev", "Returns", "Sp500"], desc="Loading metrics dataset (.npz)")
+        Sp500 = metrics_data.get("Sp500", None)
+        if Sp500 is None:
+            # Old format - fetch S&P 500
+            print("[util] Old metrics format detected, fetching S&P 500 returns...")
+            Dte_temp = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
+            Sp500 = _get_sp500_returns_for_dates(Dte_temp, None, None)
+        Returns = metrics_data.get("Returns", None)
+        if Returns is None:
+            print("[util] Warning: Returns not found in metrics cache, using Rev as fallback")
+            Returns = metrics_data["Rev"]
+        metrics_data["Returns"] = Returns
+    except KeyError:
+        # Old format - only Rev available
+        metrics_data = _load_npz_progress(metrics_path, ["Rev"], desc="Loading metrics dataset (.npz)")
+        print("[util] Old metrics format detected, fetching S&P 500 returns...")
+        Dte_temp = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
+        Sp500 = _get_sp500_returns_for_dates(Dte_temp, None, None)
+        metrics_data["Returns"] = metrics_data["Rev"]
     
     # Convert back to torch tensors and Python datetime objects
     Xtr = torch.from_numpy(train_data["X"]).to(torch.float32)
@@ -567,8 +698,9 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     Dte = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
     
     Rev = metrics_data["Rev"]
+    Returns = metrics_data.get("Returns", Rev)
     
-    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev)
+    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev, Returns, Sp500)
 
 def save_data_locally(stocks, args, data_dir="data", force=False, prediction_type="classification"):
     # Force a rebuild/save and return the 9-tuple
@@ -587,8 +719,9 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     print(f"[features] Computing features for {num_stocks} stocks over {T} time periods...")
     # Precompute elementary series (may contain NaNs)
     f_t1 = np.full((num_stocks,3, T), np.nan, dtype=float)
-    rev_labels = np.full((num_stocks, T), np.nan, dtype=float)  # Initialize with NaN for proper alignment
+    return_labels = np.full((num_stocks, T), np.nan, dtype=float)  # Initialize with NaN for proper alignment
     rev_t = np.full((num_stocks, T), np.nan, dtype=float)
+    return_t = np.full((num_stocks, T), np.nan, dtype=float)
     
     print(f"[features] Step 1/2: Precomputing elementary series...")
     for t in range(2, T):
@@ -604,26 +737,27 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
             if pd.notna(o_t) and pd.notna(o_t1):
                 f_t1[n, 2, t] = o_t / o_t1 - 1.0      # opr
             
-            # Calculate revenue for valid stocks only
-            if pd.notna(cp.iloc[n, t]) and pd.notna(op.iloc[n, t]):
+            # Calculate revenue/return for valid stocks only
+            if pd.notna(cp.iloc[n, t]) and pd.notna(op.iloc[n, t]) and op.iloc[n, t] != 0:
                 rev_t[n, t] = cp.iloc[n, t] - op.iloc[n, t]
+                return_t[n, t] = (cp.iloc[n, t] - op.iloc[n, t]) / op.iloc[n, t]
                 valid_stocks.append(n)
         
-        # Calculate median revenue at time t
-        rev_t_valid = rev_t[valid_stocks, t]
-        if len(rev_t_valid) > 0:
-            median_rev = np.median(rev_t_valid)
-            rev_labels[valid_stocks, t] = np.where(rev_t_valid > median_rev, 1.0, -1.0)
+        # Calculate median return at time t
+        return_t_valid = return_t[valid_stocks, t]
+        if len(return_t_valid) > 0:
+            median_return = np.median(return_t_valid)
+            return_labels[valid_stocks, t] = np.where(return_t_valid >= median_return, 1.0, -1.0)
     
     print(f"[features] Step 1/2 complete. Step 2/2: Building feature windows (this may take several minutes)...")
-    X_list, y_list, d_list, rev_list = [], [], [], []
+    X_list, y_list, d_list, rev_list, return_list = [], [], [], [], []
     # --- counters ---
     total_candidates = 0
     kept = 0
     dropped_nan_target = 0
     dropped_feature_nan = 0
     dropped_flat_iqr = 0
-    dropped_rev_nan = 0
+    dropped_return_nan = 0
 
     # Add progress indicator for the heavy computation loop
     total_windows = (T - lookback - 2) * num_stocks
@@ -633,13 +767,14 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     for end_t in range(lookback + 2, T):
         for n in range(num_stocks):
             total_candidates += 1
-            tgt = rev_labels[n, end_t]
+            tgt = return_labels[n, end_t]
             rev = rev_t[n, end_t]
-            if pd.isna(tgt) or pd.isna(rev):
+            ret = return_t[n, end_t]
+            if pd.isna(tgt) or pd.isna(rev) or pd.isna(ret):
                 if pd.isna(tgt):
                     dropped_nan_target += 1
-                if pd.isna(rev):
-                    dropped_rev_nan += 1
+                if pd.isna(rev) or pd.isna(ret):
+                    dropped_return_nan += 1
                 continue
 
             # {240, 220, 200, 180, 160, 140, 120, 100, 80, 60, 40}
@@ -672,6 +807,7 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
             y_list.append([tgt])
             d_list.append(date_index[end_t])
             rev_list.append(rev)
+            return_list.append(ret)
             kept += 1
         
         window_count += num_stocks
@@ -687,14 +823,16 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     print(f"[windows] candidates: {total_candidates:,} | kept: {kept:,} ({pct:.1f}%) | removed: {removed:,}")
     if removed:
         print(f"[windows] removed breakdown — NaN target: {dropped_nan_target:,}, "
-              f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,}")
+              f"feature NaN: {dropped_feature_nan:,}, zero-IQR: {dropped_flat_iqr:,},"
+              f" return NaN: {dropped_return_nan:,}")
 
     X = np.array(X_list, dtype=float)   # (num_stocks, (lookback-40)/20 + 20, 3)
     y = np.array(y_list, dtype=float)   # (num_stocks, 1)
     dates = d_list                      # list of length num_stocks
     revenues = np.array(rev_list, dtype=float)
+    returns = np.array(return_list, dtype=float)
 
-    return X, y, dates, revenues
+    return X, y, dates, revenues, returns
 
     """
     trying to get prediction at time t

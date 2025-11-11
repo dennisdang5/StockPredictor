@@ -323,7 +323,15 @@ class Trainer():
             else:
                 print("[data] Loaded from cache")
         
-        X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test = input_data
+        # Handle both old format (10 elements) and new format (11 elements with S&P 500)
+        if len(input_data) == 10:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test = input_data
+            Sp500_test = None  # Old format doesn't have S&P 500
+        elif len(input_data) == 11:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Sp500_test = input_data
+        else:
+            raise ValueError(f"Unexpected number of elements in input_data: {len(input_data)}")
+        
         # Store dates for later reference (even when data is shuffled)
         self.train_dates = D_train
         self.val_dates = D_val
