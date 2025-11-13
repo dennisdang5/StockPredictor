@@ -88,9 +88,13 @@ class CNNLSTMModel(nn.Module):
     def forward(self, x):
         x = self.input_norm(x)
         # first 11 of input should get one cnn kernel and last 20 should have a different kernel size
-        x1 = self.cnn1(x[:, :11, :])
-        x2 = self.cnn2(x[:, 11:, :])
-        x = torch.cat((x1, x2), dim=1)
+        # Conv1d expects [batch, channels, length], so transpose from [batch, time, features] to [batch, features, time]
+        x1 = self.cnn1(x[:, :11, :].transpose(1, 2))  # [batch, 3, 11] -> [batch, hidden_size, 11]
+        x2 = self.cnn2(x[:, 11:, :].transpose(1, 2))  # [batch, 3, 20] -> [batch, hidden_size, 20]
+        # Transpose back to [batch, time, features] for LSTM
+        x1 = x1.transpose(1, 2)  # [batch, hidden_size, 11] -> [batch, 11, hidden_size]
+        x2 = x2.transpose(1, 2)  # [batch, hidden_size, 20] -> [batch, 20, hidden_size]
+        x = torch.cat((x1, x2), dim=1)  # [batch, 31, hidden_size]
         x, _ = self.lstm(x)
         x = self.lstm_norm(x[:,-1,:]) # apply layer normalization to last time step only
         x = self.dropout(x)
@@ -132,7 +136,7 @@ class AutoEncoder(nn.Module):
 
 class CNNAutoEncoder(nn.Module):
     def __init__(self, input_shape=(31,3), ) -> None:
-        super(AutoEncoder,self).__init__()
+        super(CNNAutoEncoder,self).__init__()
         self.input_shape = input_shape
         self.short_enc_conv = nn.Conv1d(3, 2*self.input_shape[1], 3, padding=1)
         self.long_enc_conv = nn.Conv1d(3, 2*self.input_shape[1], 3, padding=1)
@@ -145,14 +149,18 @@ class CNNAutoEncoder(nn.Module):
         # optimizer = torch.optim.Adam()
 
     def forward(self, x):
-        # assume x in shape (31,3)
-        short_enc = self.short_enc_conv(x[:, :11, :])
-        long_enc = self.long_enc_conv(x[:, 11:, :])
+        # assume x in shape (batch, 31, 3) = (batch, time_steps, features)
+        # Conv1d expects [batch, channels, length], so transpose from [batch, time, features] to [batch, features, time]
+        short_enc = self.short_enc_conv(x[:, :11, :].transpose(1, 2))  # [batch, 3, 11] -> [batch, channels, 11]
+        long_enc = self.long_enc_conv(x[:, 11:, :].transpose(1, 2))   # [batch, 3, 20] -> [batch, channels, 20]
         
-        short_dec = self.short_dec_conv(short_enc)
-        long_dec = self.long_dec_conv(long_enc)
+        short_dec = self.short_dec_conv(short_enc)  # [batch, channels, 11] -> [batch, 3, 11]
+        long_dec = self.long_dec_conv(long_enc)    # [batch, channels, 20] -> [batch, 3, 20]
 
-        x = torch.cat((short_dec, long_dec), dim=1)
+        # Transpose back to [batch, time, features] for concatenation
+        short_dec = short_dec.transpose(1, 2)  # [batch, 3, 11] -> [batch, 11, 3]
+        long_dec = long_dec.transpose(1, 2)    # [batch, 3, 20] -> [batch, 20, 3]
+        x = torch.cat((short_dec, long_dec), dim=1)  # [batch, 31, 3]
         return x
 
 class AELSTM(nn.Module):
