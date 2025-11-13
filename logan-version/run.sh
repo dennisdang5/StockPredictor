@@ -1,37 +1,18 @@
 #!/bin/bash
-# Bash execution script converted from job.slurm
-# This script can be run locally without SLURM
+# Bash execution script - works exactly like job.slurm
+# Automatically detects if running in SLURM or interactive node
 
 set -euo pipefail
 
-# Configuration - adjust these as needed
-NNODES=${NNODES:-1}  # Number of nodes (default: 1 for local execution)
-NPROC_PER_NODE=${NPROC_PER_NODE:-1}  # Number of processes per node (default: 1)
-MASTER_PORT=${MASTER_PORT:-29500}  # Master port for distributed training
-MASTER_ADDR=${MASTER_ADDR:-localhost}  # Master address (default: localhost)
-
 # 1) Keep modules minimal; don't load nvhpc/gcc simultaneously.
 #    If you're using PyTorch wheels/conda, you usually don't need cluster CUDA modules at all.
-# Uncomment if you need to load modules on your system
-# module purge
-# module load ver/2506
+module purge
+module load ver/2506
 
 # 2) Initialize conda for non-interactive shells, then activate your env.
-#    Update the conda path and environment name for your system
 #    (No 'conda init' needed in your dotfiles.)
-if [ -f "/apps/conda/miniforge3/24.11.3/etc/profile.d/conda.sh" ]; then
-    source /apps/conda/miniforge3/24.11.3/etc/profile.d/conda.sh
-    conda activate /home1/lkyamamo/.conda/envs/csci566-project
-elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate csci566-project 2>/dev/null || conda activate base
-elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"
-    conda activate csci566-project 2>/dev/null || conda activate base
-elif command -v conda &> /dev/null; then
-    # Try to activate if conda is already in PATH
-    conda activate csci566-project 2>/dev/null || conda activate base 2>/dev/null || true
-fi
+source /apps/conda/miniforge3/24.11.3/etc/profile.d/conda.sh
+conda activate /home1/lkyamamo/.conda/envs/csci566-project
 
 echo "=== Environment sanity checks ==="
 echo "HOST: $(hostname)"
@@ -87,34 +68,48 @@ fi
 # export NCCL_IB_DISABLE=1
 
 # Master addr/port for rendezvous
-# For local execution, use localhost; for multi-node, set MASTER_ADDR environment variable
-if [ "$NNODES" -eq 1 ]; then
-    MASTER_ADDR="localhost"
+# Use SLURM variables if available (exactly like job.slurm), otherwise use hostname
+if [ -n "${SLURM_NODELIST:-}" ]; then
+    # Running in SLURM - use SLURM variables exactly like job.slurm
+    MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)
+    NNODES=${SLURM_NNODES:-1}
 else
-    # For multi-node, MASTER_ADDR should be set as environment variable
-    if [ "$MASTER_ADDR" = "localhost" ]; then
-        echo "Warning: Multi-node setup detected but MASTER_ADDR is localhost. Please set MASTER_ADDR to the master node's IP."
-    fi
+    # Running on interactive node - use hostname
+    MASTER_ADDR=$(hostname)
+    NNODES=${NNODES:-1}
 fi
 
-# Auto-detect number of GPUs if NPROC_PER_NODE not set and we're on a single node
-if [ "$NNODES" -eq 1 ] && [ "$NPROC_PER_NODE" -eq 1 ]; then
-    if command -v nvidia-smi &> /dev/null; then
-        GPU_COUNT=$(nvidia-smi -L | wc -l)
-        if [ "$GPU_COUNT" -gt 0 ]; then
-            NPROC_PER_NODE=$GPU_COUNT
-            echo "[Auto-detected] Found $GPU_COUNT GPU(s), setting NPROC_PER_NODE=$NPROC_PER_NODE"
-        fi
+# Port generation - same as job.slurm
+MASTER_PORT=$((10000 + RANDOM % 50000))
+
+# Processes per node = GPUs per node (fallback if env var missing)
+# Use SLURM variable if available, otherwise auto-detect
+if [ -n "${SLURM_GPUS_ON_NODE:-}" ]; then
+    NPROC_PER_NODE=${SLURM_GPUS_ON_NODE}
+else
+    NPROC_PER_NODE=${NPROC_PER_NODE:-}
+    if ! [[ "$NPROC_PER_NODE" =~ ^[0-9]+$ ]]; then
+        NPROC_PER_NODE=$(nvidia-smi -L | wc -l)
     fi
 fi
 
 echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT  NNODES=$NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
 
-# 3) Run your code with torchrun (no srun needed for local execution)
-torchrun \
-  --nnodes="$NNODES" \
-  --nproc_per_node="$NPROC_PER_NODE" \
-  --rdzv_backend=c10d \
-  --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
-  main.py
-
+# 3) Run your code - use srun if in SLURM (exactly like job.slurm), otherwise use torchrun directly
+if [ -n "${SLURM_NODELIST:-}" ]; then
+    # Running in SLURM - use srun exactly like job.slurm
+    srun torchrun \
+      --nnodes="$NNODES" \
+      --nproc_per_node="$NPROC_PER_NODE" \
+      --rdzv_backend=c10d \
+      --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+      main.py
+else
+    # Running on interactive node - use torchrun directly
+    torchrun \
+      --nnodes="$NNODES" \
+      --nproc_per_node="$NPROC_PER_NODE" \
+      --rdzv_backend=c10d \
+      --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+      main.py
+fi
