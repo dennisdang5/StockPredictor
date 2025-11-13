@@ -323,20 +323,28 @@ class Trainer():
             else:
                 print("[data] Loaded from cache")
         
-        # Handle both old format (10 elements) and new format (11 elements with S&P 500)
+        # Handle multiple data formats:
+        # - 10 elements: old format (no S&P 500, no Returns)
+        # - 11 elements: format with S&P 500 but no Returns
+        # - 12 elements: new format with S&P 500 and Returns
         if len(input_data) == 10:
             X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test = input_data
+            Returns_test = None  # Old format doesn't have Returns
             Sp500_test = None  # Old format doesn't have S&P 500
         elif len(input_data) == 11:
             X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Sp500_test = input_data
+            Returns_test = None  # Format doesn't have Returns
+        elif len(input_data) == 12:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test = input_data
         else:
-            raise ValueError(f"Unexpected number of elements in input_data: {len(input_data)}")
+            raise ValueError(f"Unexpected number of elements in input_data: {len(input_data)}. Expected 10, 11, or 12 elements.")
         
         # Store dates for later reference (even when data is shuffled)
         self.train_dates = D_train
         self.val_dates = D_val
         self.test_dates = D_test
         self.test_revenues = Rev_test
+        self.test_returns = Returns_test  # Store Returns_test if available
         self.train_ds = IndexedDataset(X_train, Y_train, D_train)
         val_ds   = IndexedDataset(X_val,   Y_val,   D_val)
         test_ds  = IndexedDataset(X_test,  Y_test,  D_test)
