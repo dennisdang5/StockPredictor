@@ -99,6 +99,7 @@ class CNNLSTMModel(nn.Module):
         x = self.lstm_norm(x[:,-1,:]) # apply layer normalization to last time step only
         x = self.dropout(x)
         x = self.linear(x)
+        return x
 
 
 class AutoEncoder(nn.Module):
