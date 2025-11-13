@@ -1,6 +1,8 @@
 import trainer
 import torch
 import os
+import sys
+import traceback
 
 print("my code")
 start = "1989-12-01"
@@ -71,29 +73,52 @@ print("=" * 60)
 
 total_epochs = 1000
 
-train_obj = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=total_epochs, prediction_type=prediction_type, saved_model=model_path)
+try:
+    train_obj = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=total_epochs, prediction_type=prediction_type, saved_model=model_path)
+except Exception as e:
+    print(f"[ERROR] Failed to initialize Trainer: {e}")
+    print("\nFull traceback:")
+    traceback.print_exc()
+    sys.exit(1)
 
 if type(train_obj) == int:
     print("Error getting data")
     exit()
 
-for name, param in train_obj.Model.named_parameters():
-    print("name: {}".format(name))
-    print("param: {}".format(param.numel()))
-    print()
+try:
+    for name, param in train_obj.Model.named_parameters():
+        print("name: {}".format(name))
+        print("param: {}".format(param.numel()))
+        print()
+except Exception as e:
+    print(f"[ERROR] Failed to access model parameters: {e}")
+    print("\nFull traceback:")
+    traceback.print_exc()
+    train_obj.stop()
+    sys.exit(1)
 
 #total_epochs = train_obj.num_epochs
 
 stop = False  # Initialize stop condition
-for epoch in range(total_epochs):
-    stop = train_obj.train_one_epoch(epoch)
-    if stop: 
-        if train_obj.is_main:
-            print("Early stop at epoch: {}".format(epoch))
-        break
-
-# Always clean up distributed training resources
-train_obj.stop()
+try:
+    for epoch in range(total_epochs):
+        try:
+            stop = train_obj.train_one_epoch(epoch)
+            if stop: 
+                if train_obj.is_main:
+                    print("Early stop at epoch: {}".format(epoch))
+                break
+        except Exception as e:
+            print(f"[ERROR] Failed during training epoch {epoch}: {e}")
+            print("\nFull traceback:")
+            traceback.print_exc()
+            break
+finally:
+    # Always clean up distributed training resources
+    try:
+        train_obj.stop()
+    except Exception as e:
+        print(f"[WARNING] Error during cleanup: {e}")
 
 # Evaluation phase
 print("\n" + "=" * 60)
