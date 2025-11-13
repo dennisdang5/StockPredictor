@@ -95,3 +95,71 @@ class CNNLSTMModel(nn.Module):
         x = self.lstm_norm(x[:,-1,:]) # apply layer normalization to last time step only
         x = self.dropout(x)
         x = self.linear(x)
+
+
+class AutoEncoder(nn.Module):
+    def __init__(self, input_shape=(31,3), ) -> None:
+        super(AutoEncoder,self).__init__()
+        self.input_shape = input_shape
+        def _dof(x):
+            output = 1
+            for val in x:
+                output *= x
+            return output
+        self.dof = _dof(self.input_shape)
+        self.encoder=nn.Sequential(
+            # naive concatenation
+            nn.Linear(self.dof, 2*self.dof),
+            nn.Sigmoid()
+        )
+        self.decoder=nn.Sequential(
+            nn.Linear(2*self.dof, self.dof),
+            nn.Sigmoid()
+        )
+
+        ###### other parameters ####
+        # nn.MSELoss()
+        # optimizer = torch.optim.Adam()
+
+    def forward(self, x):
+        # assume x in shape (31,3)
+        x = torch.flatten(x)
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        x = torch.unflatten(decoded, dim=1, sizes=(31,3))
+        return x
+
+
+class CNNAutoEncoder(nn.Module):
+    def __init__(self, input_shape=(31,3), ) -> None:
+        super(AutoEncoder,self).__init__()
+        self.input_shape = input_shape
+        self.short_enc_conv = nn.Conv1d(3, 2*self.input_shape[1], 3, padding=1)
+        self.long_enc_conv = nn.Conv1d(3, 2*self.input_shape[1], 3, padding=1)
+
+        self.short_dec_conv = nn.Conv1d(2*self.input_shape[1], 3, 3, padding=1)
+        self.long_dec_conv = nn.Conv1d(2*self.input_shape[1], 3, 3, padding=1)
+
+        ###### other parameters ####
+        # nn.MSELoss()
+        # optimizer = torch.optim.Adam()
+
+    def forward(self, x):
+        # assume x in shape (31,3)
+        short_enc = self.short_enc_conv(x[:, :11, :])
+        long_enc = self.long_enc_conv(x[:, 11:, :])
+        
+        short_dec = self.short_dec_conv(short_enc)
+        long_dec = self.long_dec_conv(long_enc)
+
+        x = torch.cat((short_dec, long_dec), dim=1)
+        return x
+
+class AELSTM(nn.Module):
+    def __init__(self, *args, **kwargs) -> None:
+        super(AELSTM, self).__init__(*args, **kwargs)
+        self.AE = AutoEncoder()
+
+class CNNAELSTM(nn.Module):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
