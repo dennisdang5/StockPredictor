@@ -425,9 +425,9 @@ def handle_yfinance_errors(stocks, args, max_retries=3):
         print("ERROR: No stocks were successfully downloaded!")
         return None, failed_stocks
 
-def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None):
+def get_data(stocks, args, data_dir="data", lookback=240, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None, use_nlp=False, nlp_csv_paths=None, nlp_method="aggregated"):
     """
-    Return 9-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest)
+    Return 12-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest, Rev_test, Returns_test, Sp500_test)
     Loads from .npz if present (and not force); otherwise builds from yfinance,
     saves .npz, and returns the tuple.
     
@@ -440,10 +440,25 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
         prediction_type: Type of prediction (default: "classification")
         open_close_data: Optional pre-downloaded open_close DataFrame to avoid redundant download
         problematic_stocks: Optional list of problematic stocks to save (needed when open_close_data is provided)
+        use_nlp: Whether to include NLP features (default: False)
+        nlp_csv_paths: Path(s) to NYT CSV file(s) for NLP features. If None and use_nlp=True, 
+            tries to find CSV files in ../other_models/huggingface_nyt_articles/
+        nlp_method: Method for NLP feature extraction - "aggregated" (NYT headlines, shared across stocks)
+            or "individual" (yfinance news per stock ticker). Default: "aggregated"
     """
     os.makedirs(data_dir, exist_ok=True)
     
     prediction_suffix = f"_{prediction_type}"
+    # Differentiate cache paths for aggregated vs individual NLP methods
+    if use_nlp:
+        if nlp_method == "aggregated":
+            nlp_suffix = "_nlp_agg"  # Aggregated method (NYT)
+        elif nlp_method == "individual":
+            nlp_suffix = "_nlp_ind"  # Individual method (yfinance per stock)
+        else:
+            nlp_suffix = "_nlp"  # Fallback
+    else:
+        nlp_suffix = ""
 
     # Build from raw prices using error-handled download
     if len(args) not in [1, 2]:
@@ -487,9 +502,132 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     if lookback >= op.shape[1]:
         raise ValueError("study period too short for chosen lookback")
 
+    # Extract NLP features if requested
+    nlp_features_dict = None
+    if use_nlp:
+        print(f"[nlp] Extracting NLP features using method: {nlp_method}...")
+        try:
+            from nlp_features import extract_daily_nlp_features, extract_daily_nlp_features_yfinance, align_nlp_with_trading_days, get_nlp_feature_vector
+            
+            # Get date range from args
+            if len(args) == 2:
+                start_date = args[0]
+                end_date = args[1]
+            elif len(args) == 1:
+                start_date = None
+                end_date = None
+            else:
+                start_date = None
+                end_date = None
+            
+            if nlp_method == "aggregated":
+                # Aggregated method: Use NYT headlines (shared across all stocks)
+                # Determine NLP CSV paths
+                if nlp_csv_paths is None:
+                    import glob
+                    from pathlib import Path
+                    nyt_dir = Path("./huggingface_nyt_articles")
+                    nlp_csv_paths = sorted(glob.glob(str(nyt_dir / "new_york_times_stories_*.csv")))
+                    if not nlp_csv_paths:
+                        import warnings
+                        warnings.warn(f"No NYT CSV files found in {nyt_dir}. NLP features will be disabled.")
+                        use_nlp = False
+                        nlp_suffix = ""
+                
+                if use_nlp and nlp_csv_paths:
+                    # Extract daily NLP features from NYT
+                    nlp_df = extract_daily_nlp_features(
+                        csv_paths=nlp_csv_paths,
+                        start_date=start_date,
+                        end_date=end_date,
+                        batch_size=32,
+                        progress=True
+                    )
+                    
+                    if len(nlp_df) > 0:
+                        # Align NLP features with trading days (date_index from yfinance)
+                        nlp_aligned = align_nlp_with_trading_days(
+                            nlp_df,
+                            trading_days=date_index,
+                            fill_method='zero'
+                        )
+                        
+                        # Create a dictionary mapping date -> NLP feature vector (shared for all stocks)
+                        nlp_features_dict = {}
+                        for _, row in nlp_aligned.iterrows():
+                            date_obj = row['date']
+                            if isinstance(date_obj, pd.Timestamp):
+                                date_obj = date_obj.date()
+                            nlp_features_dict[date_obj] = row
+                        
+                        print(f"[nlp] NLP features aligned to {len(nlp_features_dict)} trading days (aggregated method)")
+                    else:
+                        import warnings
+                        warnings.warn("No NLP features extracted. Continuing without NLP features.")
+                        use_nlp = False
+                        nlp_suffix = ""
+                        nlp_features_dict = None
+            
+            elif nlp_method == "individual":
+                # Individual method: Use yfinance news per stock ticker
+                print(f"[nlp] Extracting individual NLP features for {len(successfully_downloaded_stocks)} stocks...")
+                
+                stock_nlp_features = extract_daily_nlp_features_yfinance(
+                    stocks=successfully_downloaded_stocks,
+                    start_date=start_date,
+                    end_date=end_date,
+                    batch_size=32,
+                    progress=True
+                )
+                
+                # Create a dictionary mapping (stock, date) -> NLP feature vector
+                # Format: {(stock_ticker, date): nlp_row}
+                nlp_features_dict = {}
+                for stock, nlp_df in stock_nlp_features.items():
+                    if len(nlp_df) > 0:
+                        # Align NLP features with trading days for this stock
+                        nlp_aligned = align_nlp_with_trading_days(
+                            nlp_df,
+                            trading_days=date_index,
+                            fill_method='zero'
+                        )
+                        
+                        # Store per stock-date
+                        for _, row in nlp_aligned.iterrows():
+                            date_obj = row['date']
+                            if isinstance(date_obj, pd.Timestamp):
+                                date_obj = date_obj.date()
+                            nlp_features_dict[(stock, date_obj)] = row
+                
+                if len(nlp_features_dict) > 0:
+                    print(f"[nlp] NLP features extracted for {len(set(k[0] for k in nlp_features_dict.keys()))} stocks, {len(set(k[1] for k in nlp_features_dict.keys()))} unique dates (individual method)")
+                    # Mark that we're using simple format for individual method
+                    nlp_features_dict['_method'] = 'individual_simple'
+                else:
+                    import warnings
+                    warnings.warn("No NLP features extracted from yfinance. Continuing without NLP features.")
+                    use_nlp = False
+                    nlp_suffix = ""
+                    nlp_features_dict = None
+            
+            else:
+                raise ValueError(f"Unknown nlp_method: {nlp_method}. Must be 'aggregated' or 'individual'")
+                
+        except Exception as e:
+            import warnings
+            import traceback
+            warnings.warn(f"Error extracting NLP features: {e}. Continuing without NLP features.")
+            traceback.print_exc()
+            use_nlp = False
+            nlp_suffix = ""
+            nlp_features_dict = None
+
     # Features/targets
     if prediction_type == "classification":
-        xdata, ydata, dates, revenues, returns = get_feature_input_classification(op, cp, lookback, op.shape[1], len(successfully_downloaded_stocks), date_index)
+        xdata, ydata, dates, revenues, returns = get_feature_input_classification(
+            op, cp, lookback, op.shape[1], len(successfully_downloaded_stocks), date_index, 
+            nlp_features=nlp_features_dict, use_nlp=use_nlp, successfully_downloaded_stocks=successfully_downloaded_stocks
+        )
     else:
         raise ValueError("Invalid prediction type - only 'classification' is supported")
     xdata = torch.from_numpy(xdata).to(torch.float32)  # (S, W, L, F)
@@ -538,10 +676,11 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     def _to_np(x): return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
     
     # Create prediction-type specific separate file paths for each dataset
-    train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
-    val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
-    test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
-    metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
+    # Include NLP suffix in cache filenames
+    train_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_train.npz")
+    val_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_val.npz")
+    test_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_test.npz")
+    metrics_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_metrics.npz")
     
     # Save training dataset
     _save_npz_progress(train_path, {
@@ -582,7 +721,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     
     return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f, Returns_f, Sp500_f)
 
-def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classification"):
+def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classification", use_nlp=False, nlp_method="aggregated"):
     """
     Load data from cache files if they exist.
     
@@ -595,11 +734,23 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
         args: Date range arguments
         data_dir: Directory where cache files are stored
         prediction_type: Type of prediction (default: "classification")
+        use_nlp: Whether NLP features were used (default: False)
+        nlp_method: NLP method used - "aggregated" or "individual" (default: "aggregated")
     
     Returns:
         data tuple if cache exists, None otherwise.
     """
     prediction_suffix = f"_{prediction_type}"
+    # Differentiate cache paths for aggregated vs individual NLP methods
+    if use_nlp:
+        if nlp_method == "aggregated":
+            nlp_suffix = "_nlp_agg"  # Aggregated method (NYT)
+        elif nlp_method == "individual":
+            nlp_suffix = "_nlp_ind"  # Individual method (yfinance per stock)
+        else:
+            nlp_suffix = "_nlp"  # Fallback
+    else:
+        nlp_suffix = ""
     
     # Step 1: Load problematic stocks for this time period (if they exist)
     problematic_stocks = _load_problematic_stocks(args, data_dir)
@@ -612,10 +763,10 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     data_id = _get_data_id(filtered_stocks, args)
     base = f"data_{data_id}"
     
-    train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
-    val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
-    test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
-    metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
+    train_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_train.npz")
+    val_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_val.npz")
+    test_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_test.npz")
+    metrics_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_metrics.npz")
     
     # Check if exact match cache exists with filtered stocks
     if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
@@ -642,10 +793,11 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
                 data_id = cached_id
                 base = f"data_{data_id}"
                 
-                train_path = os.path.join(data_dir, base + prediction_suffix + "_train.npz")
-                val_path = os.path.join(data_dir, base + prediction_suffix + "_val.npz")
-                test_path = os.path.join(data_dir, base + prediction_suffix + "_test.npz")
-                metrics_path = os.path.join(data_dir, base + prediction_suffix + "_metrics.npz")
+                # Use nlp_suffix when constructing paths (same as exact match above)
+                train_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_train.npz")
+                val_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_val.npz")
+                test_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_test.npz")
+                metrics_path = os.path.join(data_dir, base + prediction_suffix + nlp_suffix + "_metrics.npz")
                 
                 if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
                     found_cache = True
@@ -661,6 +813,25 @@ def load_data_from_cache(stocks, args, data_dir="data", prediction_type="classif
     train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)")
     val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset (.npz)")
     test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset (.npz)")
+    
+    # Validate that cached data has expected NLP features if NLP is requested
+    if use_nlp:
+        # Check feature dimensions in a sample
+        sample_X = train_data.get("X")
+        if sample_X is not None:
+            if isinstance(sample_X, torch.Tensor):
+                actual_features = sample_X.shape[2] if len(sample_X.shape) >= 3 else sample_X.shape[1]
+            else:
+                actual_features = sample_X.shape[2] if len(sample_X.shape) >= 3 else sample_X.shape[1]
+            
+            # Expected features: 3 (price) + NLP features
+            expected_nlp_dim = 4 if nlp_method == "individual" else 10
+            expected_features = 3 + expected_nlp_dim
+            
+            if actual_features != expected_features:
+                # Cache mismatch - return None to force regeneration
+                print(f"[cache] Warning: Cached data has {actual_features} features but expected {expected_features} features with NLP (method: {nlp_method}). Cache will be regenerated.")
+                return None
     
     # Load metrics - handle both old format and new format (Rev + Returns + Sp500)
     try:
@@ -713,7 +884,7 @@ def save_data_locally(stocks, args, data_dir="data", force=False, prediction_typ
 
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
-def get_feature_input_classification(op, cp, lookback, study_period, num_stocks, date_index):
+def get_feature_input_classification(op, cp, lookback, study_period, num_stocks, date_index, nlp_features=None, use_nlp=False, successfully_downloaded_stocks=None):
 
     T = study_period
     print(f"[features] Computing features for {num_stocks} stocks over {T} time periods...")
@@ -724,7 +895,7 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     return_t = np.full((num_stocks, T), np.nan, dtype=float)
     
     print(f"[features] Step 1/2: Precomputing elementary series...")
-    for t in range(2, T):
+    for t in tqdm(range(2, T), desc="Precomputing elementary series", unit="time step"):
         valid_stocks = []
         
         # First pass: collect valid revenues and their corresponding stock indices
@@ -759,13 +930,13 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
     dropped_flat_iqr = 0
     dropped_return_nan = 0
 
-    # Add progress indicator for the heavy computation loop
+    # Add tqdm progress bar for the heavy computation loop
     total_windows = (T - lookback - 2) * num_stocks
-    window_count = 0
-    last_progress_print = 0
+    pbar = tqdm(total=total_windows, desc="Building feature windows", unit="window")
     
     for end_t in range(lookback + 2, T):
         for n in range(num_stocks):
+            pbar.update(1)
             total_candidates += 1
             tgt = return_labels[n, end_t]
             rev = rev_t[n, end_t]
@@ -803,19 +974,74 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
             if not valid:
                 continue
 
+            # Add NLP features if available
+            if use_nlp and nlp_features is not None:
+                from nlp_features import get_nlp_feature_vector
+                
+                # Determine if using aggregated (date -> row) or individual ((stock, date) -> row) method
+                # Check for method marker first
+                use_simple = nlp_features.get('_method') == 'individual_simple'
+                if '_method' in nlp_features:
+                    # Remove method marker for key checking
+                    nlp_features_clean = {k: v for k, v in nlp_features.items() if k != '_method'}
+                else:
+                    nlp_features_clean = nlp_features
+                
+                sample_key = next(iter(nlp_features_clean.keys())) if nlp_features_clean else None
+                is_individual_method = (sample_key is not None and isinstance(sample_key, tuple))
+                
+                # Determine feature dimension based on method
+                nlp_feature_dim = 4 if use_simple else 10
+                nlp_window = np.empty((len(period), nlp_feature_dim), dtype=float)
+                
+                # Get stock ticker for this sample (for individual method)
+                stock_ticker = None
+                if is_individual_method and successfully_downloaded_stocks is not None:
+                    if n < len(successfully_downloaded_stocks):
+                        stock_ticker = successfully_downloaded_stocks[n]
+                
+                for idx, t in enumerate(period):
+                    # Get date for this time step
+                    if t < len(date_index):
+                        date_at_t = date_index[t]
+                        if isinstance(date_at_t, pd.Timestamp):
+                            date_at_t = date_at_t.date()
+                        
+                        # Get NLP features for this date
+                        if is_individual_method:
+                            # Individual method: (stock, date) -> row
+                            if stock_ticker and (stock_ticker, date_at_t) in nlp_features_clean:
+                                nlp_row = nlp_features_clean[(stock_ticker, date_at_t)]
+                                nlp_vec = get_nlp_feature_vector(nlp_row, use_simple=use_simple)
+                                nlp_window[idx, :] = nlp_vec
+                            else:
+                                # No NLP data for this stock-date - use zeros
+                                nlp_window[idx, :] = np.zeros(nlp_feature_dim, dtype=float)
+                        else:
+                            # Aggregated method: date -> row
+                            if date_at_t in nlp_features_clean:
+                                nlp_row = nlp_features_clean[date_at_t]
+                                nlp_vec = get_nlp_feature_vector(nlp_row, use_simple=use_simple)
+                                nlp_window[idx, :] = nlp_vec
+                            else:
+                                # No NLP data for this date - use zeros
+                                nlp_window[idx, :] = np.zeros(nlp_feature_dim, dtype=float)
+                    else:
+                        # Date index out of range - use zeros
+                        nlp_window[idx, :] = np.zeros(nlp_feature_dim, dtype=float)
+                
+                # Concatenate price features with NLP features
+                window = np.concatenate([window, nlp_window], axis=1)  # (len(period), 3 + nlp_feature_dim)
+
             X_list.append(window)
             y_list.append([tgt])
             d_list.append(date_index[end_t])
             rev_list.append(rev)
             return_list.append(ret)
             kept += 1
-        
-        window_count += num_stocks
-        # Print progress every 5% completion
-        progress_pct = (window_count / total_windows * 100) if total_windows > 0 else 0
-        if progress_pct - last_progress_print >= 5.0:
-            print(f"[features] Progress: {progress_pct:.1f}% ({window_count:,}/{total_windows:,} windows processed)")
-            last_progress_print = progress_pct
+    
+    # Close progress bar
+    pbar.close()
 
     # --- summary (before split) ---
     removed = total_candidates - kept
