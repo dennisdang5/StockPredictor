@@ -497,7 +497,7 @@ def main():
     import argparse
     
     # Define stocks list as a variable
-    """
+    
     stocks = [
         # Communication Services
         "GOOGL", "GOOG", "T", "CHTR", "CMCSA", "EA", "FOXA", "FOX", "IPG", "LYV", "MTCH", "META", "NFLX", "NWSA", "NWS", "OMC", "PSKY", "TMUS", "TTWO", "TKO", "TTD", "VZ", "DIS", "WBD",
@@ -550,6 +550,7 @@ def main():
         # Industrial & Energy Leaders
         "BA", "CAT", "XOM", "CVX"
     ]
+    """
     
     parser = argparse.ArgumentParser(description="Validate data download and consistency")
     parser.add_argument("--start-date", type=str, default="1990-01-01",
