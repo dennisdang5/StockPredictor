@@ -829,8 +829,9 @@ def main():
     print("NLP Feature Extraction - Phase 1")
     print("=" * 60)
     
-    # Find NYT CSV files
-    nyt_dir = Path("../other_models/huggingface_nyt_articles")
+    # Find NYT CSV files (relative to logan-version directory)
+    script_dir = Path(__file__).parent.absolute()
+    nyt_dir = script_dir / "huggingface_nyt_articles"
     csv_files = sorted(glob.glob(str(nyt_dir / "new_york_times_stories_*.csv")))
     
     if not csv_files:

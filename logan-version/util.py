@@ -442,7 +442,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
         problematic_stocks: Optional list of problematic stocks to save (needed when open_close_data is provided)
         use_nlp: Whether to include NLP features (default: False)
         nlp_csv_paths: Path(s) to NYT CSV file(s) for NLP features. If None and use_nlp=True, 
-            tries to find CSV files in ../other_models/huggingface_nyt_articles/
+            tries to find CSV files in ./huggingface_nyt_articles/ (relative to logan-version directory)
         nlp_method: Method for NLP feature extraction - "aggregated" (NYT headlines, shared across stocks)
             or "individual" (yfinance news per stock ticker). Default: "aggregated"
     """
@@ -526,7 +526,9 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
                 if nlp_csv_paths is None:
                     import glob
                     from pathlib import Path
-                    nyt_dir = Path("./huggingface_nyt_articles")
+                    # Path relative to logan-version directory where this script is located
+                    script_dir = Path(__file__).parent.absolute()
+                    nyt_dir = script_dir / "huggingface_nyt_articles"
                     nlp_csv_paths = sorted(glob.glob(str(nyt_dir / "new_york_times_stories_*.csv")))
                     if not nlp_csv_paths:
                         import warnings
