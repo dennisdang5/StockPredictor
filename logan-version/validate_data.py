@@ -34,7 +34,7 @@ def validate_data_consistency(
     stocks,
     time_args,
     use_nlp=False,
-    nlp_method="aggregated",
+    nlp_method=None,
     data_dir="data"
 ):
     """
@@ -44,7 +44,7 @@ def validate_data_consistency(
         stocks: List of stock tickers
         time_args: Date range arguments [start, end] or period string
         use_nlp: Whether to include NLP features
-        nlp_method: "aggregated" (NYT) or "individual" (yfinance per stock)
+        nlp_method: "aggregated" (NYT) or "individual" (yfinance per stock). Required if use_nlp=True.
         data_dir: Directory for data files
     
     Returns:
@@ -61,6 +61,18 @@ def validate_data_consistency(
         print(f"  NLP Method: {nlp_method}")
     print()
     
+    # Validate that nlp_method is provided when use_nlp=True
+    if use_nlp and nlp_method is None:
+        error_msg = "ERROR: nlp_method must be explicitly provided when use_nlp=True. Please specify either 'aggregated' or 'individual'."
+        print(f"❌ {error_msg}")
+        return {"success": False, "error": error_msg}
+    
+    # Validate nlp_method value if provided
+    if nlp_method is not None and nlp_method not in ["aggregated", "individual"]:
+        error_msg = f"ERROR: Invalid nlp_method '{nlp_method}'. Must be 'aggregated' or 'individual'."
+        print(f"❌ {error_msg}")
+        return {"success": False, "error": error_msg}
+    
     # ========================================================================
     # Step 1: Download/Load Data
     # ========================================================================
@@ -73,8 +85,9 @@ def validate_data_consistency(
             stocks=stocks,
             args=time_args,
             data_dir=data_dir,
+            prediction_type="classification",
             use_nlp=use_nlp,
-            nlp_method=nlp_method if use_nlp else None
+            nlp_method=nlp_method   
         )
         
         if isinstance(data, int):
@@ -559,8 +572,8 @@ def main():
                         help="End date (default: 2015-12-31)")
     parser.add_argument("--use-nlp", action="store_true",
                         help="Include NLP features")
-    parser.add_argument("--nlp-method", choices=["aggregated", "individual"], default="aggregated",
-                        help="NLP method: aggregated (NYT) or individual (yfinance per stock)")
+    parser.add_argument("--nlp-method", choices=["aggregated", "individual"], default=None,
+                        help="NLP method: aggregated (NYT) or individual (yfinance per stock). Required if --use-nlp is specified.")
     parser.add_argument("--data-dir", type=str, default="data",
                         help="Data directory (default: data)")
     

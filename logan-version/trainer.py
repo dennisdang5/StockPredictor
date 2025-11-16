@@ -4,7 +4,8 @@ import torch
 import torch.optim as optim
 from torch import nn
 import torch.utils.data as data
-from model import LSTMModel, CNNLSTMModel
+from nlp_features import get_nlp_feature_dim
+from model import LSTMModel, CNNLSTMModel, AELSTM
 import util
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
@@ -136,7 +137,7 @@ class EarlyStopper():
         
 
 class Trainer():
-    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0, save_every_epochs=25):
+    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0, save_every_epochs=25, use_nlp=False, nlp_method=None):
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
         self.rank = dist.get_rank() if self.is_dist else 0
@@ -149,6 +150,8 @@ class Trainer():
         self.prediction_type = prediction_type
         self.k = k  # Number of top/bottom positions for long-short portfolio
         self.cost_bps_per_side = cost_bps_per_side  # Transaction costs per side in basis points
+        self.use_nlp = use_nlp
+        self.nlp_method = nlp_method
         # Only rank 0 creates TensorBoard writer
         self.writer = SummaryWriter() if self.is_main else None
 
@@ -209,49 +212,7 @@ class Trainer():
         if self.is_dist:
             # Only rank 0 processes data
             if self.is_main:
-                # Step 1: Check cache first with full stock list (optimization: if exact match exists, use it)
-                input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
-                
-                if input_data is None:
-                    # Step 2: Load saved problematic stocks for this time period
-                    problematic_stocks_saved = util._load_problematic_stocks(time_args, data_dir="data")
-                    
-                    # Step 3: Remove problematic stocks from input set
-                    if problematic_stocks_saved:
-                        valid_stocks = [stock for stock in stocks if stock not in problematic_stocks_saved]
-                        print(f"[data] Loaded {len(problematic_stocks_saved)} previously identified problematic stocks for this time period")
-                        print(f"[data] Filtered input: {len(stocks)} -> {len(valid_stocks)} stocks")
-                    else:
-                        valid_stocks = stocks
-                    
-                    if len(valid_stocks) == 0:
-                        raise RuntimeError("No valid stocks found after filtering problematic stocks.")
-                    
-                    # Step 4: Check cache with filtered stocks
-                    input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
-                    
-                    if input_data is None:
-                        # Step 5: Download data (will save problematic stocks for future runs)
-                        print("[data] Cache not found, downloading data (rank 0 only)...")
-                        open_close, failed_stocks_dict = util.handle_yfinance_errors(valid_stocks, time_args, max_retries=1)
-                        
-                        if open_close is None:
-                            raise RuntimeError("ERROR: Failed to download any stock data. Cannot proceed.")
-                        
-                        # Calculate problematic stocks from this download (new problematic stocks found in valid_stocks)
-                        new_problematic = [stock for stock in valid_stocks if stock not in open_close["Open"].columns]
-                        # Combine with previously known problematic stocks
-                        all_problematic = list(problematic_stocks_saved) + new_problematic
-                        
-                        # Step 6: Process and save data (get_data will save problematic stocks)
-                        print("[data] Processing downloaded data and saving to cache...")
-                        input_data = util.get_data(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type, open_close_data=open_close, problematic_stocks=all_problematic if all_problematic else None)
-                        if isinstance(input_data, int):
-                            raise RuntimeError("Error getting data from util.get_data()")
-                    else:
-                        print("[data] Found cache for filtered stocks (rank 0 only)")
-                else:
-                    print("[data] Loaded from cache (rank 0 only)")
+                input_data = util.get_data(self.stocks, self.time_args, data_dir="data", prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
             
             # Synchronize - ensure rank 0 finishes downloading/processing before others proceed
             dist.barrier()
@@ -415,10 +376,24 @@ class Trainer():
         # =========================
         # MODEL
         # =========================
-        self.Model = CNNLSTMModel()
+        try:
+            if self.use_nlp:
+                if self.nlp_method == None:
+                    raise ValueError("nlp_method must be provided if use_nlp is True")
+                if self.nlp_method == "aggregated":
+                    input_shape = (31, 3 + get_nlp_feature_dim(self.nlp_method))
+                elif self.nlp_method == "individual":
+                    input_shape = (31, 3 + get_nlp_feature_dim(self.nlp_method))
+                else:
+                    raise ValueError(f"Invalid nlp_method: {self.nlp_method}")
+            else:
+                input_shape = (31, 3)
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize model: {e}")
+            return None
         
         # Move model to device first
-        self.Model = self.Model.to(self.device)
+        self.Model = AELSTM(input_shape=input_shape).to(self.device)
         
         # Wrap with DDP if in distributed mode
         if self.is_dist:

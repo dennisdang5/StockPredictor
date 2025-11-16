@@ -448,6 +448,56 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     """
     os.makedirs(data_dir, exist_ok=True)
     
+    # Validate args first
+    if len(args) not in [1, 2]:
+        print("Invalid Data Input Arguments")
+        return 1
+    
+    # Step 1: Check cache first (unless force=True)
+    if not force:
+        cached_data = load_data_from_cache(
+            stocks=stocks,
+            args=args,
+            data_dir=data_dir,
+            prediction_type=prediction_type,
+            use_nlp=use_nlp,
+            nlp_method=nlp_method
+        )
+        if cached_data is not None:
+            print(f"[cache] Loaded data from cache (prediction_type={prediction_type}, use_nlp={use_nlp}, nlp_method={nlp_method})")
+            return cached_data
+        else:
+            print(f"[cache] Cache not found, will download and process data...")
+    
+    # Step 2: Load saved problematic stocks for this time period
+    problematic_stocks_saved = _load_problematic_stocks(args, data_dir)
+    
+    # Step 3: Remove problematic stocks from input set
+    if problematic_stocks_saved:
+        valid_stocks = [stock for stock in stocks if stock not in problematic_stocks_saved]
+        print(f"[data] Loaded {len(problematic_stocks_saved)} previously identified problematic stocks for this time period")
+        print(f"[data] Filtered input: {len(stocks)} -> {len(valid_stocks)} stocks")
+    else:
+        valid_stocks = stocks
+    
+    if len(valid_stocks) == 0:
+        raise RuntimeError("No valid stocks found after filtering problematic stocks.")
+    
+    # Step 4: Check cache again with filtered stocks (in case cache exists for filtered set)
+    if not force:
+        cached_data = load_data_from_cache(
+            stocks=valid_stocks,
+            args=args,
+            data_dir=data_dir,
+            prediction_type=prediction_type,
+            use_nlp=use_nlp,
+            nlp_method=nlp_method
+        )
+        if cached_data is not None:
+            print(f"[cache] Loaded data from cache (filtered stocks)")
+            return cached_data
+    
+    # Prepare suffixes for cache file naming
     prediction_suffix = f"_{prediction_type}"
     # Differentiate cache paths for aggregated vs individual NLP methods
     if use_nlp:
@@ -459,36 +509,35 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
             nlp_suffix = "_nlp"  # Fallback
     else:
         nlp_suffix = ""
-
-    # Build from raw prices using error-handled download
-    if len(args) not in [1, 2]:
-        print("Invalid Data Input Arguments")
-        return 1
     
+    # Step 5: Download data if needed
     # If open_close_data is provided, use it (avoids redundant download)
     if open_close_data is not None:
         open_close = open_close_data
-        # Get successfully downloaded stocks from the DataFrame columns
-        successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
+        # Get successfully downloaded stocks from the DataFrame columns (use valid_stocks, not original stocks)
+        successfully_downloaded_stocks = [stock for stock in valid_stocks if stock in open_close["Open"].columns]
         # Use provided problematic_stocks if available, otherwise calculate from input
         if problematic_stocks is None:
-            # This shouldn't happen if called correctly, but calculate as fallback
-            problematic_stocks = [stock for stock in stocks if stock not in successfully_downloaded_stocks]
+            # Calculate problematic stocks from valid_stocks
+            problematic_stocks = [stock for stock in valid_stocks if stock not in successfully_downloaded_stocks]
     else:
         # For large stock lists, use fewer retries to speed up the download
         # Most errors are permanent (delisted, no data for date range), so 1 retry is sufficient
-        max_retries = 1 if len(stocks) > 50 else 3
+        max_retries = 1 if len(valid_stocks) > 50 else 3
         
-        open_close, failed_stocks = handle_yfinance_errors(stocks, args, max_retries=max_retries)
+        print(f"[data] Downloading data for {len(valid_stocks)} stocks...")
+        open_close, failed_stocks = handle_yfinance_errors(valid_stocks, args, max_retries=max_retries)
         
         if open_close is None:
             print("ERROR: Failed to download any stock data. Cannot proceed.")
             return 1
 
         # Update stocks list to only include successfully downloaded stocks
-        successfully_downloaded_stocks = [stock for stock in stocks if stock in open_close["Open"].columns]
-        # Calculate problematic stocks
-        problematic_stocks = [stock for stock in stocks if stock not in successfully_downloaded_stocks]
+        successfully_downloaded_stocks = [stock for stock in valid_stocks if stock in open_close["Open"].columns]
+        # Calculate problematic stocks from valid_stocks
+        new_problematic = [stock for stock in valid_stocks if stock not in successfully_downloaded_stocks]
+        # Combine with previously known problematic stocks
+        problematic_stocks = list(problematic_stocks_saved) + new_problematic
     
     # Save problematic stocks for this time period (so we can skip checking them in future runs)
     if problematic_stocks:
@@ -886,7 +935,7 @@ def save_data_locally(stocks, args, data_dir="data", force=False, prediction_typ
 
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
-def get_feature_input_classification(op, cp, lookback, study_period, num_stocks, date_index, nlp_features=None, use_nlp=False, successfully_downloaded_stocks=None):
+def get_feature_input_classification(op, cp, lookback, study_period, num_stocks, date_index, nlp_features=None, use_nlp=False, nlp_method=None, successfully_downloaded_stocks=None):
 
     T = study_period
     print(f"[features] Computing features for {num_stocks} stocks over {T} time periods...")
@@ -1014,7 +1063,7 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
                             # Individual method: (stock, date) -> row
                             if stock_ticker and (stock_ticker, date_at_t) in nlp_features_clean:
                                 nlp_row = nlp_features_clean[(stock_ticker, date_at_t)]
-                                nlp_vec = get_nlp_feature_vector(nlp_row, use_simple=use_simple)
+                                nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=nlp_method)
                                 nlp_window[idx, :] = nlp_vec
                             else:
                                 # No NLP data for this stock-date - use zeros
@@ -1023,7 +1072,7 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
                             # Aggregated method: date -> row
                             if date_at_t in nlp_features_clean:
                                 nlp_row = nlp_features_clean[date_at_t]
-                                nlp_vec = get_nlp_feature_vector(nlp_row, use_simple=use_simple)
+                                nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=nlp_method)
                                 nlp_window[idx, :] = nlp_vec
                             else:
                                 # No NLP data for this date - use zeros

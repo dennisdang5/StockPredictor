@@ -757,7 +757,7 @@ def align_nlp_with_trading_days(
     return aligned
 
 
-def get_nlp_feature_vector(nlp_row: pd.Series, use_simple: bool = False) -> np.ndarray:
+def get_nlp_feature_vector(nlp_row: pd.Series, nlp_method: str) -> np.ndarray:
     """
     Extract NLP feature vector from a row of aligned NLP DataFrame.
     
@@ -772,7 +772,7 @@ def get_nlp_feature_vector(nlp_row: pd.Series, use_simple: bool = False) -> np.n
         If use_simple=False: [has_news, n_articles, mean_pos, mean_neg, mean_neu, 
                               max_pos, max_neg, std_pos, std_neg, net_sent]
     """
-    if use_simple:
+    if nlp_method == "aggregated":
         # Simple format: just has_news and individual article sentiment
         features = [
             nlp_row['has_news'],
@@ -780,7 +780,7 @@ def get_nlp_feature_vector(nlp_row: pd.Series, use_simple: bool = False) -> np.n
             nlp_row.get('p_neg', nlp_row.get('mean_neg', 0.0)),
             nlp_row.get('p_neu', nlp_row.get('mean_neu', 0.0))
         ]
-    else:
+    elif nlp_method == "individual":
         # Full format with aggregations
         features = [
             nlp_row['has_news'],
@@ -794,25 +794,30 @@ def get_nlp_feature_vector(nlp_row: pd.Series, use_simple: bool = False) -> np.n
             nlp_row['std_neg'],
             nlp_row['net_sent']
         ]
-    
+    else:
+        raise ValueError(f"Invalid nlp_method: {nlp_method}")
     return np.array(features, dtype=np.float32)
 
 
-def get_nlp_feature_dim(use_simple: bool = False) -> int:
+def get_nlp_feature_dim(nlp_method: str) -> int:
     """
     Return the dimensionality of NLP features.
     
     Args:
-        use_simple: If True, return dimension for simple format (4 features).
-            If False, return dimension for full format (10 features).
+        nlp_method: "aggregated" or "individual"
     
     Returns:
         Number of NLP features
-        - Simple format: 4 (has_news, p_pos, p_neg, p_neu)
-        - Full format: 10 (has_news, n_articles, mean_pos, mean_neg, mean_neu, 
-                          max_pos, max_neg, std_pos, std_neg, net_sent)
+        - Aggregated format: 10 (has_news, n_articles, mean_pos, mean_neg, mean_neu, 
+                              max_pos, max_neg, std_pos, std_neg, net_sent)
+        - Individual format: 4 (has_news, p_pos, p_neg, p_neu)
     """
-    return 4 if use_simple else 10
+    if nlp_method == "aggregated":
+        return 10
+    elif nlp_method == "individual":
+        return 4
+    else:
+        raise ValueError(f"Invalid nlp_method: {nlp_method}")
 
 
 # ============================================================================
@@ -885,7 +890,7 @@ def main():
     print("Example Feature Vector:")
     print("=" * 60)
     example_row = aligned.iloc[0]
-    feature_vec = get_nlp_feature_vector(example_row)
+    feature_vec = get_nlp_feature_vector(example_row, nlp_method="aggregated")
     print(f"Feature vector shape: {feature_vec.shape}")
     print(f"Feature vector: {feature_vec}")
     print(f"\nFeature names:")

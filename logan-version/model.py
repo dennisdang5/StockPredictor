@@ -6,17 +6,17 @@ import torch.nn.init as init
 
  
 class LSTMModel(nn.Module):
-    def __init__(self, input_dim=(31,3), hidden_size=25, num_layers=1, batch_first=True, dropout=0.1):
+    def __init__(self, input_shape=(31,3), hidden_size=25, num_layers=1, batch_first=True, dropout=0.1):
         super().__init__()
-        self.input_dim = input_dim
+        self.input_dim = input_shape
         self.hidden_size = hidden_size
         
         # Input normalization layer - helps stabilize inputs
         # Normalizes across features at each time step
-        self.input_norm = nn.LayerNorm(input_dim[1])
+        self.input_norm = nn.LayerNorm(input_shape[1])
         
         # LSTM layers
-        self.lstm = nn.LSTM(input_size=input_dim[1], hidden_size=hidden_size, num_layers=num_layers, batch_first=batch_first, dtype=torch.float32)
+        self.lstm = nn.LSTM(input_size=input_shape[1], hidden_size=hidden_size, num_layers=num_layers, batch_first=batch_first, dtype=torch.float32)
         
         # Layer normalization after LSTM - stabilizes activations and gradients
         self.lstm_norm = nn.LayerNorm(hidden_size)
@@ -70,14 +70,14 @@ class LSTMModel(nn.Module):
         return x
 
 class CNNLSTMModel(nn.Module):
-    def __init__(self, input_dim=(31,3), kernel_size=3, hidden_size=25, num_layers=1, batch_first=True, dropout=0.1):
+    def __init__(self, input_shape=(31,3), kernel_size=3, hidden_size=25, num_layers=1, batch_first=True, dropout=0.1):
         super().__init__()
-        self.input_dim = input_dim
+        self.input_dim = input_shape
         self.hidden_size = hidden_size
-        self.input_norm = nn.LayerNorm(input_dim[1])
+        self.input_norm = nn.LayerNorm(input_shape[1])
         # first 11 of input should get one cnn kernel and last 20 should have a different kernel size
-        self.cnn1 = nn.Conv1d(input_dim[1], hidden_size, kernel_size=kernel_size, padding=kernel_size//2)
-        self.cnn2 = nn.Conv1d(input_dim[1], hidden_size, kernel_size=kernel_size, padding=kernel_size//2)
+        self.cnn1 = nn.Conv1d(input_shape[1], hidden_size, kernel_size=kernel_size, padding=kernel_size//2)
+        self.cnn2 = nn.Conv1d(input_shape[1], hidden_size, kernel_size=kernel_size, padding=kernel_size//2)
         self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers=num_layers, batch_first=batch_first, dtype=torch.float32)
         self.lstm_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(p=dropout)
@@ -103,7 +103,7 @@ class CNNLSTMModel(nn.Module):
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, input_shape=(31,3), ) -> None:
+    def __init__(self, input_shape=(31,3), ):
         super(AutoEncoder,self).__init__()
         self.input_shape = input_shape
         def _dof(x):
@@ -136,7 +136,7 @@ class AutoEncoder(nn.Module):
 
 
 class CNNAutoEncoder(nn.Module):
-    def __init__(self, input_shape=(31,3), ) -> None:
+    def __init__(self, input_shape=(31,3)):
         super(CNNAutoEncoder,self).__init__()
         self.input_shape = input_shape
         self.short_enc_conv = nn.Conv1d(3, 2*self.input_shape[1], 3, padding=1)
@@ -165,9 +165,16 @@ class CNNAutoEncoder(nn.Module):
         return x
 
 class AELSTM(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super(AELSTM, self).__init__(*args, **kwargs)
-        self.AE = AutoEncoder()
+    def __init__(self, input_shape=(31,3)):
+        super(AELSTM, self).__init__()
+        self.input_shape = input_shape
+        self.AE = AutoEncoder(input_shape=input_shape)
+        self.LSTM = LSTMModel(input_shape=input_shape)
+
+    def forward(self, x):
+        x = self.AE(x)
+        x = self.LSTM(x)
+        return x
 
 class CNNAELSTM(nn.Module):
     def __init__(self, *args, **kwargs) -> None:
