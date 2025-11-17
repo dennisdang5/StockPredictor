@@ -212,6 +212,7 @@ class Trainer():
         if self.is_dist:
             # Only rank 0 processes data
             if self.is_main:
+
                 input_data = util.get_data(self.stocks, self.time_args, data_dir="data", prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
             
             # Synchronize - ensure rank 0 finishes downloading/processing before others proceed
@@ -380,12 +381,8 @@ class Trainer():
             if self.use_nlp:
                 if self.nlp_method == None:
                     raise ValueError("nlp_method must be provided if use_nlp is True")
-                if self.nlp_method == "aggregated":
-                    input_shape = (31, 3 + get_nlp_feature_dim(self.nlp_method))
-                elif self.nlp_method == "individual":
-                    input_shape = (31, 3 + get_nlp_feature_dim(self.nlp_method))
-                else:
-                    raise ValueError(f"Invalid nlp_method: {self.nlp_method}")
+                nlp_dim = get_nlp_feature_dim(self.nlp_method)
+                input_shape = (31, 3 + nlp_dim)
             else:
                 input_shape = (31, 3)
         except Exception as e:

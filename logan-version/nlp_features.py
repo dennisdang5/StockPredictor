@@ -773,15 +773,7 @@ def get_nlp_feature_vector(nlp_row: pd.Series, nlp_method: str) -> np.ndarray:
                               max_pos, max_neg, std_pos, std_neg, net_sent]
     """
     if nlp_method == "aggregated":
-        # Simple format: just has_news and individual article sentiment
-        features = [
-            nlp_row['has_news'],
-            nlp_row.get('p_pos', nlp_row.get('mean_pos', 0.0)),
-            nlp_row.get('p_neg', nlp_row.get('mean_neg', 0.0)),
-            nlp_row.get('p_neu', nlp_row.get('mean_neu', 0.0))
-        ]
-    elif nlp_method == "individual":
-        # Full format with aggregations
+        # Aggregated format: full feature vector with aggregations (10 features)
         features = [
             nlp_row['has_news'],
             nlp_row['n_articles'],
@@ -793,6 +785,14 @@ def get_nlp_feature_vector(nlp_row: pd.Series, nlp_method: str) -> np.ndarray:
             nlp_row['std_pos'],
             nlp_row['std_neg'],
             nlp_row['net_sent']
+        ]
+    elif nlp_method == "individual":
+        # Individual format: simple format with just sentiment probabilities (4 features)
+        features = [
+            nlp_row['has_news'],
+            nlp_row.get('p_pos', nlp_row.get('mean_pos', 0.0)),
+            nlp_row.get('p_neg', nlp_row.get('mean_neg', 0.0)),
+            nlp_row.get('p_neu', nlp_row.get('mean_neu', 0.0))
         ]
     else:
         raise ValueError(f"Invalid nlp_method: {nlp_method}")
