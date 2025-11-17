@@ -389,10 +389,10 @@ def validate_data_consistency(
                 print(f"  ✅ No NaN or Inf values in NLP features")
     
     # ========================================================================
-    # Step 4: Validate Date Alignment
+    # Step 4: Validate Date Alignment and Split Integrity
     # ========================================================================
     print("\n" + "=" * 80)
-    print("STEP 4: Validating Date Alignment")
+    print("STEP 4: Validating Date Alignment and Split Integrity")
     print("=" * 80)
     
     # Check that dates are in order
@@ -426,6 +426,50 @@ def validate_data_consistency(
             validation_results["warnings"].append(warning_msg)
         else:
             print(f"  ✅ Val/test split: val ends {val_end}, test starts {test_start}")
+    
+    # Verify date grouping: all samples from same date are in same split
+    print(f"\n  Verifying date grouping integrity...")
+    
+    # Group dates by split
+    train_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, datetime)) else d for d in Dtr)
+    val_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, datetime)) else d for d in Dva)
+    test_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, datetime)) else d for d in Dte)
+    
+    # Verify: no date appears in multiple splits (all samples from same date are in same split)
+    train_val_overlap = train_dates_set & val_dates_set
+    train_test_overlap = train_dates_set & test_dates_set
+    val_test_overlap = val_dates_set & test_dates_set
+    
+    if train_val_overlap or train_test_overlap or val_test_overlap:
+        error_msg = f"Date overlap detected! Dates appear in multiple splits: train-val={len(train_val_overlap)}, train-test={len(train_test_overlap)}, val-test={len(val_test_overlap)}. This violates temporal integrity."
+        print(f"  ❌ {error_msg}")
+        validation_results["errors"].append(error_msg)
+        validation_results["success"] = False
+        # Show first few overlapping dates
+        if train_val_overlap:
+            print(f"    Train-Val overlap examples: {list(train_val_overlap)[:3]}")
+        if train_test_overlap:
+            print(f"    Train-Test overlap examples: {list(train_test_overlap)[:3]}")
+        if val_test_overlap:
+            print(f"    Val-Test overlap examples: {list(val_test_overlap)[:3]}")
+    else:
+        print(f"  ✅ All samples from same date are in same split (no date overlap)")
+        print(f"    Train: {len(train_dates_set)} unique dates")
+        print(f"    Val:   {len(val_dates_set)} unique dates")
+        print(f"    Test:  {len(test_dates_set)} unique dates")
+    
+    # Verify: all samples are assigned to a split
+    total_samples = len(Dtr) + len(Dva) + len(Dte)
+    total_unique_dates = len(train_dates_set | val_dates_set | test_dates_set)
+    print(f"  Total samples: {total_samples:,}, Total unique dates: {total_unique_dates}")
+    
+    if total_samples == 0:
+        error_msg = "No samples found in any split!"
+        print(f"  ❌ {error_msg}")
+        validation_results["errors"].append(error_msg)
+        validation_results["success"] = False
+    else:
+        print(f"  ✅ All {total_samples:,} samples are assigned to splits")
     
     # ========================================================================
     # Step 5: Validate Feature Consistency

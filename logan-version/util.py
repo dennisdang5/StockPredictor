@@ -199,9 +199,23 @@ def _get_sp500_returns_for_dates(test_dates, date_index, study_period):
         min_date = min(test_dates)
         max_date = max(test_dates)
         
+        # Add a small buffer to ensure we get data (yfinance sometimes needs end date + 1 day)
+        import datetime
+        if isinstance(max_date, datetime.datetime):
+            max_date_buffered = max_date + datetime.timedelta(days=1)
+        elif isinstance(max_date, datetime.date):
+            max_date_buffered = datetime.datetime.combine(max_date, datetime.time()) + datetime.timedelta(days=1)
+        else:
+            max_date_buffered = pd.Timestamp(max_date) + pd.Timedelta(days=1)
+        
         # Fetch S&P 500 data (^GSPC is the ticker for S&P 500)
-        sp500 = yf.Ticker("^GSPC")
-        sp500_data = sp500.history(start=min_date, end=max_date, repair=True)
+        try:
+            sp500 = yf.Ticker("^GSPC")
+            sp500_data = sp500.history(start=min_date, end=max_date_buffered, repair=True)
+        except Exception as yf_error:
+            print(f"[util] Warning: Error fetching S&P 500 data from yfinance: {yf_error}")
+            print("[util] Using zeros for S&P 500 returns")
+            return np.zeros(len(test_dates))
         
         if sp500_data is None or sp500_data.empty:
             print("[util] Warning: Could not fetch S&P 500 data, using zeros")
@@ -214,6 +228,9 @@ def _get_sp500_returns_for_dates(test_dates, date_index, study_period):
         if isinstance(sp500_daily_returns.index, pd.DatetimeIndex) and sp500_daily_returns.index.tz is not None:
             sp500_daily_returns.index = sp500_daily_returns.index.tz_localize(None)
         
+        # Normalize sp500 index once for efficient comparison (remove time component)
+        sp500_index_normalized = pd.DatetimeIndex([pd.Timestamp(idx).normalize() for idx in sp500_daily_returns.index])
+        
         # Convert test dates to pandas Timestamp for alignment
         test_dates_pd = pd.to_datetime(test_dates)
         if isinstance(test_dates_pd, pd.DatetimeIndex) and test_dates_pd.tz is not None:
@@ -223,14 +240,36 @@ def _get_sp500_returns_for_dates(test_dates, date_index, study_period):
         # Use forward fill to match each test date with the most recent S&P 500 return
         sp500_returns = []
         for test_date in test_dates_pd:
-            # Find S&P 500 return for this date or previous trading day
-            # Use reindex with method='ffill' to forward fill from previous trading day
-            date_returns = sp500_daily_returns.reindex([test_date], method='ffill')
-            
-            if len(date_returns) > 0 and not pd.isna(date_returns.iloc[0]):
-                sp500_returns.append(date_returns.iloc[0])
-            else:
-                # If no data available, use 0 (no return)
+            try:
+                # Normalize test_date for comparison (remove time component and timezone)
+                if isinstance(test_date, pd.Timestamp):
+                    date_val_normalized = test_date.normalize()
+                else:
+                    date_val_normalized = pd.Timestamp(test_date).normalize()
+                
+                # Get the most recent return up to this date (forward fill behavior)
+                # Check for exact match first
+                exact_match = sp500_index_normalized == date_val_normalized
+                if exact_match.any():
+                    return_val = sp500_daily_returns.iloc[exact_match.argmax()]
+                else:
+                    # Find the most recent value before or at this date (forward fill)
+                    before_mask = sp500_index_normalized <= date_val_normalized
+                    if before_mask.any():
+                        # Get the last index where condition is True
+                        before_indices = np.where(before_mask)[0]
+                        return_val = sp500_daily_returns.iloc[before_indices[-1]]
+                    else:
+                        # No data before this date, use 0
+                        return_val = 0.0
+                
+                if pd.isna(return_val):
+                    sp500_returns.append(0.0)
+                else:
+                    sp500_returns.append(float(return_val))
+            except Exception as e:
+                # If anything fails, use 0
+                print(f"[util] Warning: Could not get S&P 500 return for {test_date}: {e}")
                 sp500_returns.append(0.0)
         
         sp500_returns = np.array(sp500_returns, dtype=float)
@@ -453,6 +492,13 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
         print("Invalid Data Input Arguments")
         return 1
     
+    # Validate nlp_method if use_nlp is True
+    if use_nlp and nlp_method is None:
+        print("Warning: use_nlp=True but nlp_method not provided. Defaulting to 'aggregated'.")
+        nlp_method = "aggregated"
+    elif use_nlp and nlp_method not in ["aggregated", "individual"]:
+        raise ValueError(f"Invalid nlp_method '{nlp_method}'. Must be 'aggregated' or 'individual' when use_nlp=True.")
+    
     # Step 1: Check cache first (unless force=True)
     if not force:
         cached_data = load_data_from_cache(
@@ -543,6 +589,9 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     if problematic_stocks:
         _save_problematic_stocks(problematic_stocks, args, data_dir)
 
+    # ========================================================================
+    # Step 1: Pull all the data
+    # ========================================================================
     # Now build op/cp/date_index from the cleaned frame
     op = open_close["Open"].T   # (S, T)
     cp = open_close["Close"].T  # (S, T)
@@ -550,6 +599,10 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
 
     if lookback >= op.shape[1]:
         raise ValueError("study period too short for chosen lookback")
+
+    print(f"[data] Pulled data: {op.shape[0]} stocks, {op.shape[1]} time periods")
+    
+    # Stage 2 NaN filtering has been removed - using all downloaded data
 
     # Extract NLP features if requested
     nlp_features_dict = None
@@ -596,7 +649,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
                     )
                     
                     if len(nlp_df) > 0:
-                        # Align NLP features with trading days (date_index from yfinance)
+                        # Align NLP features with trading days
                         nlp_aligned = align_nlp_with_trading_days(
                             nlp_df,
                             trading_days=date_index,
@@ -673,31 +726,156 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
             nlp_suffix = ""
             nlp_features_dict = None
 
-    # Features/targets
+    # ========================================================================
+    # Step 3: Extract features from cleaned data
+    # ========================================================================
+    print(f"[features] Extracting features from cleaned data...")
+    
+    # Determine the actual nlp_method being used (needed for feature extraction)
+    # This should match what was used to extract features, or the validated nlp_method parameter
+    actual_nlp_method = None
+    if use_nlp:
+        if nlp_features_dict is not None:
+            # Determine method from extracted features (in case extraction changed it)
+            if nlp_features_dict.get('_method') == 'individual_simple':
+                actual_nlp_method = "individual"
+            else:
+                # Check if keys are tuples (individual) or dates (aggregated)
+                sample_key = next(iter([k for k in nlp_features_dict.keys() if k != '_method']), None)
+                if sample_key is not None and isinstance(sample_key, tuple):
+                    actual_nlp_method = "individual"
+                else:
+                    actual_nlp_method = "aggregated"
+        else:
+            # If use_nlp=True but no features extracted (extraction failed), use the validated nlp_method
+            # Note: use_nlp might have been set to False during extraction, so this may not be reached
+            actual_nlp_method = nlp_method
+    
     if prediction_type == "classification":
         xdata, ydata, dates, revenues, returns = get_feature_input_classification(
             op, cp, lookback, op.shape[1], len(successfully_downloaded_stocks), date_index, 
-            nlp_features=nlp_features_dict, use_nlp=use_nlp, successfully_downloaded_stocks=successfully_downloaded_stocks
+            nlp_features=nlp_features_dict, use_nlp=use_nlp, nlp_method=actual_nlp_method, successfully_downloaded_stocks=successfully_downloaded_stocks
         )
     else:
         raise ValueError("Invalid prediction type - only 'classification' is supported")
-    xdata = torch.from_numpy(xdata).to(torch.float32)  # (S, W, L, F)
-    ydata = torch.from_numpy(ydata).to(torch.float32)  # (S, W, 1)
+    xdata = torch.from_numpy(xdata).to(torch.float32)  # (N, W, L, F) where N is number of samples
+    ydata = torch.from_numpy(ydata).to(torch.float32)  # (N, 1)
+    
+    print(f"[features] Extracted {len(xdata):,} samples")
 
-    # Date-based split (works even if some stocks miss certain dates)
+    # ========================================================================
+    # Step 4: Separate into train/val/test split with given proportions
+    # ========================================================================
+    print(f"[split] Calculating train/val/test split...")
+    
+    # 3.1. Calculate total number of samples
     dates_np = np.array(dates, dtype="datetime64[ns]")
-    uniq = np.unique(dates_np)
-    n_total = len(uniq)
-    n_train_val = int(n_total * (2 / 3))
-    n_train = int(n_train_val * 0.8)
-    start = uniq[0]
-    train_end = uniq[n_train - 1] if n_train > 0 else start
-    val_end = uniq[n_train_val - 1] if n_train_val > 0 else train_end
-    last = uniq[-1]
-
-    train_mask = (dates_np >= start) & (dates_np <= train_end)
-    val_mask   = (dates_np >  train_end) & (dates_np <= val_end)
-    test_mask  = (dates_np >  val_end)   & (dates_np <= last)
+    n_total_samples = len(dates_np)
+    print(f"[split] Total samples: {n_total_samples:,}")
+    
+    # Warn if total samples are very low (insufficient for training)
+    if n_total_samples < 100:
+        print(f"[split] ⚠️  WARNING: Very few total samples ({n_total_samples}). With a lookback of {lookback} days, you need a longer date range.")
+        print(f"[split]    Recommended: Use at least 3-5 years of data for adequate training samples.")
+    
+    # 3.2. Sort all samples by date to find split boundaries
+    # Get sorted indices (samples sorted by date)
+    sorted_indices = np.argsort(dates_np)
+    sorted_dates = dates_np[sorted_indices]
+    
+    # Group samples by date for statistics
+    uniq_dates = np.unique(dates_np)
+    n_total_dates = len(uniq_dates)
+    print(f"[split] Unique dates: {n_total_dates:,}")
+    
+    date_to_indices = {}
+    for i, date_val in enumerate(dates_np):
+        if date_val not in date_to_indices:
+            date_to_indices[date_val] = []
+        date_to_indices[date_val].append(i)
+    
+    # Print grouping statistics
+    samples_per_date = {date: len(indices) for date, indices in date_to_indices.items()}
+    print(f"[split] Samples per date: min={min(samples_per_date.values())}, max={max(samples_per_date.values())}, mean={np.mean(list(samples_per_date.values())):.1f}")
+    
+    # 3.3. Calculate split proportions and find split indices
+    train_prop = 0.64   # 64% for training
+    val_prop = 0.16     # 16% for validation  
+    test_prop = 0.2     # 20% for test
+    
+    # Calculate split indices based on total sample count
+    train_end_idx = int(n_total_samples * train_prop)
+    val_end_idx = int(n_total_samples * (train_prop + val_prop))
+    
+    # Ensure we have at least 1 sample per split
+    if train_end_idx == 0:
+        train_end_idx = 1
+    if val_end_idx <= train_end_idx:
+        val_end_idx = train_end_idx + 1
+    if val_end_idx >= n_total_samples:
+        val_end_idx = n_total_samples - 1
+    
+    # Get the dates at the split indices (from sorted samples)
+    train_end_date = sorted_dates[train_end_idx - 1]  # Last date in training set
+    val_end_date = sorted_dates[val_end_idx - 1]       # Last date in validation set
+    
+    # Convert to comparable format
+    train_end_date_ts = pd.Timestamp(train_end_date)
+    val_end_date_ts = pd.Timestamp(val_end_date)
+    
+    print(f"[split] Split boundaries (based on sample indices):")
+    print(f"  Train end index: {train_end_idx} (date: {train_end_date})")
+    print(f"  Val end index: {val_end_idx} (date: {val_end_date})")
+    print(f"  Test starts at index: {val_end_idx + 1}")
+    
+    # 3.4. Assign all samples to splits based on date boundaries
+    # All samples from same date go to same split
+    train_mask = np.zeros(n_total_samples, dtype=bool)
+    val_mask = np.zeros(n_total_samples, dtype=bool)
+    test_mask = np.zeros(n_total_samples, dtype=bool)
+    
+    # Group samples by date and assign entire date groups
+    for date_val, indices in date_to_indices.items():
+        date_val_ts = pd.Timestamp(date_val)
+        
+        # Determine split based on date boundaries
+        if date_val_ts <= train_end_date_ts:
+            split = 'train'
+        elif date_val_ts <= val_end_date_ts:
+            split = 'val'
+        else:
+            split = 'test'
+        
+        # Assign all samples from this date to the same split
+        for idx in indices:
+            if split == 'train':
+                train_mask[idx] = True
+            elif split == 'val':
+                val_mask[idx] = True
+            else:
+                test_mask[idx] = True
+    
+    # Calculate actual sample counts and proportions
+    n_train_samples = np.sum(train_mask)
+    n_val_samples = np.sum(val_mask)
+    n_test_samples = np.sum(test_mask)
+    
+    actual_train_prop = n_train_samples / n_total_samples
+    actual_val_prop = n_val_samples / n_total_samples
+    actual_test_prop = n_test_samples / n_total_samples
+    
+    print(f"[split] Sample proportions: train={actual_train_prop:.1%} ({n_train_samples:,}), val={actual_val_prop:.1%} ({n_val_samples:,}), test={actual_test_prop:.1%} ({n_test_samples:,})")
+    
+    # Count unique dates per split
+    train_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[train_mask])
+    val_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[val_mask])
+    test_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[test_mask])
+    
+    print(f"[split] Date assignments: {len(train_dates_set)} train dates, {len(val_dates_set)} val dates, {len(test_dates_set)} test dates")
+    
+    # Warn if training data is very limited
+    if n_train_samples < 100:
+        print(f"[split] ⚠️  WARNING: Very few training samples ({n_train_samples}). Consider using a longer date range for better model training.")
 
     def _sel(mask):
         X = xdata[mask]
@@ -718,6 +896,7 @@ def get_data(stocks, args, data_dir="data", lookback=240, force=False, predictio
     n_tr, n_va, n_te = len(Dtrain_f), len(Dvalidation_f), len(Dtest_f)
     n_tot = n_tr + n_va + n_te
     print(f"[split] train/val/test sizes = {n_tr:,} / {n_va:,} / {n_te:,}  | total kept = {n_tot:,}")
+    print(f"[split] Sample proportions: train={n_tr/n_tot:.1%}, val={n_va/n_tot:.1%}, test={n_te/n_tot:.1%}")
 
     # NOW create the ID based on successfully downloaded stocks (after error handling)
     data_id = _get_data_id(successfully_downloaded_stocks, args)
@@ -1041,8 +1220,17 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
                 sample_key = next(iter(nlp_features_clean.keys())) if nlp_features_clean else None
                 is_individual_method = (sample_key is not None and isinstance(sample_key, tuple))
                 
-                # Determine feature dimension based on method
-                nlp_feature_dim = 4 if use_simple else 10
+                # Determine feature dimension and method based on feature structure
+                # This must match what get_nlp_feature_vector will return
+                if use_simple or is_individual_method:
+                    # Individual method: 4 features
+                    nlp_feature_dim = 4
+                    actual_method_for_features = "individual"
+                else:
+                    # Aggregated method: 10 features
+                    nlp_feature_dim = 10
+                    actual_method_for_features = "aggregated"
+                
                 nlp_window = np.empty((len(period), nlp_feature_dim), dtype=float)
                 
                 # Get stock ticker for this sample (for individual method)
@@ -1063,7 +1251,7 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
                             # Individual method: (stock, date) -> row
                             if stock_ticker and (stock_ticker, date_at_t) in nlp_features_clean:
                                 nlp_row = nlp_features_clean[(stock_ticker, date_at_t)]
-                                nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=nlp_method)
+                                nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=actual_method_for_features)
                                 nlp_window[idx, :] = nlp_vec
                             else:
                                 # No NLP data for this stock-date - use zeros
@@ -1072,7 +1260,7 @@ def get_feature_input_classification(op, cp, lookback, study_period, num_stocks,
                             # Aggregated method: date -> row
                             if date_at_t in nlp_features_clean:
                                 nlp_row = nlp_features_clean[date_at_t]
-                                nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=nlp_method)
+                                nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=actual_method_for_features)
                                 nlp_window[idx, :] = nlp_vec
                             else:
                                 # No NLP data for this date - use zeros
