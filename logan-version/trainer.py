@@ -390,7 +390,7 @@ class Trainer():
             return None
         
         # Move model to device first
-        self.Model = LSTM(input_shape=input_shape).to(self.device)
+        self.Model = LSTMModel(input_shape=input_shape).to(self.device)
         
         # Wrap with DDP if in distributed mode
         if self.is_dist:
