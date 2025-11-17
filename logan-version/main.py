@@ -74,7 +74,7 @@ print("=" * 60)
 total_epochs = 1000
 
 try:
-    train_obj = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=total_epochs, prediction_type=prediction_type, saved_model=model_path)
+    train_obj = trainer.Trainer(stocks=stocks, time_args=[start,end], num_epochs=total_epochs, prediction_type=prediction_type, saved_model=model_path, use_nlp=True, nlp_method="aggregated")
 except Exception as e:
     print(f"[ERROR] Failed to initialize Trainer: {e}")
     print("\nFull traceback:")
