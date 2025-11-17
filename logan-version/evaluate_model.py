@@ -11,17 +11,22 @@ import sys
 # Add parent directory and logan-version to path so we can import modules
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 logan_version_dir = os.path.join(parent_dir, "logan-version")
+trained_model_dir = os.path.join(parent_dir, "trained_models")
 if logan_version_dir not in sys.path:
     sys.path.insert(0, logan_version_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
+if trained_model_dir not in sys.path:
+    sys.path.insert(0, trained_model_dir)
 
 from evaluator import ModelEvaluator
+from nlp_features import get_nlp_feature_dim
 
 def evaluate_saved_model(model_path: str = "savedmodel_classification.pth", 
                         stocks: list = None,
                         time_args: list = None,
-                        log_dir: str = "runs/evaluation"):
+                        log_dir: str = "runs/evaluation",
+                        nlp_method: str = "aggregated"):
     """
     Evaluate a saved model using the ModelEvaluator.
     
@@ -30,6 +35,7 @@ def evaluate_saved_model(model_path: str = "savedmodel_classification.pth",
         stocks: List of stock symbols to evaluate on
         time_args: Time arguments for data loading
         log_dir: Directory for TensorBoard logs
+        nlp_method: NLP method to use for evaluation
     """
     # Get logan-version directory path
     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -134,7 +140,8 @@ def main():
     print("STOCK PREDICTION MODEL EVALUATION")
     print("=" * 60)
     
-    success = evaluate_saved_model()
+    model_name = "savedmodel_classification.pth"
+    success = evaluate_saved_model(model_path=model_name)
     
     if success:
         print("\n" + "=" * 60)
