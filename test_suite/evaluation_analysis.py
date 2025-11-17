@@ -17,8 +17,44 @@ Usage:
         --input /path/to/evaluation_results_savedmodel_classification.json \
         --output /path/to/evaluation_analysis_report.json
 
-Optional arguments let you plug in additional datasets (cross-sectional scores,
-market regime data) to unlock more diagnostics. See `parse_args` for details.
+Arguments:
+    --input (required)
+        Path to evaluation_results_*.json file.
+
+    --output (required)
+        Destination path for the consolidated analysis JSON.
+
+    --cross-sectional (optional)
+        CSV/Parquet with per-ticker predictions. Expected columns:
+        date, ticker, score, ret, sector (if sector diagnostics desired).
+
+    --market-data (optional)
+        CSV/Parquet with columns such as date, spx_return, spx_abs_return,
+        vix_change, dispersion.
+
+    --portfolio-table-csv (optional)
+        Path to write a tidy CSV of before/after-cost portfolio metrics.
+
+    --bootstrap-samples (optional, default=2000)
+        Number of bootstrap resamples for BCa confidence intervals.
+
+    --bootstrap-seed (optional, default=42)
+        Random seed for bootstrap resampling.
+
+    --bootstrap-alpha (optional, default=0.05)
+        Significance level for BCa confidence intervals.
+
+    --rolling-window (optional, default=60)
+        Window size (in trading days) for rolling diagnostics.
+
+    --min-rolling-observations (optional, default=30)
+        Minimum observations required before emitting rolling statistics.
+
+    --change-point-z-threshold (optional, default=2.0)
+        Z-score threshold for marking change-points in rolling averages.
+
+    --change-point-min-gap (optional, default=20)
+        Minimum index gap between successive change-point flags.
 """
 
 from __future__ import annotations

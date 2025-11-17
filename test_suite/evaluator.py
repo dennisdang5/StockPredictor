@@ -29,12 +29,15 @@ from collections import defaultdict
 # Add parent directory and logan-version to path so we can import modules
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 logan_version_dir = os.path.join(parent_dir, "logan-version")
+trained_model_dir = os.path.join(parent_dir, "trained_models")
 if logan_version_dir not in sys.path:
     sys.path.insert(0, logan_version_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
+if trained_model_dir not in sys.path:
+    sys.path.insert(0, trained_model_dir)
 
-from model import LSTMModel
+from model import LSTMModel, CNNLSTMModel, CNNAutoEncoder, AELSTM, CNNAELSTM
 import util
 
 
@@ -74,7 +77,11 @@ class ModelEvaluator:
                  time_args: List[str] = ["3y"],
                  data_dir: str = None,
                  log_dir: str = "runs/evaluation",
-                 device: Optional[torch.device] = None):
+                 device: Optional[torch.device] = None,
+                 use_nlp: bool = False,
+                 nlp_method: str = "aggregated",
+                 model_type: str = "lstm",
+                 input_shape: Optional[Tuple[int, int]] = None):
         """
         Initialize the ModelEvaluator.
         
@@ -85,6 +92,10 @@ class ModelEvaluator:
             data_dir: Directory containing data files (defaults to logan-version/data)
             log_dir: Directory for TensorBoard logs
             device: Device to run evaluation on (auto-detect if None)
+            use_nlp: Whether to use NLP features (default: False)
+            nlp_method: NLP method to use - "aggregated" or "individual" (default: "aggregated")
+            model_type: Model type to use - "lstm", "cnn_lstm", "cnn_autoencoder", "aelstm", "cnnaelstm" (default: "lstm")
+            input_shape: Input shape tuple (lookback_window, num_features). If None, will be determined from data.
         """
         # Default to logan-version/data if not specified
         if data_dir is None:
@@ -92,23 +103,48 @@ class ModelEvaluator:
             logan_version_dir = os.path.join(parent_dir, "logan-version")
             data_dir = os.path.join(logan_version_dir, "data")
         
-        # Resolve model path - check logan-version if not absolute and not found locally
+        # Resolve model path - check multiple locations
         if not os.path.isabs(model_path) and not os.path.exists(model_path):
             parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             logan_version_dir = os.path.join(parent_dir, "logan-version")
-            logan_model_path = os.path.join(logan_version_dir, model_path)
-            if os.path.exists(logan_model_path):
-                model_path = logan_model_path
+            trained_models_dir = os.path.join(parent_dir, "trained_models")
+            
+            # Try in trained_models directory first
+            trained_model_path = os.path.join(trained_models_dir, model_path)
+            if os.path.exists(trained_model_path):
+                model_path = trained_model_path
+            else:
+                # Try in logan-version directory
+                logan_model_path = os.path.join(logan_version_dir, model_path)
+                if os.path.exists(logan_model_path):
+                    model_path = logan_model_path
+                else:
+                    # Try in logan-version/trained_models directory
+                    logan_trained_path = os.path.join(logan_version_dir, "trained_models", model_path)
+                    if os.path.exists(logan_trained_path):
+                        model_path = logan_trained_path
+                    else:
+                        # Model not found in any location
+                        print(f"[Evaluator] ⚠️  Model file '{model_path}' not found in standard locations!")
+                        print(f"[Evaluator]    Searched in:")
+                        print(f"[Evaluator]    - Current directory: {os.path.abspath('.')}")
+                        print(f"[Evaluator]    - Trained models: {os.path.abspath(trained_models_dir)}")
+                        print(f"[Evaluator]    - Logan version: {os.path.abspath(logan_version_dir)}")
+                        print(f"[Evaluator]    - Logan version/trained_models: {os.path.abspath(os.path.join(logan_version_dir, 'trained_models'))}")
+                        print(f"[Evaluator]    Continuing with provided path (may fail during model loading)...")
         
         self.model_path = model_path
         self.stocks = stocks
         self.time_args = time_args
         self.data_dir = data_dir
         self.log_dir = log_dir
-        
+        self.use_nlp = use_nlp
+        self.nlp_method = nlp_method
+        self.model_type = model_type
+        self.input_shape = input_shape  # Will be set from data if None
         print(f"[Evaluator] Using data directory: {os.path.abspath(self.data_dir)}")
         print(f"[Evaluator] Using model path: {os.path.abspath(self.model_path)}")
-        
+        print(f"[Evaluator] Using model type: {self.model_type}")
         # Setup device
         if device is None:
             if torch.cuda.is_available():
@@ -141,9 +177,15 @@ class ModelEvaluator:
         
         # Load data using the same method as training
         # Try cache first, then download if needed
-        input_data = util.load_data_from_cache(self.stocks, self.time_args, data_dir=self.data_dir, prediction_type="classification")
+        input_data = util.load_data_from_cache(
+            self.stocks, self.time_args, data_dir=self.data_dir, 
+            prediction_type="classification", use_nlp=self.use_nlp, nlp_method=self.nlp_method
+        )
         if input_data is None:
-            input_data = util.get_data(self.stocks, self.time_args, data_dir=self.data_dir, prediction_type="classification")
+            input_data = util.get_data(
+                self.stocks, self.time_args, data_dir=self.data_dir, 
+                prediction_type="classification", use_nlp=self.use_nlp, nlp_method=self.nlp_method
+            )
         if isinstance(input_data, int):
             raise RuntimeError("Error getting data from util.get_data()")
         
@@ -172,6 +214,35 @@ class ModelEvaluator:
         self.Y_test = Y_test
         self.test_dates = D_test
         
+        # Determine input shape from data if not provided
+        if self.input_shape is None:
+            if isinstance(X_test, torch.Tensor):
+                # X_test shape: (N, lookback, features)
+                if len(X_test.shape) == 3:
+                    self.input_shape = (X_test.shape[1], X_test.shape[2])  # (lookback, features)
+                else:
+                    raise ValueError(f"Unexpected X_test shape: {X_test.shape}. Expected 3D tensor (N, lookback, features)")
+            elif isinstance(X_test, np.ndarray):
+                if len(X_test.shape) == 3:
+                    self.input_shape = (X_test.shape[1], X_test.shape[2])  # (lookback, features)
+                else:
+                    raise ValueError(f"Unexpected X_test shape: {X_test.shape}. Expected 3D array (N, lookback, features)")
+            else:
+                # Try to get shape from first sample
+                sample = X_test[0] if hasattr(X_test, '__getitem__') else None
+                if sample is not None:
+                    if isinstance(sample, torch.Tensor):
+                        self.input_shape = tuple(sample.shape)
+                    elif isinstance(sample, np.ndarray):
+                        self.input_shape = tuple(sample.shape)
+                    else:
+                        raise ValueError(f"Cannot determine input shape from X_test type: {type(X_test)}")
+                else:
+                    raise ValueError(f"Cannot determine input shape from X_test")
+            print(f"[Evaluator] Determined input shape from data: {self.input_shape}")
+        else:
+            print(f"[Evaluator] Using provided input shape: {self.input_shape}")
+        
         # Ensure revenues are numpy arrays and aligned with test inputs
         self.test_revenues = np.array(Rev_test) if not isinstance(Rev_test, np.ndarray) else Rev_test
         
@@ -194,6 +265,7 @@ class ModelEvaluator:
             raise ValueError(f"Mismatch: test inputs ({len(self.X_test)}) and S&P 500 returns ({len(self.test_sp500)}) must have same length")
         
         print(f"[Evaluator] Loaded {len(self.X_test)} test samples")
+        print(f"[Evaluator] Test input shape: {self.X_test.shape if hasattr(self.X_test, 'shape') else 'unknown'}")
         print(f"[Evaluator] Test revenues shape: {self.test_revenues.shape}, aligned with test inputs: {len(self.X_test) == len(self.test_revenues)}")
         if self.test_sp500 is not None:
             print(f"[Evaluator] Test S&P 500 returns shape: {self.test_sp500.shape}, aligned with test inputs: {len(self.X_test) == len(self.test_sp500)}")
@@ -396,8 +468,23 @@ class ModelEvaluator:
         """Load the saved model."""
         print(f"[Evaluator] Loading model from {self.model_path}")
         
-        # Initialize model
-        self.model = LSTMModel()
+        # Ensure input_shape is set (should be set in _load_data, but check here as fallback)
+        if self.input_shape is None:
+            raise ValueError("[Evaluator] input_shape must be determined from data before loading model. Ensure _load_data() is called first.")
+        
+        # Initialize model with input_shape
+        if self.model_type == "lstm":
+            self.model = LSTMModel(input_shape=self.input_shape)
+        elif self.model_type == "cnn_lstm":
+            self.model = CNNLSTMModel(input_shape=self.input_shape)
+        elif self.model_type == "cnn_autoencoder":
+            self.model = CNNAutoEncoder(input_shape=self.input_shape)
+        elif self.model_type == "aelstm":
+            self.model = AELSTM(input_shape=self.input_shape)
+        elif self.model_type == "cnnaelstm":
+            self.model = CNNAELSTM(input_shape=self.input_shape)
+        else:
+            raise ValueError(f"[Evaluator] Invalid model type: {self.model_type}")
         self.model = self.model.to(self.device)
         
         # Load state dict
@@ -2203,6 +2290,22 @@ class ModelEvaluator:
         print("EVALUATION SUMMARY")
         print("="*60)
         
+        # Key metrics to display from nested dictionaries
+        key_metrics = {
+            'portfolio_performance': [
+                'annualized_return', 'sharpe_ratio', 'sortino_ratio', 'max_drawdown_pct',
+                'volatility_annualized', 'accuracy_traded_set_pct'
+            ],
+            'statistical_tests': [
+                'dm_statistic', 'dm_p_value', 'dm_significant',
+                'pt_statistic', 'pt_p_value', 'pt_significant'
+            ],
+            'benchmarks': [
+                'sp500_annualized_return', 'sp500_sharpe', 'excess_return_vs_sp500',
+                'random_annualized_return', 'random_sharpe', 'outperformance_vs_random'
+            ]
+        }
+        
         for category, metric_dict in metrics.items():
             print(f"\n{category.upper()} METRICS:")
             print("-" * 30)
@@ -2211,16 +2314,72 @@ class ModelEvaluator:
                     print(f"  {metric_name:25}: summarized ({', '.join(value.keys())})")
                     continue
                 if isinstance(value, float):
-                    if 'accuracy' in metric_name or 'mape' in metric_name or 'smape' in metric_name:
+                    if 'accuracy' in metric_name or 'mape' in metric_name or 'smape' in metric_name or 'pct' in metric_name:
                         print(f"  {metric_name:25}: {value:8.2f}%")
                     else:
                         print(f"  {metric_name:25}: {value:8.6f}")
                 elif isinstance(value, dict):
-                    print(f"  {metric_name:25}: dict[{len(value)}]")
+                    # Show key metrics from nested dicts
+                    if category in key_metrics and metric_name in key_metrics[category]:
+                        # This is a key metric, show it
+                        pass  # Will be handled below
+                    elif category == 'paper_aligned' and metric_name in key_metrics:
+                        # Print key metrics from nested dict
+                        print(f"  {metric_name}:")
+                        for key in key_metrics[metric_name]:
+                            if key in value:
+                                nested_val = value[key]
+                                if isinstance(nested_val, (int, float)):
+                                    if 'pct' in key or 'accuracy' in key or 'drawdown' in key:
+                                        print(f"    {key:30}: {nested_val:8.2f}%")
+                                    else:
+                                        print(f"    {key:30}: {nested_val:12.6f}")
+                        print(f"    ... ({len(value)} total metrics)")
+                    else:
+                        # Show a few sample keys for other dicts
+                        sample_keys = list(value.keys())[:5]
+                        if len(value) > 5:
+                            print(f"  {metric_name:25}: dict[{len(value)}] (keys: {', '.join(sample_keys)}, ...)")
+                        else:
+                            print(f"  {metric_name:25}: dict[{len(value)}] (keys: {', '.join(sample_keys)})")
                 elif isinstance(value, list):
                     print(f"  {metric_name:25}: list[{len(value)}]")
                 else:
                     print(f"  {metric_name:25}: {value}")
+        
+        # Print key summary metrics at the end
+        if 'paper_aligned' in metrics:
+            paper_metrics = metrics['paper_aligned']
+            print("\n" + "="*60)
+            print("KEY PERFORMANCE METRICS")
+            print("="*60)
+            
+            if 'portfolio_performance' in paper_metrics:
+                pp = paper_metrics['portfolio_performance']
+                print(f"  Annualized Return:     {pp.get('annualized_return', 0):8.4f} ({pp.get('annualized_return', 0)*100:6.2f}%)")
+                print(f"  Sharpe Ratio:           {pp.get('sharpe_ratio', 0):8.4f}")
+                print(f"  Sortino Ratio:          {pp.get('sortino_ratio', 0):8.4f}")
+                print(f"  Max Drawdown:           {pp.get('max_drawdown_pct', 0):8.2f}%")
+                print(f"  Volatility (annual):    {pp.get('volatility_annualized', 0):8.4f} ({pp.get('volatility_annualized', 0)*100:6.2f}%)")
+            
+            if 'accuracy' in paper_metrics:
+                acc = paper_metrics['accuracy']
+                print(f"  Accuracy (traded set):   {acc.get('accuracy_traded_set_pct', 0):8.2f}%")
+                print(f"  Traded samples:          {acc.get('n_traded_samples', 0):,} / {acc.get('n_total_samples', 0):,}")
+            
+            if 'statistical_tests' in paper_metrics:
+                stats = paper_metrics['statistical_tests']
+                print(f"  DM Test:                stat={stats.get('dm_statistic', 0):6.3f}, p={stats.get('dm_p_value', 1):6.4f} {'✓' if stats.get('dm_significant', False) else '✗'}")
+                print(f"  PT Test:                stat={stats.get('pt_statistic', 0):6.3f}, p={stats.get('pt_p_value', 1):6.4f} {'✓' if stats.get('pt_significant', False) else '✗'}")
+            
+            if 'benchmarks' in paper_metrics:
+                bench = paper_metrics['benchmarks']
+                if 'sp500_annualized_return' in bench:
+                    print(f"  S&P 500 Return:          {bench.get('sp500_annualized_return', 0):8.4f} ({bench.get('sp500_annualized_return', 0)*100:6.2f}%)")
+                    print(f"  Excess vs S&P 500:       {bench.get('excess_return_vs_sp500', 0):8.4f} ({bench.get('excess_return_vs_sp500', 0)*100:6.2f}%)")
+                if 'random_annualized_return' in bench:
+                    print(f"  Random Portfolio Return: {bench.get('random_annualized_return', 0):8.4f} ({bench.get('random_annualized_return', 0)*100:6.2f}%)")
+                    print(f"  Outperformance vs Random: {bench.get('outperformance_vs_random', 0):8.4f} ({bench.get('outperformance_vs_random', 0)*100:6.2f}%)")
         
         print("\n" + "="*60)
         

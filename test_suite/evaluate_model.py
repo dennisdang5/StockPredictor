@@ -19,14 +19,19 @@ if parent_dir not in sys.path:
 if trained_model_dir not in sys.path:
     sys.path.insert(0, trained_model_dir)
 
+print(parent_dir)
+print(logan_version_dir)
+print(trained_model_dir)
+
 from evaluator import ModelEvaluator
-from nlp_features import get_nlp_feature_dim
 
 def evaluate_saved_model(model_path: str = "savedmodel_classification.pth", 
                         stocks: list = None,
                         time_args: list = None,
                         log_dir: str = "runs/evaluation",
-                        nlp_method: str = "aggregated"):
+                        nlp_method: str = "aggregated",
+                        model_type: str = "lstm",
+                        input_shape: tuple = None):
     """
     Evaluate a saved model using the ModelEvaluator.
     
@@ -36,10 +41,13 @@ def evaluate_saved_model(model_path: str = "savedmodel_classification.pth",
         time_args: Time arguments for data loading
         log_dir: Directory for TensorBoard logs
         nlp_method: NLP method to use for evaluation
+        model_type: Model type to use
+        input_shape: Input shape tuple (lookback_window, num_features). If None, will be determined from data.
     """
-    # Get logan-version directory path
+    # Get directory paths
     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     logan_version_dir = os.path.join(parent_dir, "logan-version")
+    trained_models_dir = os.path.join(parent_dir, "trained_models")
     
     # Default parameters
     if stocks is None:
@@ -81,16 +89,31 @@ def evaluate_saved_model(model_path: str = "savedmodel_classification.pth",
     if time_args is None:
         time_args = ["1989-12-01", "2015-09-30"]  # Default time period
     
-    # Check if model exists (try both current directory and logan-version)
+    # Check if model exists (try multiple locations)
     if not os.path.exists(model_path):
-        # Try in logan-version directory
-        logan_model_path = os.path.join(logan_version_dir, model_path)
-        if os.path.exists(logan_model_path):
-            model_path = logan_model_path
+        # Try in trained_models directory first
+        trained_model_path = os.path.join(trained_models_dir, model_path)
+        if os.path.exists(trained_model_path):
+            model_path = trained_model_path
         else:
-            print(f"❌ Model file '{model_path}' not found!")
-            print("Please train a model first or check the model path.")
-            return False
+            # Try in logan-version directory
+            logan_model_path = os.path.join(logan_version_dir, model_path)
+            if os.path.exists(logan_model_path):
+                model_path = logan_model_path
+            else:
+                # Try in logan-version/trained_models directory
+                logan_trained_path = os.path.join(logan_version_dir, "trained_models", model_path)
+                if os.path.exists(logan_trained_path):
+                    model_path = logan_trained_path
+                else:
+                    print(f"❌ Model file '{model_path}' not found!")
+                    print(f"   Searched in:")
+                    print(f"   - Current directory: {os.path.abspath('.')}")
+                    print(f"   - Trained models: {os.path.abspath(trained_models_dir)}")
+                    print(f"   - Logan version: {os.path.abspath(logan_version_dir)}")
+                    print(f"   - Logan version/trained_models: {os.path.abspath(os.path.join(logan_version_dir, 'trained_models'))}")
+                    print("Please train a model first or check the model path.")
+                    return False
     
     print(f"🔍 Evaluating model: {model_path}")
     print(f"📊 Stocks: {stocks}")
@@ -99,12 +122,16 @@ def evaluate_saved_model(model_path: str = "savedmodel_classification.pth",
     print("-" * 50)
     
     try:
-        # Initialize evaluator
+        # Initialize evaluator (input_shape will be determined from data if None)
         evaluator = ModelEvaluator(
             model_path=model_path,
             stocks=stocks,
             time_args=time_args,
-            log_dir=log_dir
+            log_dir=log_dir,
+            use_nlp=False,  # Set to True if model was trained with NLP features
+            nlp_method=nlp_method,
+            model_type=model_type,
+            input_shape=input_shape
         )
         
         # Run comprehensive evaluation
@@ -139,9 +166,16 @@ def main():
     print("=" * 60)
     print("STOCK PREDICTION MODEL EVALUATION")
     print("=" * 60)
-    
-    model_name = "savedmodel_classification.pth"
-    success = evaluate_saved_model(model_path=model_name)
+
+    model_name = "savedmodel_classification_cnn_lstm.pth"
+    model_type = "cnn_lstm"
+    time_args = ["1990-01-01", "2015-12-31"]
+
+    if len(sys.argv) > 1:
+        model_name = sys.argv[1]
+        model_type = sys.argv[2]
+        
+    success = evaluate_saved_model(model_path=model_name, time_args=time_args, model_type=model_type)
     
     if success:
         print("\n" + "=" * 60)

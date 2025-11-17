@@ -1,0 +1,30 @@
+Group,Metric,Model,Before costs,After costs
+Panel A,Mean return (long),savedmodel_classification_cnn_lstm,0.0012280684271299743,0.00022806842712997408
+Panel A,Mean return (short),savedmodel_classification_cnn_lstm,-4.580928954612333e-05,-0.0010458092895461236
+Panel A,Mean return (portfolio),savedmodel_classification_cnn_lstm,0.0011822591375838512,-0.000817740862416149
+Panel A,Std. dev.,savedmodel_classification_cnn_lstm,0.007082428405435143,0.007082428405435143
+Panel A,Share > 0,savedmodel_classification_cnn_lstm,0.5934718100890207,0.4559841740850643
+Panel A,Minimum return,savedmodel_classification_cnn_lstm,-0.03192861023449624,-0.03392861023449624
+Panel A,First quartile,savedmodel_classification_cnn_lstm,-0.002978490055848746,-0.004978490055848746
+Panel A,Median return,savedmodel_classification_cnn_lstm,0.0012249750899057015,-0.0007750249100942986
+Panel A,Third quartile,savedmodel_classification_cnn_lstm,0.0055550706788361544,0.003555070678836154
+Panel A,Maximum return,savedmodel_classification_cnn_lstm,0.029306834937304183,0.02730683493730418
+Panel A,Kurtosis,savedmodel_classification_cnn_lstm,1.0855274724266843,1.0855274724266843
+Panel A,Newey-West SE,savedmodel_classification_cnn_lstm,0.00020379166961938906,0.00020379166961938906
+Panel A,Newey-West t-stat,savedmodel_classification_cnn_lstm,5.801312388243809,-4.01263144829914
+Panel A,Standard error,savedmodel_classification_cnn_lstm,0.0002227443081720853,0.0002227443081720853
+Panel A,t-stat (iid),savedmodel_classification_cnn_lstm,5.30769628766664,-3.671208791491938
+Panel B,VaR (5%),savedmodel_classification_cnn_lstm,-0.010170146128507324,-0.012170146128507326
+Panel B,CVaR (5%),savedmodel_classification_cnn_lstm,-0.014586467707196413,-0.016586467707196417
+Panel B,VaR (1%),savedmodel_classification_cnn_lstm,-0.018394965009992457,-0.02039496500999246
+Panel B,CVaR (1%),savedmodel_classification_cnn_lstm,-0.020826635703504303,-0.022826635703504305
+Panel B,Max drawdown (%),savedmodel_classification_cnn_lstm,6.321181858541963,58.11499182444737
+Panel C,Return p.a.,savedmodel_classification_cnn_lstm,0.2979293026711305,-0.20607069732886954
+Panel C,Excess return p.a.,savedmodel_classification_cnn_lstm,0.16559890150979018,-0.33840109849020983
+Panel C,Std. dev. p.a.,savedmodel_classification_cnn_lstm,0.11243006543520677,0.11243006543520677
+Panel C,Downside dev. p.a.,savedmodel_classification_cnn_lstm,0.07240273844439589,0.07612241096367763
+Panel C,Sharpe ratio,savedmodel_classification_cnn_lstm,2.649907758372929,-1.8328789237219443
+Panel C,Sortino ratio,savedmodel_classification_cnn_lstm,4.11488997615657,-2.7070963034420665
+Benchmarks,Return p.a. (S&P 500),S&P 500,0.13233040116134032,0.13233040116134032
+Benchmarks,Volatility p.a. (S&P 500),S&P 500,0.12784184653248543,0.12784184653248543
+Benchmarks,Sharpe (S&P 500),S&P 500,1.0351102143046278,1.0351102143046278
