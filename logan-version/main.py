@@ -63,26 +63,33 @@ def main():
     # Utilities
     "AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE", "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW", "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
     ]
-
+    
     
     start = "1990-01-01"
+    #end = "1991-01-01"
     end = "2015-12-31"
     prediction_type = "classification"
     
     models = {
-            "AE_NLP_LSTM": {
-                "model_type": "AELSTM",
-                "nlp_method": "aggregated",
-                "use_nlp": True,
-                "model_path": "savedmodel_classification_ae_nlp_lstm.pth",
-            },
-            "AE_NLP_CNN_LSTM": {
-                "model_type": "CNNAELSTM",
-                "nlp_method": "aggregated",
-                "use_nlp": True,
-                "model_path": "savedmodel_classification_ae_nlp_cnn_lstm.pth",
-                "kernel_size": 3
-            },
+        "LSTM": {
+            "model_type": "LSTM",
+            "model_path": "savedmodel_classification_nlp_lstm.pth",
+            "use_nlp": True,
+            "nlp_method": "aggregated"
+        },
+        "AE_NLP_LSTM": {
+            "model_type": "AELSTM",
+            "nlp_method": "aggregated",
+            "use_nlp": True,
+            "model_path": "savedmodel_classification_ae_nlp_lstm.pth"
+        },
+        "AE_NLP_CNN_LSTM": {
+            "model_type": "CNNAELSTM",
+            "nlp_method": "aggregated",
+            "use_nlp": True,
+            "model_path": "savedmodel_classification_ae_cnn_nlp_lstm.pth",
+            "kernel_size": 3
+        },
     }
     
     # Training phase
@@ -90,7 +97,7 @@ def main():
     print("TRAINING PHASE")
     print("=" * 60)
     
-    total_epochs = 1000
+    total_epochs = 1
     for model_name, model_args in models.items():
         try:
             # Extract model_type and pass it separately, then pass remaining args

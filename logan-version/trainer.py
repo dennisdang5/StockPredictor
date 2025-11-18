@@ -931,11 +931,11 @@ class Trainer():
         try:
             # Get the underlying model (unwrap DDP/DataParallel if needed)
             model_to_save = self.Model.module if hasattr(self.Model, "module") else self.Model
-            torch.save(model_to_save.state_dict(), self.save_path)
-            print(f"[periodic save] Model saved at epoch {epoch} to {self.save_path}")
+            torch.save(model_to_save.state_dict(), "checkpoint_" + self.save_path )
+            print(f"[periodic save] Model saved at epoch {epoch} to checkpoint_{self.save_path}")
             # Reset recovery counter on successful save (model is stable)
             self.nan_recovery_attempts = 0
-            self.last_good_checkpoint = self.save_path
+            self.last_good_checkpoint = "checkpoint_" + self.save_path
         except Exception as e:
             print(f"[ERROR] Failed to save model periodically at epoch {epoch}: {e}")
     
