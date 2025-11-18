@@ -97,7 +97,7 @@ def main():
     print("TRAINING PHASE")
     print("=" * 60)
     
-    total_epochs = 1
+    total_epochs = 1000
     for model_name, model_args in models.items():
         try:
             # Extract model_type and pass it separately, then pass remaining args
