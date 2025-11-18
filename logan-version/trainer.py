@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch import nn
 import torch.utils.data as data
 from nlp_features import get_nlp_feature_dim
-from model import LSTMModel, CNNLSTMModel, AELSTM
+from model import LSTMModel, CNNLSTMModel, AELSTM, CNNAELSTM
 import util
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
@@ -137,21 +137,23 @@ class EarlyStopper():
         
 
 class Trainer():
-    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0, save_every_epochs=25, use_nlp=False, nlp_method=None):
+    def __init__(self, stocks=["MSFT", "AAPL"], time_args=["3y"], batch_size=8, num_epochs=10000, saved_model=None, prediction_type="classification", k=10, cost_bps_per_side=5.0, save_every_epochs=25, model_type="LSTM", **model_args):
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
         self.rank = dist.get_rank() if self.is_dist else 0
         self.world_size = dist.get_world_size() if self.is_dist else 1
         self.is_main = (self.rank == 0)
 
-        self.stocks = stocks
+        self.stocks = stocks    
         self.time_args = time_args
         self.batch_size = batch_size
         self.prediction_type = prediction_type
         self.k = k  # Number of top/bottom positions for long-short portfolio
         self.cost_bps_per_side = cost_bps_per_side  # Transaction costs per side in basis points
-        self.use_nlp = use_nlp
-        self.nlp_method = nlp_method
+        self.model_type = model_type  # Store model_type for later use
+        self.model_args = model_args  # Store model_args for later use
+        self.use_nlp = model_args.get("use_nlp", False)
+        self.nlp_method = model_args.get("nlp_method", None)
         # Only rank 0 creates TensorBoard writer
         self.writer = SummaryWriter() if self.is_main else None
 
@@ -233,7 +235,7 @@ class Trainer():
                     raise RuntimeError("No valid stocks found after filtering problematic stocks.")
                 
                 # Step 4: Load from cache with filtered stocks
-                input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+                input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
                 if input_data is None:
                     raise RuntimeError(f"Cache files not found after rank 0 processing. Expected cache should exist.")
             
@@ -242,7 +244,7 @@ class Trainer():
         else:
             # Non-distributed: optimized flow
             # Step 1: Check cache first with full stock list
-            input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+            input_data = util.load_data_from_cache(stocks, time_args, data_dir="data", prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
             
             if input_data is None:
                 # Step 2: Load saved problematic stocks for this time period
@@ -260,7 +262,7 @@ class Trainer():
                     raise RuntimeError("No valid stocks found after filtering problematic stocks.")
                 
                 # Step 4: Check cache with filtered stocks
-                input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type)
+                input_data = util.load_data_from_cache(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
                 
                 if input_data is None:
                     # Step 5: Download data (will save problematic stocks for future runs)
@@ -277,7 +279,7 @@ class Trainer():
                     
                     # Step 6: Process and save data (get_data will save problematic stocks)
                     print("[data] Processing downloaded data and saving to cache...")
-                    input_data = util.get_data(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type, open_close_data=open_close, problematic_stocks=all_problematic if all_problematic else None)
+                    input_data = util.get_data(valid_stocks, time_args, data_dir="data", prediction_type=self.prediction_type, open_close_data=open_close, problematic_stocks=all_problematic if all_problematic else None, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
                     if isinstance(input_data, int):
                         raise RuntimeError("Error getting data from util.get_data()")
                 else:
@@ -389,8 +391,29 @@ class Trainer():
             print(f"[ERROR] Failed to initialize model: {e}")
             return None
         
+        # Verify data dimensions match expected input_shape
+        if len(X_train) > 0:
+            actual_features = X_train.shape[2] if hasattr(X_train, 'shape') else np.array(X_train[0]).shape[1]
+            expected_features = input_shape[1]
+            if actual_features != expected_features:
+                error_msg = f"Data dimension mismatch! Model expects {expected_features} features (input_shape={input_shape}), but data has {actual_features} features. "
+                if self.use_nlp:
+                    error_msg += f"This likely means the cache was created without NLP features. Try deleting the cache and regenerating with use_nlp=True."
+                else:
+                    error_msg += f"This likely means the cache was created with NLP features. Try deleting the cache or setting use_nlp=True."
+                raise ValueError(error_msg)
+        
         # Move model to device first
-        self.Model = LSTMModel(input_shape=input_shape).to(self.device)
+        if self.model_type.upper() == "LSTM":
+            self.Model = LSTMModel(input_shape=input_shape).to(self.device)
+        elif self.model_type.upper() == "CNNLSTM":
+            self.Model = CNNLSTMModel(input_shape=input_shape, kernel_size=self.model_args.get("kernel_size", 3)).to(self.device)
+        elif self.model_type.upper() == "AELSTM":
+            self.Model = AELSTM(input_shape=input_shape).to(self.device)
+        elif self.model_type.upper() == "CNNAELSTM":
+            self.Model = CNNAELSTM(input_shape=input_shape, kernel_size=self.model_args.get("kernel_size", 3)).to(self.device)
+        else:
+            raise ValueError(f"Invalid model type: {self.model_type.upper()}")
         
         # Wrap with DDP if in distributed mode
         if self.is_dist:
@@ -1848,7 +1871,7 @@ class Trainer():
         This method can be used to explicitly load separate datasets.
         """
         # Use load_data_from_cache which handles separate .npz files
-        input_data = util.load_data_from_cache(stocks, time_args, data_dir=data_dir, prediction_type=self.prediction_type)
+        input_data = util.load_data_from_cache(stocks, time_args, data_dir=data_dir, prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
         if input_data is None:
             raise RuntimeError(f"Could not load separate datasets from cache in {data_dir}. Data may need to be downloaded first.")
         return input_data
