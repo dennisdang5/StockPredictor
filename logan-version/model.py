@@ -221,7 +221,7 @@ class CNNAutoEncoder(nn.Module):
         
         long_dec = self.long_dec_conv(long_enc)    # [batch, channels, 20] -> [batch, num_features, 20]
         # Transpose to [batch, time, channels] for normalization
-        long_dec = long_dec.transpose(1, 2)  # [batch, num_features, 20] -> [batch, 20, num_features]
+        long_dec = long_dec.transpose(1, 2)  # [batch, num_features, 20] -> [batch, 20, num_features] 
         # Normalize after long decoder
         long_dec = self.long_dec_norm(long_dec)
 
