@@ -40,3 +40,4 @@ uv pip install torchtext
 uv pip install torchaudio
 uv pip install torchdata
 uv pip install torchmetrics
+uv pip install tkinter
