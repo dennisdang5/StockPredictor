@@ -675,12 +675,6 @@ class Trainer():
                     if hasattr(timesnet_model, 'projection'):
                         for param in timesnet_model.projection.parameters():
                             param.requires_grad = True
-                    
-                    if self.is_main:
-                        # Count frozen and trainable parameters
-                        frozen_params = sum(p.numel() for p in self.Model.parameters() if not p.requires_grad)
-                        trainable_params = sum(p.numel() for p in self.Model.parameters() if p.requires_grad)
-                        print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
                 
                 if self.is_main:
                     print(f"[TimesNet] Model initialized with config:")
@@ -721,28 +715,75 @@ class Trainer():
             if self.is_main:
                 print(f"[DataParallel] using {torch.cuda.device_count()} GPUs")
 
+        # Count and print parameters after wrapping (for consistency)
         if self.is_main:
-            print("{} total parameters".format(sum(param.numel() for param in self.Model.parameters())))
+            # Get unwrapped model for accurate parameter counting
+            model_to_count = self.Model.module if hasattr(self.Model, 'module') else self.Model
+            
+            # Count total parameters
+            total_params = sum(param.numel() for param in model_to_count.parameters())
+            print(f"{total_params:,} total parameters")
+            
+            # If TimesNet with frozen encoder, show detailed breakdown
+            if self.model_type.upper() == "TIMESNET":
+                freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
+                if freeze_encoder:
+                    # Access the underlying TimesNet model
+                    if hasattr(model_to_count, 'timesnet'):
+                        timesnet_model = model_to_count.timesnet
+                    else:
+                        timesnet_model = model_to_count
+                    
+                    # Count frozen and trainable parameters
+                    frozen_params = sum(p.numel() for p in model_to_count.parameters() if not p.requires_grad)
+                    trainable_params = sum(p.numel() for p in model_to_count.parameters() if p.requires_grad)
+                    print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
         
-        # Determine the save path for the model
-        # If saved_model is provided, use it for both loading and saving
-        # Otherwise, default to "savedmodel.pth"
+        # Determine the save path for the model using unique ID system
+        # First check if a model exists with matching config
+        existing_model_path = None
+        
         if self.config.saved_model is not None:
+            # User explicitly provided a path - use it (legacy behavior)
             self.save_path = self.config.saved_model
-        else:
-            self.save_path = "savedmodel.pth"
-        
-        if self.config.saved_model is not None:
             if os.path.exists(self.config.saved_model):
-                state_dict = torch.load(self.config.saved_model, map_location="cpu")
-                # Load into underlying module if DataParallel/DDP is active
-                target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
-                target_module.load_state_dict(state_dict)
+                existing_model_path = self.config.saved_model
+        else:
+            # Use unique ID system: check if model exists with matching config
+            model_id, existing_model_path = util.find_model_by_config(self.config.model_config)
+            
+            if existing_model_path is not None:
+                # Found matching model - use its ID-based path
+                self.save_path = existing_model_path
                 if self.is_main:
-                    print(f"[load] restored weights from {self.config.saved_model}")
+                    print(f"[model] Found existing model with matching config (ID: {model_id})")
+                    print(f"[model] Using model path: {self.save_path}")
             else:
+                # No matching model found - generate new ID and create new path
+                model_id = util._get_model_id(self.config.model_config)
+                # Ensure models directory exists
+                os.makedirs(util.MODELS_DIR, exist_ok=True)
+                self.save_path = os.path.join(util.MODELS_DIR, f"{model_id}.pth")
                 if self.is_main:
+                    print(f"[model] No matching model found, creating new model (ID: {model_id})")
+                    print(f"[model] Model will be saved to: {self.save_path}")
+                # Save mapping for new model
+                util._save_model_mapping(model_id, self.config.model_config)
+        
+        # Load model weights if file exists
+        if existing_model_path is not None and os.path.exists(existing_model_path):
+            state_dict = torch.load(existing_model_path, map_location="cpu")
+            # Load into underlying module if DataParallel/DDP is active
+            target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
+            target_module.load_state_dict(state_dict)
+            if self.is_main:
+                print(f"[load] Restored weights from {existing_model_path}")
+        else:
+            if self.is_main:
+                if self.config.saved_model is not None:
                     print(f"[load] No saved model found at {self.config.saved_model}, starting with random weights")
+                else:
+                    print(f"[load] Starting training with random weights (new model)")
 
         # Use a lower learning rate to prevent instability
         # Even lower learning rate for more stability

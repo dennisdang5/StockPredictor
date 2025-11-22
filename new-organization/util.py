@@ -140,13 +140,18 @@ def validate_mask_type(mask_type):
 # data management
 ########################################################
 
-def _get_data_id(stocks, args):
+def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240):
     """
-    Generate a short hash-based ID for a unique combination of stocks and time args.
+    Generate a short hash-based ID for a unique combination of all dataset parameters.
     
     Args:
         stocks: List of stock symbols
         args: Time arguments
+        use_nlp: Whether NLP features are used
+        nlp_method: NLP method ("aggregated" or "individual")
+        prediction_type: Prediction type ("classification" or "regression")
+        period_type: Period type ("LS" or "full")
+        seq_len: Sequence length (lookback window size)
         
     Returns:
         A short 10-character hash string
@@ -154,7 +159,8 @@ def _get_data_id(stocks, args):
     # Create a stable string representation
     stocks_str = ",".join(sorted(stocks))  # Sort for consistency
     args_str = ",".join(str(a) for a in args)
-    combined = f"{stocks_str}|{args_str}"
+    nlp_str = f"nlp_{nlp_method}" if use_nlp else "no_nlp"
+    combined = f"{stocks_str}|{args_str}|{nlp_str}|{prediction_type}|{period_type}|{seq_len}"
     
     # Generate a short hash
     hash_obj = hashlib.sha256(combined.encode())
@@ -162,10 +168,11 @@ def _get_data_id(stocks, args):
 
 def _load_id_mapping():
     """
-    Load the ID to (stocks, args) mapping from disk.
+    Load the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len) mapping from disk.
     
     Returns:
-        Dictionary mapping data_id -> {'stocks': [...], 'args': [...], 'full_name': '...'}
+        Dictionary mapping data_id -> {'stocks': [...], 'args': [...], 'use_nlp': bool, 'nlp_method': str, 
+                                      'prediction_type': str, 'period_type': str, 'seq_len': int, 'full_name': '...'}
     """
     mapping_path = os.path.join(DATA_DIR, "_data_mapping.json")
     
@@ -178,14 +185,19 @@ def _load_id_mapping():
             return {}
     return {}
 
-def _save_id_mapping(data_id, stocks, args):
+def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240):
     """
-    Save the ID to (stocks, args) mapping to disk.
+    Save the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len) mapping to disk.
     
     Args:
         data_id: Short hash ID
         stocks: List of stock symbols
         args: Time arguments
+        use_nlp: Whether NLP features are used
+        nlp_method: NLP method ("aggregated" or "individual")
+        prediction_type: Prediction type ("classification" or "regression")
+        period_type: Period type ("LS" or "full")
+        seq_len: Sequence length (lookback window size)
     """
     os.makedirs(DATA_DIR, exist_ok=True)  # Ensure directory exists
     mapping_path = os.path.join(DATA_DIR, "_data_mapping.json")
@@ -195,6 +207,11 @@ def _save_id_mapping(data_id, stocks, args):
         mapping[data_id] = {
             'stocks': stocks,
             'args': args,
+            'use_nlp': use_nlp,
+            'nlp_method': nlp_method,
+            'prediction_type': prediction_type,
+            'period_type': period_type,
+            'seq_len': seq_len,
             'full_name': "_".join(stocks[:5]) + (f"_{len(stocks)-5}_more" if len(stocks) > 5 else "")
         }
         
@@ -202,6 +219,178 @@ def _save_id_mapping(data_id, stocks, args):
             json.dump(mapping, f, indent=2)
     except Exception as e:
         print(f"Warning: Could not save data mapping: {e}")
+
+########################################################
+# model mapping functions
+########################################################
+
+# Default models directory - all models stored here (relative to new-organization/)
+DEFAULT_MODELS_DIR = "trained_models"
+DEFAULT_MODELS_SUBDIR = "models"
+
+def get_default_models_dir():
+    """
+    Get the absolute path to the default models directory.
+    Returns: Absolute path to new-organization/trained_models/models/
+    """
+    # Get directory where util.py is located (new-organization/)
+    util_dir = os.path.dirname(os.path.abspath(__file__))
+    models_base_dir = os.path.join(util_dir, DEFAULT_MODELS_DIR)
+    models_subdir = os.path.join(models_base_dir, DEFAULT_MODELS_SUBDIR)
+    return models_subdir
+
+# Compute models directory once at module load time
+MODELS_DIR = get_default_models_dir()
+
+def _get_model_id(model_config):
+    """
+    Generate a short hash-based ID for a unique combination of model config class type and parameters.
+    
+    Args:
+        model_config: Model configuration object (e.g., LSTMConfig, TimesNetConfig)
+        
+    Returns:
+        A short 10-character hash string
+    """
+    import inspect
+    
+    # Get config class name
+    config_class_name = model_config.__class__.__name__
+    
+    # Get all parameters from the config
+    # Sort parameters for consistency
+    if hasattr(model_config, 'parameters'):
+        params = model_config.parameters
+        if isinstance(params, dict):
+            # Sort dictionary items for consistent hashing
+            params_str = json.dumps(params, sort_keys=True)
+        else:
+            params_str = str(params)
+    else:
+        # Fallback: get all attributes that aren't private
+        attrs = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        params_str = json.dumps(attrs, sort_keys=True, default=str)
+    
+    # Combine class name and parameters
+    combined = f"{config_class_name}|{params_str}"
+    
+    # Generate a short hash
+    hash_obj = hashlib.sha256(combined.encode())
+    return hash_obj.hexdigest()[:10]
+
+def _load_model_mapping():
+    """
+    Load the ID to model config mapping from disk.
+    
+    Returns:
+        Dictionary mapping model_id -> {'config_class': str, 'parameters': dict, 'full_name': str}
+    """
+    mapping_path = os.path.join(MODELS_DIR, "_model_mapping.json")
+    
+    if os.path.exists(mapping_path):
+        try:
+            with open(mapping_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load model mapping: {e}")
+            return {}
+    return {}
+
+def _save_model_mapping(model_id, model_config):
+    """
+    Save the ID to model config mapping to disk.
+    
+    Args:
+        model_id: Short hash ID
+        model_config: Model configuration object
+    """
+    os.makedirs(MODELS_DIR, exist_ok=True)  # Ensure directory exists
+    mapping_path = os.path.join(MODELS_DIR, "_model_mapping.json")
+    
+    try:
+        mapping = _load_model_mapping()
+        
+        # Extract config class name
+        config_class_name = model_config.__class__.__name__
+        
+        # Extract parameters
+        if hasattr(model_config, 'parameters'):
+            parameters = model_config.parameters
+            if not isinstance(parameters, dict):
+                parameters = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        else:
+            parameters = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        
+        mapping[model_id] = {
+            'config_class': config_class_name,
+            'parameters': parameters,
+            'full_name': config_class_name
+        }
+        
+        with open(mapping_path, 'w') as f:
+            json.dump(mapping, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save model mapping: {e}")
+
+def find_model_by_config(model_config):
+    """
+    Find an existing model with matching config by checking the mapping file.
+    
+    First checks if config class types match, then checks if all parameters are equivalent.
+    
+    Args:
+        model_config: Model configuration object to match
+        
+    Returns:
+        Tuple (model_id, model_path) if match found, (None, None) otherwise
+    """
+    mapping = _load_model_mapping()
+    
+    # Get config class name
+    config_class_name = model_config.__class__.__name__
+    
+    # Extract parameters from input config
+    if hasattr(model_config, 'parameters'):
+        input_params = model_config.parameters
+        if not isinstance(input_params, dict):
+            input_params = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+    else:
+        input_params = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+    
+    # Normalize parameters for comparison (convert to JSON-serializable format)
+    def normalize_value(v):
+        """Convert value to JSON-serializable format for comparison."""
+        if isinstance(v, (list, tuple)):
+            return tuple(normalize_value(item) for item in v)
+        elif isinstance(v, dict):
+            return {k: normalize_value(val) for k, val in sorted(v.items())}
+        elif isinstance(v, (int, float, str, bool, type(None))):
+            return v
+        else:
+            return str(v)
+    
+    input_params_normalized = {k: normalize_value(v) for k, v in sorted(input_params.items())}
+    
+    # Search for matching config
+    for model_id, cached_info in mapping.items():
+        cached_config_class = cached_info.get('config_class', '')
+        cached_params = cached_info.get('parameters', {})
+        
+        # Step 1: Check if config class types match
+        if cached_config_class != config_class_name:
+            continue
+        
+        # Step 2: Check if all parameters are equivalent
+        cached_params_normalized = {k: normalize_value(v) for k, v in sorted(cached_params.items())}
+        
+        if input_params_normalized == cached_params_normalized:
+            # Found matching config - verify model file exists
+            model_path = os.path.join(MODELS_DIR, f"{model_id}.pth")
+            if os.path.exists(model_path):
+                return (model_id, model_path)
+    
+    # No matching model found
+    return (None, None)
 
 def _get_args_key(args):
     """
@@ -597,6 +786,14 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
         raise ValueError(f"Invalid nlp_method '{nlp_method}'. Must be 'aggregated' or 'individual' when use_nlp=True.")
     
     # Step 1: Check cache first (unless force=True)
+    # load_data_from_cache verifies all 7 conditions before loading:
+    # 1. Cleaned stock list matches
+    # 2. Time period matches
+    # 3. use_nlp matches
+    # 4. nlp_method matches
+    # 5. prediction_type matches
+    # 6. period_type matches
+    # 7. seq_len matches
     if not force:
         cached_data = load_data_from_cache(
             stocks=stocks,
@@ -611,7 +808,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
             print(f"[cache] Loaded data from cache (prediction_type={prediction_type}, use_nlp={use_nlp}, nlp_method={nlp_method})")
             return cached_data
         else:
-            print(f"[cache] Cache not found, will download and process data...")
+            print(f"[cache] Cache not found (or conditions don't match), will download and process data...")
     
     # Step 2: Load saved problematic stocks for this time period
     problematic_stocks_saved = _load_problematic_stocks(args)
@@ -627,6 +824,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     validate_stocks_not_empty(valid_stocks, "after filtering problematic stocks")
     
     # Step 4: Check cache again with filtered stocks (in case cache exists for filtered set)
+    # This checks all 7 conditions again: cleaned stocks, time period, use_nlp, nlp_method, prediction_type, period_type, seq_len
     if not force:
         cached_data = load_data_from_cache(
             stocks=valid_stocks,
@@ -640,25 +838,6 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
         if cached_data is not None:
             print(f"[cache] Loaded data from cache (filtered stocks)")
             return cached_data
-    
-    # Prepare suffixes for cache file naming
-    prediction_suffix = f"_{prediction_type}"
-    # Differentiate cache paths for aggregated vs individual NLP methods
-    if use_nlp:
-        if nlp_method == "aggregated":
-            nlp_suffix = "_nlp_agg"  # Aggregated method (NYT)
-        elif nlp_method == "individual":
-            nlp_suffix = "_nlp_ind"  # Individual method (yfinance per stock)
-        else:
-            nlp_suffix = "_nlp"  # Fallback
-    else:
-        nlp_suffix = ""
-    
-    # Add period_type suffix to cache filename (always include to differentiate caches)
-    period_suffix = f"_{period_type}"
-    
-    # Add seq_len suffix to differentiate caches with different sequence lengths
-    seq_len_suffix = f"_seq{seq_len}"
     
     # Step 5: Download data if needed
     # If open_close_data is provided, use it (avoids redundant download)
@@ -738,7 +917,6 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
                         import warnings
                         warnings.warn(f"No NYT CSV files found in {nyt_dir}. NLP features will be disabled.")
                         use_nlp = False
-                        nlp_suffix = ""
                 
                 if use_nlp and nlp_csv_paths:
                     # Extract daily NLP features from NYT
@@ -771,7 +949,6 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
                         import warnings
                         warnings.warn("No NLP features extracted. Continuing without NLP features.")
                         use_nlp = False
-                        nlp_suffix = ""
                         nlp_features_dict = None
             
             elif nlp_method == "individual":
@@ -813,7 +990,6 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
                     import warnings
                     warnings.warn("No NLP features extracted from yfinance. Continuing without NLP features.")
                     use_nlp = False
-                    nlp_suffix = ""
                     nlp_features_dict = None
             
             else:
@@ -825,7 +1001,6 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
             warnings.warn(f"Error extracting NLP features: {e}. Continuing without NLP features.")
             traceback.print_exc()
             use_nlp = False
-            nlp_suffix = ""
             nlp_features_dict = None
 
     # ========================================================================
@@ -1001,18 +1176,25 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     print(f"[split] Sample proportions: train={n_tr/n_tot:.1%}, val={n_va/n_tot:.1%}, test={n_te/n_tot:.1%}")
 
     # NOW create the ID based on successfully downloaded stocks (after error handling)
-    data_id = _get_data_id(successfully_downloaded_stocks, args)
-    base = f"data_{data_id}"
+    # Include all parameters in ID generation
+    data_id = _get_data_id(
+        successfully_downloaded_stocks, 
+        args, 
+        use_nlp=use_nlp, 
+        nlp_method=nlp_method,
+        prediction_type=prediction_type,
+        period_type=period_type,
+        seq_len=seq_len
+    )
     
     # Save datasets separately
     def _to_np(x): return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.array(x)
     
-    # Create prediction-type specific separate file paths for each dataset
-    # Include NLP suffix and period suffix in cache filenames
-    train_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_train.npz")
-    val_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_val.npz")
-    test_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_test.npz")
-    metrics_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_metrics.npz")
+    # Use simple filename format: {data_id}_{set_type}.npz
+    train_path = os.path.join(DATA_DIR, f"{data_id}_train.npz")
+    val_path = os.path.join(DATA_DIR, f"{data_id}_val.npz")
+    test_path = os.path.join(DATA_DIR, f"{data_id}_test.npz")
+    metrics_path = os.path.join(DATA_DIR, f"{data_id}_metrics.npz")
     
     # Save training dataset
     _save_npz_progress(train_path, {
@@ -1049,7 +1231,17 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     print(f"  Metrics: {os.path.abspath(metrics_path)}")
     
     # Save ID mapping so we can reference this data later (using successfully downloaded stocks)
-    _save_id_mapping(data_id, successfully_downloaded_stocks, args)
+    # Include all parameters in mapping
+    _save_id_mapping(
+        data_id, 
+        successfully_downloaded_stocks, 
+        args, 
+        use_nlp=use_nlp, 
+        nlp_method=nlp_method,
+        prediction_type=prediction_type,
+        period_type=period_type,
+        seq_len=seq_len
+    )
     
     return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f, Returns_f, Sp500_f)
 
@@ -1076,82 +1268,87 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
     Returns:
         data tuple if cache exists, None otherwise.
     """
-    prediction_suffix = f"_{prediction_type}"
-    # Differentiate cache paths for aggregated vs individual NLP methods
-    if use_nlp:
-        if nlp_method == "aggregated":
-            nlp_suffix = "_nlp_agg"  # Aggregated method (NYT)
-        elif nlp_method == "individual":
-            nlp_suffix = "_nlp_ind"  # Individual method (yfinance per stock)
-        else:
-            nlp_suffix = "_nlp"  # Fallback
-    else:
-        nlp_suffix = ""
-    
-    # Add period_type suffix to cache filename (always include to differentiate caches)
-    period_suffix = f"_{period_type}"
-    
-    # Add seq_len suffix to differentiate caches with different sequence lengths
-    seq_len_suffix = f"_seq{seq_len}"
-    
     # Step 1: Load problematic stocks for this time period (if they exist)
     problematic_stocks = _load_problematic_stocks(args)
     
     # Step 2: Filter out problematic stocks from input stocks (matching get_data behavior)
     filtered_stocks = [stock for stock in stocks if stock not in problematic_stocks]
     
-    # Step 3: Try to find cache using filtered stocks
-    # First, try direct match with filtered stocks
-    data_id = _get_data_id(filtered_stocks, args)
-    base = f"data_{data_id}"
+    # Step 3: Try to find cache using the mapping file
+    # We verify all 7 conditions explicitly:
+    # 1. Cleaned stock list matches
+    # 2. Time period matches
+    # 3. use_nlp matches
+    # 4. nlp_method matches
+    # 5. prediction_type matches
+    # 6. period_type matches
+    # 7. seq_len matches
+    mapping = _load_id_mapping()
+    found_cache = False
+    data_id = None
     
-    train_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_train.npz")
-    val_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_val.npz")
-    test_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_test.npz")
-    metrics_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_metrics.npz")
-    
-    # Check if exact match cache exists with filtered stocks
-    if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
-        # Exact match found - use it
-        pass  # Will load below
-    else:
-        # Step 4: Try to find cache using the mapping file
-        # This handles cases where the cache was created with a different stock list
-        # but the filtered stocks match
-        mapping = _load_id_mapping()
-        found_cache = False
+    for cached_id, cached_info in mapping.items():
+        cached_stocks = set(cached_info.get('stocks', []))
+        cached_args = cached_info.get('args', [])
+        cached_use_nlp = cached_info.get('use_nlp', False)
+        cached_nlp_method = cached_info.get('nlp_method', 'aggregated')
+        cached_prediction_type = cached_info.get('prediction_type', 'classification')
+        cached_period_type = cached_info.get('period_type', 'LS')
+        cached_seq_len = cached_info.get('seq_len', 240)
         
-        for cached_id, cached_info in mapping.items():
-            cached_stocks = set(cached_info.get('stocks', []))
-            cached_args = cached_info.get('args', [])
-            
-            # Normalize args for comparison (convert to list if needed)
-            cached_args_list = list(cached_args) if cached_args else []
-            args_list = list(args) if args else []
-            
-            # Check if args match and filtered stocks match cached stocks
-            if cached_args_list == args_list and set(filtered_stocks) == cached_stocks:
-                # Found matching cache - use this data_id
-                data_id = cached_id
-                base = f"data_{data_id}"
-                
-                # Use nlp_suffix, period_suffix, and seq_len_suffix when constructing paths (same as exact match above)
-                train_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_train.npz")
-                val_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_val.npz")
-                test_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_test.npz")
-                metrics_path = os.path.join(DATA_DIR, base + prediction_suffix + nlp_suffix + period_suffix + seq_len_suffix + "_metrics.npz")
-                
-                if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
-                    found_cache = True
-                    break
+        # Normalize args for comparison (convert to list if needed)
+        cached_args_list = list(cached_args) if cached_args else []
+        args_list = list(args) if args else []
         
-        if not found_cache:
-            # No cache found
-            return None
+        # Verify all 7 conditions:
+        # 1. Cleaned stock list matches
+        stocks_match = set(filtered_stocks) == cached_stocks
+        # 2. Time period matches
+        time_period_match = cached_args_list == args_list
+        # 3. use_nlp matches
+        use_nlp_match = cached_use_nlp == use_nlp
+        # 4. nlp_method matches
+        nlp_method_match = cached_nlp_method == nlp_method
+        # 5. prediction_type matches
+        prediction_type_match = cached_prediction_type == prediction_type
+        # 6. period_type matches
+        period_type_match = cached_period_type == period_type
+        # 7. seq_len matches
+        seq_len_match = cached_seq_len == seq_len
+        
+        # All 7 conditions must be satisfied
+        if (stocks_match and time_period_match and use_nlp_match and nlp_method_match and 
+            prediction_type_match and period_type_match and seq_len_match):
+            # Found matching cache - verify files exist using the unique ID
+            data_id = cached_id
+            
+            # Construct file paths using the unique ID
+            train_path = os.path.join(DATA_DIR, f"{data_id}_train.npz")
+            val_path = os.path.join(DATA_DIR, f"{data_id}_val.npz")
+            test_path = os.path.join(DATA_DIR, f"{data_id}_test.npz")
+            metrics_path = os.path.join(DATA_DIR, f"{data_id}_metrics.npz")
+            
+            # Verify all required files exist
+            if all(os.path.exists(p) for p in [train_path, val_path, test_path, metrics_path]):
+                found_cache = True
+                break
     
-    # At this point, we have valid cache paths (exact match found)
+    if not found_cache:
+        # No cache found that satisfies all 7 conditions
+        return None
     
-    # Load from cache
+    # At this point, we have verified all 7 conditions and confirmed files exist
+    # data_id is set to the matching unique ID from the mapping file
+    # Load data using the unique ID
+    print(f"[cache] Loading cached data using unique ID: {data_id}")
+    
+    # Construct file paths using the unique ID (paths already set in loop, but set again for clarity)
+    train_path = os.path.join(DATA_DIR, f"{data_id}_train.npz")
+    val_path = os.path.join(DATA_DIR, f"{data_id}_val.npz")
+    test_path = os.path.join(DATA_DIR, f"{data_id}_test.npz")
+    metrics_path = os.path.join(DATA_DIR, f"{data_id}_metrics.npz")
+    
+    # Load from cache using the unique ID
     train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)")
     val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset (.npz)")
     test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset (.npz)")

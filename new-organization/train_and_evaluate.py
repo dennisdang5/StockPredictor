@@ -15,34 +15,121 @@ if current_dir not in sys.path:
 
 # Explicit imports from current directory
 from trainer import Trainer, TrainerConfig
-from models.configs import LSTMConfig
+from models.configs import LSTMConfig, TimesNetConfig, CNNLSTMConfig
 from evaluation.configs.evaluation_config import EvaluationConfig
 from evaluation.evaluator import ModelEvaluator
 
 
-def train_model():
-    """Train a simple LSTM model on a few stocks for 1 year."""
+# Shared configuration for both training and evaluation
+
+STOCKS = [
+# Top Technology & Growth
+"AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
+
+# Major Financial Services
+"JPM", "BAC", "V", "MA", "WFC", "GS", "BLK", "AXP",
+
+# Healthcare Leaders
+"JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO",
+
+# Consumer & Retail Giants
+"WMT", "PG", "HD", "COST", "MCD", "NKE",
+
+# Industrial & Energy Leaders
+"BA", "CAT", "XOM", "CVX"
+]
+"""
+
+STOCKS = [
+# Communication Services
+"GOOGL", "GOOG", "T", "CHTR", "CMCSA", "EA", "FOXA", "FOX", "IPG", "LYV", "MTCH", "META", "NFLX", "NWSA", "NWS", "OMC", "PSKY", "TMUS", "TTWO", "TKO", "TTD", "VZ", "DIS", "WBD",
+
+# consumer discretionary
+"ABNB", "AMZN", "APTV", "AZO", "BBY", "BKNG", "CZR", "KMX", "CCL", "CMG", "DRI", "DECK", "DPZ", "DASH", "DHI", "EBAY", "EXPE", "F", "GRMN", "GM", "GPC", "HAS", "HLT", "HD", "LVS", "LEN", "LKQ", "LOW", "LULU", "MAR", "MCD", "MGM", "MHK", "NKE", "NCLH", "NVR", "ORLY", "POOL", "PHM", "RL", "ROST", "RCL", "SBUX", "TPR", "TSLA", "TJX", "TSCO", "ULTA", "WSM", "WYNN", "YUM",
+
+# Consumer Staples
+"MO", "ADM", "BF.B", "BG", "CPB", "CHD", "CLX", "KO", "CL", "CAG", "STZ", "COST", "DG", "DLTR", "EL", "GIS", "HSY", "HRL", "K", "KVUE", "KDP", "KMB", "KHC", "KR", "LW", "MKC", "TAP", "MDLZ", "MNST", "PEP", "PM", "PG", "SJM", "SYY", "TGT", "TSN", "WBA", "WMT",
+
+# Energy
+"APA", "BKR", "CVX", "COP", "CTRA", "DVN", "FANG", "EOG", "EQT", "EXE", "XOM", "HAL", "KMI", "MPC", "OXY", "OKE", "PSX", "SLB", "TRGP", "TPL", "VLO", "WMB",
+
+# Financials
+"AFL", "ALL", "AXP", "AIG", "AMP", "AON", "APO", "ACGL", "AJG", "AIZ", "BAC", "BRK.B", "BLK", "BX", "XYZ", "BK", "BRO", "COF", "CBOE", "SCHW", "CB", "CINF", "C", "CFG", "CME", "COIN", "CPAY", "ERIE", "EG", "FDS", "FIS", "FITB", "FI", "BEN", "GPN", "GL", "GS", "HIG", "HBAN", "ICE", "IVZ", "JKHY", "JPM", "KEY", "KKR", "L", "MTB", "MKTX", "MMC", "MA", "MET", "MCO", "MS", "MSCI", "NDAQ", "NTRS", "PYPL", "PNC", "PFG", "PGR", "PRU", "RJF", "RF", "SPGI", "STT", "SYF", "TROW", "TRV", "TFC", "USB", "V", "WRB", "WFC", "WTW",
+
+# Healthcare
+"ABT", "ABBV", "A", "ALGN", "AMGN", "BAX", "BDX", "TECH", "BIIB", "BSX", "BMY", "CAH", "COR", "CNC", "CRL", "CI", "COO", "CVS", "DHR", "DVA", "DXCM", "EW", "ELV", "GEHC", "GILD", "HCA", "HSIC", "HOLX", "HUM", "IDXX", "INCY", "PODD", "ISRG", "IQV", "JNJ", "LH", "LLY", "MCK", "MDT", "MRK", "MTD", "MRNA", "MOH", "PFE", "DGX", "REGN", "RMD", "RVTY", "SOLV", "STE", "SYK", "TMO", "UNH", "UHS", "VRTX", "VTRS", "WAT", "WST", "ZBH", "ZTS",
+
+# Industrials
+"MMM", "AOS", "ALLE", "AME", "ADP", "AXON", "BA", "BR", "BLDR", "CHRW", "CARR", "CAT", "CTAS", "CPRT", "CSX", "CMI", "DAY", "DE", "DAL", "DOV", "ETN", "EMR", "EFX", "EXPD", "FAST", "FDX", "FTV", "GE", "GEV", "GNRC", "GD", "HON", "HWM", "HUBB", "HII", "IEX", "ITW", "IR", "JBHT", "J", "JCI", "LHX", "LDOS", "LII", "LMT", "MAS", "NDSN", "NSC", "NOC", "ODFL", "OTIS", "PCAR", "PH", "PAYX", "PAYC", "PNR", "PWR", "RTX", "RSG", "ROK", "ROL", "SNA", "LUV", "SWK", "TXT", "TT", "TDG", "UBER", "UNP", "UAL", "UPS", "URI", "VLTO", "VRSK", "GWW", "WAB", "WM", "XYL",
+
+# Information Technology
+"ACN", "ADBE", "AMD", "AKAM", "APH", "ADI", "AAPL", "AMAT", "ANET", "ADSK", "AVGO", "CDNS", "CDW", "CSCO", "CTSH", "GLW", "CRWD", "DDOG", "DELL", "ENPH", "EPAM", "FFIV", "FICO", "FSLR", "FTNT", "IT", "GEN", "GDDY", "HPE", "HPQ", "IBM", "INTC", "INTU", "JBL", "KEYS", "KLAC", "LRCX", "MCHP", "MU", "MSFT", "MPWR", "MSI", "NTAP", "NVDA", "NXPI", "ON", "ORCL", "PLTR", "PANW", "PTC", "QCOM", "ROP", "CRM", "STX", "NOW", "SWKS", "SMCI", "SNPS", "TEL", "TDY", "TER", "TXN", "TRMB", "TYL", "VRSN", "WDC", "WDAY", "ZBRA",
+
+# Materials
+"APD", "ALB", "AMCR", "AVY", "BALL", "CF", "CTVA", "DOW", "DD", "EMN", "ECL", "FCX", "IFF", "IP", "LIN", "LYB", "MLM", "MOS", "NEM", "NUE", "PKG", "PPG", "SHW", "SW", "STLD", "VMC",
+
+# Real Estate
+"ARE", "AMT", "AVB", "BXP", "CPT", "CBRE", "CSGP", "CCI", "DLR", "EQIX", "EQR", "ESS", "EXR", "FRT", "DOC", "HST", "INVH", "IRM", "KIM", "MAA", "PLD", "PSA", "O", "REG", "SBAC", "SPG", "UDR", "VTR", "VICI", "WELL", "WY",
+
+# Utilities
+"AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE", "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW", "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
+]
+"""
+    
+TIME_ARGS = ["1990-01-01", "2015-12-31"]
+
+
+def train_model(stocks=None, time_args=None):
+    """Train a model on specified stocks and time period."""
+    if stocks is None:
+        stocks = STOCKS
+    if time_args is None:
+        time_args = TIME_ARGS
+    
     print("=" * 80)
     print("Training Model")
     print("=" * 80)
     
-    # Configuration: 3 stocks, 1 year period
-    stocks = ["AAPL", "MSFT", "GOOGL"]
-    time_args = ["1990-01-01", "1999-12-31"]  # 1 year period
-    model_save_path = "savedmodel_test_1year.pth"
+    # Define model type first to use in save path
+    model_type = "CNNLSTM"
     
     print(f"Stocks: {stocks}")
     print(f"Time period: {time_args[0]} to {time_args[1]}")
-    print(f"Model will be saved to: {model_save_path}")
+    print(f"Model architecture: {model_type}")
     print()
     
     # Create model config
-    model_config = LSTMConfig(parameters={
+
+    model_config = TimesNetConfig(parameters={
         'input_shape': (31, 13),  # Will be overridden by actual data
+        'd_model': 256,
+        'd_ff': 1024,
+        'e_layers': 2,
+        'top_k': 5,
+        'num_kernels': 6,
+        'embed': 'timeF',
+        'freq': 'd',
+        'dropout': 0.1,
+        'pred_len': 0,
+        'label_len': 0,
+        'c_out': 3,
+        'freeze_encoder': True,
+        'task_name': 'classification',
+        'enc_in': 13,
+        'num_class': 3,
+    })
+
+    model_config = CNNLSTMConfig(parameters={
+        'input_shape': (31, 13),
         'hidden_size': 25,
         'num_layers': 2,
-        'dropout': 0.1
+        'dropout': 0.1,
     })
+    
+    # Create save path with architecture included
+    model_save_path = f"savedmodel_{model_type.lower()}_test_1year.pth"
+    print(f"Model will be saved to: {model_save_path}")
+    print()
     
     # Create trainer config
     trainer_config = TrainerConfig(
@@ -50,7 +137,7 @@ def train_model():
         time_args=time_args,
         batch_size=32,
         num_epochs=10,  # Small number for quick test
-        model_type="LSTM",
+        model_type=model_type,
         model_config=model_config,
         period_type="LS",
         lookback=240,
@@ -60,7 +147,7 @@ def train_model():
         save_every_epochs=5,  # Save every 5 epochs
         early_stop_patience=7,
         early_stop_min_delta=0.001,
-        k=10,
+        k=10,  # With 3 stocks, k must be <= 1 (requires at least 2 stocks for trading)
         cost_bps_per_side=5.0
     )
     
@@ -85,95 +172,51 @@ def train_model():
     return model_save_path
 
 
-def evaluate_model(model_path):
-    """Evaluate the trained model."""
+def evaluate_model(model_path, stocks=None, time_args=None):
+    """Evaluate the trained model using the same stocks and time period as training."""
+    if stocks is None:
+        stocks = STOCKS
+    if time_args is None:
+        time_args = TIME_ARGS
+    
     print("\n" + "=" * 80)
     print("Evaluating Model")
     print("=" * 80)
-    
-    # Use same stocks and time period for evaluation
-    # Top 30 S&P 500 stocks by market cap (subset for testing)
-
-    
-    stocks = [
-        # Top Technology & Growth
-        "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
-
-        # Major Financial Services
-        "JPM", "BAC", "V", "MA", "WFC", "GS", "BLK", "AXP",
-
-        # Healthcare Leaders
-        "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO",
-
-        # Consumer & Retail Giants
-        "WMT", "PG", "HD", "COST", "MCD", "NKE",
-
-        # Industrial & Energy Leaders
-        "BA", "CAT", "XOM", "CVX"
-    ]
-    """
-
-    stocks = [
-    # Communication Services
-    "GOOGL", "GOOG", "T", "CHTR", "CMCSA", "EA", "FOXA", "FOX", "IPG", "LYV", "MTCH", "META", "NFLX", "NWSA", "NWS", "OMC", "PSKY", "TMUS", "TTWO", "TKO", "TTD", "VZ", "DIS", "WBD",
-
-    # consumer discretionary
-    "ABNB", "AMZN", "APTV", "AZO", "BBY", "BKNG", "CZR", "KMX", "CCL", "CMG", "DRI", "DECK", "DPZ", "DASH", "DHI", "EBAY", "EXPE", "F", "GRMN", "GM", "GPC", "HAS", "HLT", "HD", "LVS", "LEN", "LKQ", "LOW", "LULU", "MAR", "MCD", "MGM", "MHK", "NKE", "NCLH", "NVR", "ORLY", "POOL", "PHM", "RL", "ROST", "RCL", "SBUX", "TPR", "TSLA", "TJX", "TSCO", "ULTA", "WSM", "WYNN", "YUM",
-
-    # Consumer Staples
-    "MO", "ADM", "BF.B", "BG", "CPB", "CHD", "CLX", "KO", "CL", "CAG", "STZ", "COST", "DG", "DLTR", "EL", "GIS", "HSY", "HRL", "K", "KVUE", "KDP", "KMB", "KHC", "KR", "LW", "MKC", "TAP", "MDLZ", "MNST", "PEP", "PM", "PG", "SJM", "SYY", "TGT", "TSN", "WBA", "WMT",
-
-    # Energy
-    "APA", "BKR", "CVX", "COP", "CTRA", "DVN", "FANG", "EOG", "EQT", "EXE", "XOM", "HAL", "KMI", "MPC", "OXY", "OKE", "PSX", "SLB", "TRGP", "TPL", "VLO", "WMB",
-
-    # Financials
-    "AFL", "ALL", "AXP", "AIG", "AMP", "AON", "APO", "ACGL", "AJG", "AIZ", "BAC", "BRK.B", "BLK", "BX", "XYZ", "BK", "BRO", "COF", "CBOE", "SCHW", "CB", "CINF", "C", "CFG", "CME", "COIN", "CPAY", "ERIE", "EG", "FDS", "FIS", "FITB", "FI", "BEN", "GPN", "GL", "GS", "HIG", "HBAN", "ICE", "IVZ", "JKHY", "JPM", "KEY", "KKR", "L", "MTB", "MKTX", "MMC", "MA", "MET", "MCO", "MS", "MSCI", "NDAQ", "NTRS", "PYPL", "PNC", "PFG", "PGR", "PRU", "RJF", "RF", "SPGI", "STT", "SYF", "TROW", "TRV", "TFC", "USB", "V", "WRB", "WFC", "WTW",
-
-    # Healthcare
-    "ABT", "ABBV", "A", "ALGN", "AMGN", "BAX", "BDX", "TECH", "BIIB", "BSX", "BMY", "CAH", "COR", "CNC", "CRL", "CI", "COO", "CVS", "DHR", "DVA", "DXCM", "EW", "ELV", "GEHC", "GILD", "HCA", "HSIC", "HOLX", "HUM", "IDXX", "INCY", "PODD", "ISRG", "IQV", "JNJ", "LH", "LLY", "MCK", "MDT", "MRK", "MTD", "MRNA", "MOH", "PFE", "DGX", "REGN", "RMD", "RVTY", "SOLV", "STE", "SYK", "TMO", "UNH", "UHS", "VRTX", "VTRS", "WAT", "WST", "ZBH", "ZTS",
-
-    # Industrials
-    "MMM", "AOS", "ALLE", "AME", "ADP", "AXON", "BA", "BR", "BLDR", "CHRW", "CARR", "CAT", "CTAS", "CPRT", "CSX", "CMI", "DAY", "DE", "DAL", "DOV", "ETN", "EMR", "EFX", "EXPD", "FAST", "FDX", "FTV", "GE", "GEV", "GNRC", "GD", "HON", "HWM", "HUBB", "HII", "IEX", "ITW", "IR", "JBHT", "J", "JCI", "LHX", "LDOS", "LII", "LMT", "MAS", "NDSN", "NSC", "NOC", "ODFL", "OTIS", "PCAR", "PH", "PAYX", "PAYC", "PNR", "PWR", "RTX", "RSG", "ROK", "ROL", "SNA", "LUV", "SWK", "TXT", "TT", "TDG", "UBER", "UNP", "UAL", "UPS", "URI", "VLTO", "VRSK", "GWW", "WAB", "WM", "XYL",
-
-    # Information Technology
-    "ACN", "ADBE", "AMD", "AKAM", "APH", "ADI", "AAPL", "AMAT", "ANET", "ADSK", "AVGO", "CDNS", "CDW", "CSCO", "CTSH", "GLW", "CRWD", "DDOG", "DELL", "ENPH", "EPAM", "FFIV", "FICO", "FSLR", "FTNT", "IT", "GEN", "GDDY", "HPE", "HPQ", "IBM", "INTC", "INTU", "JBL", "KEYS", "KLAC", "LRCX", "MCHP", "MU", "MSFT", "MPWR", "MSI", "NTAP", "NVDA", "NXPI", "ON", "ORCL", "PLTR", "PANW", "PTC", "QCOM", "ROP", "CRM", "STX", "NOW", "SWKS", "SMCI", "SNPS", "TEL", "TDY", "TER", "TXN", "TRMB", "TYL", "VRSN", "WDC", "WDAY", "ZBRA",
-
-    # Materials
-    "APD", "ALB", "AMCR", "AVY", "BALL", "CF", "CTVA", "DOW", "DD", "EMN", "ECL", "FCX", "IFF", "IP", "LIN", "LYB", "MLM", "MOS", "NEM", "NUE", "PKG", "PPG", "SHW", "SW", "STLD", "VMC",
-
-    # Real Estate
-    "ARE", "AMT", "AVB", "BXP", "CPT", "CBRE", "CSGP", "CCI", "DLR", "EQIX", "EQR", "ESS", "EXR", "FRT", "DOC", "HST", "INVH", "IRM", "KIM", "MAA", "PLD", "PSA", "O", "REG", "SBAC", "SPG", "UDR", "VTR", "VICI", "WELL", "WY",
-
-    # Utilities
-    "AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE", "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW", "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
-    ]
-    """
-    
-    time_args = ["2020-01-01", "2020-06-01"]
     
     print(f"Model: {model_path}")
     print(f"Stocks: {stocks}")
     print(f"Time period: {time_args[0]} to {time_args[1]}")
     print()
     
-    # Create model config matching training config
-    model_config = LSTMConfig(parameters={
+    # Create model config matching training config (TimesNet, not LSTM)
+    model_config = TimesNetConfig(parameters={
         'input_shape': (31, 13),  # Will be determined from data
-        'hidden_size': 25,  # Match training config
-        'num_layers': 2,  # Match training config
-        'dropout': 0.1
+        'd_model': 256,
+        'd_ff': 1024,
+        'e_layers': 2,
+        'top_k': 5,
+        'num_kernels': 6,
+        'embed': 'timeF',
+        'freq': 'd',
+        'dropout': 0.1,
+        'pred_len': 0,
+        'label_len': 0,
+        'c_out': 3,
+        'freeze_encoder': True,
+        'task_name': 'classification',
+        'enc_in': 13,
+        'num_class': 3,
     })
     
     # Create evaluation config
     # Note: k must be <= (number of stocks) / 2 to allow trading
-    # With 3 stocks, we can use k=1 (requires 2 stocks minimum)
     eval_config = EvaluationConfig(
         model_path=model_path,
-        model_type="lstm",
+        model_type="timesnet",  # Match training model type
         stocks=stocks,
         time_args=time_args,
         batch_size=32,
-        k=10,
+        k=10,  # With 3 stocks, k must be <= 1 (requires at least 2 stocks for trading)
         cost_bps_per_side=5.0,
         use_nlp=True,  # Default uses NLP with aggregated method
         nlp_method="aggregated",
@@ -249,11 +292,11 @@ def main():
     
     try:
         # Step 1: Train
-        model_path = train_model()
+        model_path = train_model(stocks=STOCKS, time_args=TIME_ARGS)
         
-        # Step 2: Evaluate
+        # Step 2: Evaluate (using same stocks and time_args as training)
         if os.path.exists(model_path):
-            results_file = evaluate_model(model_path)
+            results_file = evaluate_model(model_path, stocks=STOCKS, time_args=TIME_ARGS)
             print("\n" + "=" * 80)
             print("✓ Complete! Training and evaluation finished successfully.")
             print("=" * 80)
