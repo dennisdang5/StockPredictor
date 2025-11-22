@@ -7,7 +7,10 @@ __pycache__*
 *runs*
 *data*
 *log_jobs*
+<<<<<<< HEAD
 *slurm*
+=======
+>>>>>>> 7a50abcb0a91ac3d55684ea525e8501fa9a3bd5d
 
 # OS things #
 ######################
