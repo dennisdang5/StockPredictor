@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH -J cnn_lstm_train
-#SBATCH --ntasks=2
+#SBATCH -J multi_hybrid_lstm_train
+#SBATCH --ntasks=4
 #SBATCH --gpus-per-task=2
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --mem=0
 #SBATCH --partition=gpu
 #SBATCH --time=48:00:00
