@@ -1,0 +1,100 @@
+================================================================================
+VERIFICATION CHECKS SUMMARY REPORT
+================================================================================
+Generated: 2025-11-22 03:39:57
+
+SUMMARY
+--------------------------------------------------------------------------------
+Total checks: 3
+  ✓ Successful: 0
+  ✗ Failed: 3
+  ⚠️  Errors: 0
+  ⏱  Timeouts: 0
+
+DETAILED RESULTS
+--------------------------------------------------------------------------------
+
+Preprocessing Verification
+  Status: failed
+  Return code: 1
+  Output (last 20 lines):
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_preprocessing.py", line 341, in verify_preprocessing
+        trainer = Trainer(config=trainer_config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/trainer.py", line 601, in __init__
+        input_data = util.get_data(
+                     ^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/util.py", line 1219, in get_data
+        print(f"  ✓ Validation dates end before test dates: {max_val_date} < {min_test_date}")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/util.py", line 1213, in compute_feature_stats
+        
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.venv/lib/python3.11/site-packages/numpy/core/fromnumeric.py", line 3502, in mean
+        return mean(axis=axis, dtype=dtype, out=out, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    TypeError: mean() received an invalid combination of arguments - got (out=NoneType, dtype=NoneType, axis=int, ), but expected one of:
+     * (*, torch.dtype dtype = None)
+     * (tuple of ints dim, bool keepdim = False, *, torch.dtype dtype = None)
+     * (tuple of names dim, bool keepdim = False, *, torch.dtype dtype = None)
+    
+    
+
+Overfitting Test
+  Status: failed
+  Return code: 1
+  Output (last 20 lines):
+        trainer = Trainer(config=trainer_config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/trainer.py", line 601, in __init__
+        if not self.is_main:
+                     ^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/util.py", line 1240, in get_data
+        time_period_match = cached_args_list == args_list
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/util.py", line 1234, in compute_feature_stats
+        args_list = list(args) if args else []
+                    ^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.venv/lib/python3.11/site-packages/numpy/core/fromnumeric.py", line 3502, in mean
+        return mean(axis=axis, dtype=dtype, out=out, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    TypeError: mean() received an invalid combination of arguments - got (out=NoneType, dtype=NoneType, axis=int, ), but expected one of:
+     * (*, torch.dtype dtype = None)
+     * (tuple of ints dim, bool keepdim = False, *, torch.dtype dtype = None)
+     * (tuple of names dim, bool keepdim = False, *, torch.dtype dtype = None)
+    
+    
+
+Random Label Test
+  Status: failed
+  Return code: 1
+  Output (last 20 lines):
+    Lookback: 240
+    Use NLP: True
+    NLP method: aggregated
+    Batch size: 32
+    Training epochs: 10
+    ================================================================================
+    
+    WARNING: Training labels will be randomly shuffled!
+    Expected behavior: Loss should stay roughly flat (not decrease)
+    
+    Traceback (most recent call last):
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_random_labels.py", line 263, in <module>
+        test_random_labels(
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_random_labels.py", line 158, in test_random_labels
+        trainer_config = TrainerConfig(
+                         ^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/trainer.py", line 243, in __init__
+        raise ValueError("data_source is required for TrainerConfig. Please specify a DataSource instance (e.g., YFinanceDataSource()).")
+    ValueError: data_source is required for TrainerConfig. Please specify a DataSource instance (e.g., YFinanceDataSource()).
+    
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+  Some checks failed. Review the detailed output above.
+  ⚠️  Data leakage detected! Check preprocessing verification output.
+  ⚠️  Data leakage detected! Check preprocessing verification output.
+  ✓ Random label test passed - loss stayed flat as expected.
+
+================================================================================

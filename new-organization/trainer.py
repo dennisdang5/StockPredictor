@@ -23,6 +23,7 @@ from models.configs import (
     LSTMConfig, CNNLSTMConfig, AELSTMConfig, CNNAELSTMConfig, TimesNetConfig
 )
 import util
+from data_sources import YFinanceDataSource, DataSource
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
 import time
@@ -39,6 +40,82 @@ from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.stattools import adfuller, acf, pacf
 import warnings
 warnings.filterwarnings('ignore')
+
+# Import metrics computation helpers from evaluator
+try:
+    from evaluation.evaluator import ModelEvaluator
+    _EVALUATOR_AVAILABLE = True
+except ImportError:
+    _EVALUATOR_AVAILABLE = False
+    print("[WARNING] evaluation.evaluator not available, metrics computation will be limited")
+
+
+def _compute_basic_metrics(predictions: np.ndarray, targets: np.ndarray) -> dict:
+    """
+    Compute basic classification metrics (reusing evaluator logic).
+    
+    Args:
+        predictions: Model predictions (numpy array)
+        targets: True values (numpy array)
+        
+    Returns:
+        Dictionary with accuracy, MSE, RMSE, MAE
+    """
+    metrics = {}
+    
+    # Classification accuracy (sign-based)
+    pred_sign = np.sign(predictions)
+    target_sign = np.sign(targets)
+    correct = np.sum(pred_sign == target_sign)
+    total = len(predictions)
+    metrics['accuracy'] = (correct / total) * 100 if total > 0 else 0
+    
+    # MSE for continuous predictions
+    from sklearn.metrics import mean_squared_error, mean_absolute_error
+    metrics['mse'] = mean_squared_error(targets, predictions)
+    metrics['rmse'] = np.sqrt(metrics['mse'])
+    metrics['mae'] = mean_absolute_error(targets, predictions)
+    
+    return metrics
+
+
+def _compute_directional_metrics(predictions: np.ndarray, targets: np.ndarray) -> dict:
+    """
+    Compute directional accuracy metrics (reusing evaluator logic).
+    
+    Args:
+        predictions: Model predictions (numpy array)
+        targets: True values (numpy array)
+        
+    Returns:
+        Dictionary with directional accuracy, upward/downward accuracy
+    """
+    metrics = {}
+    
+    # Classification accuracy
+    pred_sign = np.sign(predictions)
+    target_sign = np.sign(targets)
+    correct = np.sum(pred_sign == target_sign)
+    total_predictions = len(predictions)
+    metrics['directional_accuracy'] = (correct / total_predictions) * 100 if total_predictions > 0 else 0
+    
+    # Upward movement accuracy
+    up_mask = target_sign > 0
+    if np.sum(up_mask) > 0:
+        up_accuracy = np.sum((pred_sign > 0) & up_mask) / np.sum(up_mask) * 100
+        metrics['upward_accuracy'] = up_accuracy
+    else:
+        metrics['upward_accuracy'] = 0
+    
+    # Downward movement accuracy
+    down_mask = target_sign < 0
+    if np.sum(down_mask) > 0:
+        down_accuracy = np.sum((pred_sign < 0) & down_mask) / np.sum(down_mask) * 100
+        metrics['downward_accuracy'] = down_accuracy
+    else:
+        metrics['downward_accuracy'] = 0
+    
+    return metrics
 
 class TrainerConfig:
     """
@@ -60,6 +137,7 @@ class TrainerConfig:
         })
         
         # Create trainer config
+        from data_sources import YFinanceDataSource
         trainer_config = TrainerConfig(
             stocks=["AAPL", "MSFT"],
             time_args=["1990-01-01", "2015-12-31"],
@@ -69,6 +147,7 @@ class TrainerConfig:
             model_config=lstm_config,
             period_type="LS",
             lookback=240,  # Days of historical data used for feature extraction
+            data_source=YFinanceDataSource(),  # Required: specify data source
             use_nlp=True,
             nlp_method="aggregated"
         )
@@ -123,6 +202,7 @@ class TrainerConfig:
         early_stop_min_delta=0.001,
             period_type="LS",
         lookback=None,
+        data_source: DataSource = None,
         **model_args
     ):
         """
@@ -156,8 +236,12 @@ class TrainerConfig:
                     If None, defaults to 240.
                     Note: The actual seq_len (model input timesteps) is determined by period_type
                     and data, not by lookback directly.
+            data_source: DataSource instance to use for fetching stock data (required)
             **model_args: Additional model arguments (e.g., use_nlp, nlp_method, kernel_size)
         """
+        if data_source is None:
+            raise ValueError("data_source is required for TrainerConfig. Please specify a DataSource instance (e.g., YFinanceDataSource()).")
+        
         self.stocks = stocks
         self.time_args = time_args
         self.batch_size = batch_size
@@ -182,6 +266,9 @@ class TrainerConfig:
         # If not provided, defaults to 240
         self.lookback = lookback if lookback is not None else 240
         
+        # Data source: Required parameter
+        self.data_source = data_source
+        
         # Extract common model args for convenience
         self.use_nlp = model_args.get("use_nlp", True)  # Default to True
         self.nlp_method = model_args.get("nlp_method", "aggregated")  # Default to aggregated
@@ -205,6 +292,7 @@ class TrainerConfig:
             'early_stop_min_delta': self.early_stop_min_delta,
             'period_type': self.period_type,
             'lookback': self.lookback,
+            'data_source': type(self.data_source).__name__ if self.data_source else None,
         }
     
     def __repr__(self):
@@ -489,17 +577,21 @@ class Trainer():
 
         # Data loading: use util.get_data which handles cache checking, problematic stock filtering,
         # downloading, and processing. In distributed mode, only rank 0 downloads/processes.
+        # Use data source from config
+        data_source = self.config.data_source
+        
         if self.is_dist:
             # Distributed mode: rank 0 downloads/processes, other ranks load from cache
             if self.is_main:
                 # Rank 0: get_data handles everything (cache check, filtering, download, processing)
                 input_data = util.get_data(
                     self.stocks, self.time_args, 
+                    seq_len=lookback,  # util.get_data uses seq_len parameter name for backward compatibility
+                    data_source=data_source,
                     prediction_type=self.prediction_type, 
                     use_nlp=self.use_nlp, 
                     nlp_method=self.nlp_method, 
-                    period_type=self.config.period_type,
-                    seq_len=lookback  # util.get_data uses seq_len parameter name for backward compatibility
+                    period_type=self.config.period_type
                 )
             
             # Synchronize - ensure rank 0 finishes downloading/processing before others proceed
@@ -513,7 +605,8 @@ class Trainer():
                     use_nlp=self.use_nlp, 
                     nlp_method=self.nlp_method,
                     period_type=self.config.period_type,
-                    seq_len=lookback  # util.get_data uses seq_len parameter name for backward compatibility
+                    seq_len=lookback,  # util.get_data uses seq_len parameter name for backward compatibility
+                    data_source=data_source
                 )
                 if input_data is None:
                     raise RuntimeError(f"Cache files not found after rank 0 processing. Expected cache should exist.")
@@ -524,11 +617,12 @@ class Trainer():
             # Non-distributed: get_data handles everything (cache check, filtering, download, processing)
             input_data = util.get_data(
                 self.stocks, self.time_args, 
+                seq_len=lookback,  # util.get_data uses seq_len parameter name for backward compatibility
+                data_source=data_source,
                 prediction_type=self.prediction_type, 
                 use_nlp=self.use_nlp, 
                 nlp_method=self.nlp_method, 
-                period_type=self.config.period_type,
-                seq_len=lookback  # util.get_data uses seq_len parameter name for backward compatibility
+                period_type=self.config.period_type
             )
         
         # Unpack data tuple (12 elements: X_train, X_val, X_test, Y_train, Y_val, Y_test, 
@@ -952,6 +1046,13 @@ class Trainer():
         stop_condition=None
         train_batches_processed = 0  # Track actual batches processed (excluding skipped NaN batches)
         
+        # Collect predictions and targets for metrics computation
+        train_predictions = []
+        train_targets = []
+        
+        # Track gradient norms for diagnostics (only on main rank)
+        grad_norms = [] if self.is_main else None
+        
         # Count NaN/Inf occurrences in training
         train_nan_x_batch = 0
         train_nan_y_batch = 0
@@ -1022,7 +1123,10 @@ class Trainer():
                 self.scaler.scale(loss).backward()
                 # Gradient clipping
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
+                # Compute gradient norm before clipping (for diagnostics)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
+                if self.is_main:
+                    grad_norms.append(grad_norm.item())
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 
@@ -1081,7 +1185,10 @@ class Trainer():
                     continue
                 loss.backward()
                 # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
+                # Compute gradient norm before clipping (for diagnostics)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
+                if self.is_main:
+                    grad_norms.append(grad_norm.item())
                 self.optimizer.step()
                 
                 # Check for NaN in model weights after optimizer step
@@ -1108,6 +1215,12 @@ class Trainer():
 
             train_loss += loss.item()
             train_batches_processed += 1
+            
+            # Collect predictions and targets for metrics (only on main rank to avoid duplication)
+            if self.is_main:
+                # Detach and convert to numpy for metrics computation
+                train_predictions.append(Y_pred.detach().cpu().numpy().flatten())
+                train_targets.append(Y_batch.detach().cpu().numpy().flatten())
             
             if self.is_main:
                 pbar.set_postfix(avg_train=train_loss/(train_batches_processed or 1))
@@ -1151,6 +1264,10 @@ class Trainer():
         self.Model.eval()
         val_batches_processed = 0  # Track actual batches processed (excluding skipped NaN batches)
         
+        # Collect predictions and targets for metrics computation
+        val_predictions = []
+        val_targets = []
+        
         # Count NaN/Inf occurrences in validation
         val_nan_x_batch = 0
         val_nan_y_batch = 0
@@ -1193,6 +1310,13 @@ class Trainer():
                     continue
                 val_loss += loss.item()
                 val_batches_processed += 1
+                
+                # Collect predictions and targets for metrics (only on main rank)
+                if self.is_main:
+                    # Detach and convert to numpy for metrics computation
+                    val_predictions.append(Y_pred.detach().cpu().numpy().flatten())
+                    val_targets.append(Y_batch.detach().cpu().numpy().flatten())
+                
                 if self.is_main:
                     vbar.set_postfix(avg_val=val_loss/(val_batches_processed or 1))
             
@@ -1252,10 +1376,41 @@ class Trainer():
 
         end_time = time.perf_counter()
         
+        # Compute metrics if we have predictions and targets
+        train_metrics = {}
+        val_metrics = {}
+        if self.is_main and len(train_predictions) > 0 and len(train_targets) > 0:
+            try:
+                train_pred_array = np.concatenate(train_predictions)
+                train_target_array = np.concatenate(train_targets)
+                train_metrics = _compute_basic_metrics(train_pred_array, train_target_array)
+                train_dir_metrics = _compute_directional_metrics(train_pred_array, train_target_array)
+                train_metrics.update(train_dir_metrics)
+            except Exception as e:
+                if self.is_main:
+                    print(f"[WARNING] Failed to compute training metrics: {e}")
+        
+        if self.is_main and len(val_predictions) > 0 and len(val_targets) > 0:
+            try:
+                val_pred_array = np.concatenate(val_predictions)
+                val_target_array = np.concatenate(val_targets)
+                val_metrics = _compute_basic_metrics(val_pred_array, val_target_array)
+                val_dir_metrics = _compute_directional_metrics(val_pred_array, val_target_array)
+                val_metrics.update(val_dir_metrics)
+            except Exception as e:
+                if self.is_main:
+                    print(f"[WARNING] Failed to compute validation metrics: {e}")
+        
         # Only rank 0 prints and logs
         if self.is_main:
             print("Training Loss: {}".format(avg_train))
             print("Validation Loss: {}".format(avg_val))
+            if train_metrics:
+                print("Training Metrics - Accuracy: {:.2f}%, Directional Accuracy: {:.2f}%".format(
+                    train_metrics.get('accuracy', 0), train_metrics.get('directional_accuracy', 0)))
+            if val_metrics:
+                print("Validation Metrics - Accuracy: {:.2f}%, Directional Accuracy: {:.2f}%".format(
+                    val_metrics.get('accuracy', 0), val_metrics.get('directional_accuracy', 0)))
             print("Training Time: {:.6f}s".format(end_time-start_time))
             
             # Print NaN/Inf statistics
@@ -1284,6 +1439,38 @@ class Trainer():
                 self.writer.add_scalar('Loss/train', avg_train, epoch+1)
                 self.writer.add_scalars('Loss/trainVSvalidation', {"Training":(avg_train), "Validation":(avg_val)}, epoch+1)
                 self.writer.add_scalar('Train Time', (end_time-start_time), epoch+1)
+                
+                # Log learning rate
+                current_lr = self.optimizer.param_groups[0]['lr']
+                self.writer.add_scalar('Learning Rate', current_lr, epoch+1)
+                
+                # Log metrics
+                if train_metrics:
+                    self.writer.add_scalar('Metrics/Train/Accuracy', train_metrics.get('accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Train/DirectionalAccuracy', train_metrics.get('directional_accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Train/UpwardAccuracy', train_metrics.get('upward_accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Train/DownwardAccuracy', train_metrics.get('downward_accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Train/RMSE', train_metrics.get('rmse', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Train/MAE', train_metrics.get('mae', 0), epoch+1)
+                
+                if val_metrics:
+                    self.writer.add_scalar('Metrics/Val/Accuracy', val_metrics.get('accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Val/DirectionalAccuracy', val_metrics.get('directional_accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Val/UpwardAccuracy', val_metrics.get('upward_accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Val/DownwardAccuracy', val_metrics.get('downward_accuracy', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Val/RMSE', val_metrics.get('rmse', 0), epoch+1)
+                    self.writer.add_scalar('Metrics/Val/MAE', val_metrics.get('mae', 0), epoch+1)
+                
+                # Log batch statistics
+                self.writer.add_scalar('Batches/Train/Processed', train_batches_processed, epoch+1)
+                self.writer.add_scalar('Batches/Val/Processed', val_batches_processed, epoch+1)
+                
+                # Log gradient norm statistics
+                if grad_norms and len(grad_norms) > 0:
+                    self.writer.add_scalar('Gradients/Norm/Mean', np.mean(grad_norms), epoch+1)
+                    self.writer.add_scalar('Gradients/Norm/Max', np.max(grad_norms), epoch+1)
+                    self.writer.add_scalar('Gradients/Norm/Min', np.min(grad_norms), epoch+1)
+                
                 self.writer.flush()
         
         # Periodic save regardless of validation loss improvement
@@ -2263,7 +2450,7 @@ class Trainer():
         """
         # Use load_data_from_cache which handles separate .npz files
         # Use default seq_len=240 (lookback window) for backward compatibility
-        input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method, seq_len=self.config.lookback)
+        input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method, seq_len=self.config.lookback, data_source=self.config.data_source)
         if input_data is None:
             raise RuntimeError(f"Could not load separate datasets from cache in {util.DATA_DIR}. Data may need to be downloaded first.")
         return input_data

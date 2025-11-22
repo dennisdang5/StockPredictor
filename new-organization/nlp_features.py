@@ -303,6 +303,17 @@ def extract_daily_nlp_features_yfinance(
             end_date_parsed = end_date.date()
         elif isinstance(end_date, date):
             end_date_parsed = end_date
+        
+        # Check if date range is historical (yfinance typically only has recent news)
+        from datetime import timedelta
+        one_year_ago = datetime.now().date() - timedelta(days=365)
+        if end_date_parsed < one_year_ago:
+            warnings.warn(
+                f"⚠️  Historical date range detected (end_date={end_date_parsed}). "
+                f"yfinance news API typically only provides recent news (last 1-3 months). "
+                f"For historical data (1990-2015), use nlp_method='aggregated' with NYT articles instead.",
+                UserWarning
+            )
     
     # Load FinBERT model
     print(f"[nlp-yfinance] Loading FinBERT sentiment model...")
@@ -328,17 +339,49 @@ def extract_daily_nlp_features_yfinance(
                 continue
             
             # Extract headlines and dates
+            # Handle both old format (direct fields) and new format (nested in 'content')
             articles_data = []
             for article in news:
-                # Get publish time
-                if 'providerPublishTime' in article:
-                    pub_time = pd.to_datetime(article['providerPublishTime'], unit='s')
-                elif 'pubDate' in article:
-                    pub_time = pd.to_datetime(article['pubDate'])
+                # Try to get article content (new API format)
+                content = article.get('content', {})
+                if isinstance(content, dict):
+                    # New format: data is nested in 'content'
+                    article_data = content
                 else:
-                    continue
+                    # Old format: data is directly in article
+                    article_data = article
                 
-                pub_date = pub_time.date()
+                # Get publish time - try multiple fields
+                pub_time = None
+                pub_date = None
+                
+                # Try providerPublishTime (Unix timestamp)
+                if 'providerPublishTime' in article_data:
+                    try:
+                        pub_time = pd.to_datetime(article_data['providerPublishTime'], unit='s')
+                        pub_date = pub_time.date()
+                    except:
+                        pass
+                
+                # Try pubDate (ISO format string)
+                if pub_date is None and 'pubDate' in article_data:
+                    try:
+                        pub_time = pd.to_datetime(article_data['pubDate'])
+                        pub_date = pub_time.date()
+                    except:
+                        pass
+                
+                # Try displayTime as fallback
+                if pub_date is None and 'displayTime' in article_data:
+                    try:
+                        pub_time = pd.to_datetime(article_data['displayTime'])
+                        pub_date = pub_time.date()
+                    except:
+                        pass
+                
+                if pub_date is None:
+                    # Skip articles without valid dates
+                    continue
                 
                 # Filter by date range if specified
                 if start_date_parsed is not None and pub_date < start_date_parsed:
@@ -346,8 +389,8 @@ def extract_daily_nlp_features_yfinance(
                 if end_date_parsed is not None and pub_date > end_date_parsed:
                     continue
                 
-                # Get headline
-                headline = article.get('title', '')
+                # Get headline - try multiple fields
+                headline = article_data.get('title', '') or article_data.get('headline', '')
                 if not headline:
                     continue
                 
@@ -418,6 +461,19 @@ def extract_daily_nlp_features_yfinance(
     print(f"[nlp-yfinance] Completed processing {len(stocks)} stocks")
     stocks_with_news = sum(1 for df in stock_nlp_features.values() if len(df) > 0)
     print(f"[nlp-yfinance] Stocks with news data: {stocks_with_news}/{len(stocks)}")
+    
+    # Provide helpful feedback if no news found
+    if stocks_with_news == 0:
+        if start_date_parsed is not None and end_date_parsed is not None:
+            from datetime import timedelta
+            one_year_ago = datetime.now().date() - timedelta(days=365)
+            if end_date_parsed < one_year_ago:
+                print(f"[nlp-yfinance] ⚠️  No news found for date range {start_date_parsed} to {end_date_parsed}")
+                print(f"[nlp-yfinance]    This is expected - yfinance only provides recent news (last 1-3 months)")
+                print(f"[nlp-yfinance]    For historical data, use nlp_method='aggregated' with NYT articles")
+            else:
+                print(f"[nlp-yfinance] ⚠️  No news found for date range {start_date_parsed} to {end_date_parsed}")
+                print(f"[nlp-yfinance]    This may be normal if stocks have no recent news coverage")
     
     return stock_nlp_features
 

@@ -11,9 +11,11 @@ import torchsummary
 import os
 import json
 import hashlib
+from typing import Optional
 from tqdm import tqdm
 from zipfile import ZipFile, ZIP_STORED
 from io import BytesIO
+from data_sources.base import DataSource
 
 ########################################################
 # data directory configuration
@@ -140,7 +142,34 @@ def validate_mask_type(mask_type):
 # data management
 ########################################################
 
-def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240):
+def _serialize_data_source(data_source: DataSource) -> str:
+    """
+    Serialize a DataSource instance to a string representation for hashing.
+    
+    Args:
+        data_source: DataSource instance
+    
+    Returns:
+        String representation of the data source
+    """
+    source_type = type(data_source).__name__
+    
+    if source_type == "YFinanceDataSource":
+        return "yfinance"
+    elif source_type == "StaticFileDataSource":
+        # Include file path in the serialization
+        file_path = getattr(data_source, 'file_path', '')
+        file_format = getattr(data_source, 'file_format', '')
+        return f"static_file:{file_path}:{file_format}"
+    elif source_type == "APIDataSource":
+        # For API sources, include API name if available
+        api_name = getattr(data_source, 'api_name', 'api')
+        return f"api:{api_name}"
+    else:
+        # Fallback: use class name
+        return f"source:{source_type}"
+
+def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240, data_source_str=None):
     """
     Generate a short hash-based ID for a unique combination of all dataset parameters.
     
@@ -152,15 +181,18 @@ def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", predictio
         prediction_type: Prediction type ("classification" or "regression")
         period_type: Period type ("LS" or "full")
         seq_len: Sequence length (lookback window size)
+        data_source_str: String representation of data source (required)
         
     Returns:
         A short 10-character hash string
     """
+    if data_source_str is None:
+        raise ValueError("data_source_str is required for _get_data_id()")
     # Create a stable string representation
     stocks_str = ",".join(sorted(stocks))  # Sort for consistency
     args_str = ",".join(str(a) for a in args)
     nlp_str = f"nlp_{nlp_method}" if use_nlp else "no_nlp"
-    combined = f"{stocks_str}|{args_str}|{nlp_str}|{prediction_type}|{period_type}|{seq_len}"
+    combined = f"{stocks_str}|{args_str}|{nlp_str}|{prediction_type}|{period_type}|{seq_len}|{data_source_str}"
     
     # Generate a short hash
     hash_obj = hashlib.sha256(combined.encode())
@@ -168,11 +200,11 @@ def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", predictio
 
 def _load_id_mapping():
     """
-    Load the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len) mapping from disk.
+    Load the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len, data_source) mapping from disk.
     
     Returns:
         Dictionary mapping data_id -> {'stocks': [...], 'args': [...], 'use_nlp': bool, 'nlp_method': str, 
-                                      'prediction_type': str, 'period_type': str, 'seq_len': int, 'full_name': '...'}
+                                      'prediction_type': str, 'period_type': str, 'seq_len': int, 'data_source': str, 'full_name': '...'}
     """
     mapping_path = os.path.join(DATA_DIR, "_data_mapping.json")
     
@@ -185,9 +217,9 @@ def _load_id_mapping():
             return {}
     return {}
 
-def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240):
+def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240, data_source_str=None):
     """
-    Save the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len) mapping to disk.
+    Save the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len, data_source) mapping to disk.
     
     Args:
         data_id: Short hash ID
@@ -198,7 +230,10 @@ def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregate
         prediction_type: Prediction type ("classification" or "regression")
         period_type: Period type ("LS" or "full")
         seq_len: Sequence length (lookback window size)
+        data_source_str: String representation of data source (required)
     """
+    if data_source_str is None:
+        raise ValueError("data_source_str is required for _save_id_mapping()")
     os.makedirs(DATA_DIR, exist_ok=True)  # Ensure directory exists
     mapping_path = os.path.join(DATA_DIR, "_data_mapping.json")
     
@@ -212,6 +247,7 @@ def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregate
             'prediction_type': prediction_type,
             'period_type': period_type,
             'seq_len': seq_len,
+            'data_source': data_source_str,
             'full_name': "_".join(stocks[:5]) + (f"_{len(stocks)-5}_more" if len(stocks) > 5 else "")
         }
         
@@ -458,14 +494,15 @@ def _save_problematic_stocks(problematic_stocks, args):
     except Exception as e:
         print(f"Warning: Could not save problematic stocks: {e}")
 
-def _get_sp500_returns_for_dates(test_dates, date_index, study_period):
+def _get_sp500_returns_for_dates(test_dates, date_index, study_period, data_source: DataSource):
     """
-    Fetch S&P 500 returns aligned with test dates.
+    Fetch S&P 500 returns aligned with test dates using the provided data source.
     
     Args:
         test_dates: List of test dates (datetime objects)
-        date_index: Original date index from the data
-        study_period: Study period length
+        date_index: Original date index from the data (unused, kept for compatibility)
+        study_period: Study period length (unused, kept for compatibility)
+        data_source: DataSource instance to use for fetching S&P 500 data
         
     Returns:
         numpy array of S&P 500 returns aligned with test_dates
@@ -474,96 +511,9 @@ def _get_sp500_returns_for_dates(test_dates, date_index, study_period):
         print("[util] No test dates available for S&P 500")
         return np.array([])
     
-    try:
-        print("[util] Fetching S&P 500 data for metrics...")
-        
-        # Get date range from test dates
-        min_date = min(test_dates)
-        max_date = max(test_dates)
-        
-        # Add a small buffer to ensure we get data (yfinance sometimes needs end date + 1 day)
-        import datetime
-        if isinstance(max_date, datetime.datetime):
-            max_date_buffered = max_date + datetime.timedelta(days=1)
-        elif isinstance(max_date, datetime.date):
-            max_date_buffered = datetime.datetime.combine(max_date, datetime.time()) + datetime.timedelta(days=1)
-        else:
-            max_date_buffered = pd.Timestamp(max_date) + pd.Timedelta(days=1)
-        
-        # Fetch S&P 500 data (^GSPC is the ticker for S&P 500)
-        try:
-            sp500 = yf.Ticker("^GSPC")
-            sp500_data = sp500.history(start=min_date, end=max_date_buffered, repair=True)
-        except Exception as yf_error:
-            print(f"[util] Warning: Error fetching S&P 500 data from yfinance: {yf_error}")
-            print("[util] Using zeros for S&P 500 returns")
-            return np.zeros(len(test_dates))
-        
-        if sp500_data is None or sp500_data.empty:
-            print("[util] Warning: Could not fetch S&P 500 data, using zeros")
-            return np.zeros(len(test_dates))
-        
-        # Calculate daily returns from S&P 500 close prices
-        sp500_close = sp500_data['Close']
-        sp500_daily_returns = sp500_close.pct_change().dropna()
+    return data_source.fetch_sp500_data(test_dates)
 
-        if isinstance(sp500_daily_returns.index, pd.DatetimeIndex) and sp500_daily_returns.index.tz is not None:
-            sp500_daily_returns.index = sp500_daily_returns.index.tz_localize(None)
-        
-        # Normalize sp500 index once for efficient comparison (remove time component)
-        sp500_index_normalized = pd.DatetimeIndex([pd.Timestamp(idx).normalize() for idx in sp500_daily_returns.index])
-        
-        # Convert test dates to pandas Timestamp for alignment
-        test_dates_pd = pd.to_datetime(test_dates)
-        if isinstance(test_dates_pd, pd.DatetimeIndex) and test_dates_pd.tz is not None:
-            test_dates_pd = test_dates_pd.tz_localize(None)
-        
-        # Align S&P 500 returns with test dates
-        # Use forward fill to match each test date with the most recent S&P 500 return
-        sp500_returns = []
-        for test_date in test_dates_pd:
-            try:
-                # Normalize test_date for comparison (remove time component and timezone)
-                if isinstance(test_date, pd.Timestamp):
-                    date_val_normalized = test_date.normalize()
-                else:
-                    date_val_normalized = pd.Timestamp(test_date).normalize()
-                
-                # Get the most recent return up to this date (forward fill behavior)
-                # Check for exact match first
-                exact_match = sp500_index_normalized == date_val_normalized
-                if exact_match.any():
-                    return_val = sp500_daily_returns.iloc[exact_match.argmax()]
-                else:
-                    # Find the most recent value before or at this date (forward fill)
-                    before_mask = sp500_index_normalized <= date_val_normalized
-                    if before_mask.any():
-                        # Get the last index where condition is True
-                        before_indices = np.where(before_mask)[0]
-                        return_val = sp500_daily_returns.iloc[before_indices[-1]]
-                    else:
-                        # No data before this date, use 0
-                        return_val = 0.0
-                
-                if pd.isna(return_val):
-                    sp500_returns.append(0.0)
-                else:
-                    sp500_returns.append(float(return_val))
-            except Exception as e:
-                # If anything fails, use 0
-                print(f"[util] Warning: Could not get S&P 500 return for {test_date}: {e}")
-                sp500_returns.append(0.0)
-        
-        sp500_returns = np.array(sp500_returns, dtype=float)
-        
-        print(f"[util] S&P 500 returns fetched: {len(sp500_returns)} values, mean={np.mean(sp500_returns):.6f}, std={np.std(sp500_returns):.6f}")
-        return sp500_returns
-        
-    except Exception as e:
-        print(f"[util] Warning: Error fetching S&P 500 data: {e}, using zeros")
-        return np.zeros(len(test_dates))
-
-def identify_problematic_stocks(stocks, args, max_retries=1):
+def identify_problematic_stocks(stocks, args, data_source: DataSource, max_retries=1):
     """
     Identify which stocks from the input list are problematic (cannot be downloaded).
     This is a lightweight check that only validates downloadability without processing data.
@@ -571,6 +521,7 @@ def identify_problematic_stocks(stocks, args, max_retries=1):
     Args:
         stocks: List of stock tickers
         args: Date range arguments (either period string or [start, end] tuple)
+        data_source: DataSource instance to use for validation
         max_retries: Maximum number of retry attempts per stock (default: 1 for speed)
     
     Returns:
@@ -578,76 +529,19 @@ def identify_problematic_stocks(stocks, args, max_retries=1):
                - valid_stocks: List of stocks that can be downloaded
                - problematic_stocks: List of stocks that failed to download
     """
-    import time
-    
-    valid_stocks = []
-    problematic_stocks = []
-    
-    print(f"[check] Identifying problematic stocks from {len(stocks)} stocks...")
-    for i, stock in enumerate(stocks, 1):
-        if (i % 50 == 0) or (i == 1) or (i == len(stocks)):
-            print(f"  Progress: {i}/{len(stocks)} stocks checked...")
-        
-        success = False
-        for attempt in range(max_retries):
-            try:
-                ticker = yf.Ticker(stock)
-                
-                if len(args) == 1:
-                    stock_data = ticker.history(period=args[0], repair=True)
-                elif len(args) == 2:
-                    stock_data = ticker.history(period=None, start=args[0], end=args[1], interval="1d", repair=True)
-                else:
-                    problematic_stocks.append(stock)
-                    break
-                
-                # Check if we have valid data with required columns
-                if stock_data is not None and not stock_data.empty:
-                    if "Open" in stock_data.columns and "Close" in stock_data.columns:
-                        # Check that we have some valid data (not all NaN)
-                        if not stock_data[["Open", "Close"]].isna().all().all():
-                            valid_stocks.append(stock)
-                            success = True
-                            break
-                        else:
-                            problematic_stocks.append(stock)
-                            break
-                    else:
-                        problematic_stocks.append(stock)
-                        break
-                else:
-                    problematic_stocks.append(stock)
-                    break
-                    
-            except Exception:
-                # Last attempt, mark as problematic
-                if attempt == max_retries - 1:
-                    problematic_stocks.append(stock)
-                else:
-                    time.sleep(0.5 * (attempt + 1))
-    
-    if problematic_stocks:
-        print(f"[check] Found {len(problematic_stocks)} problematic stocks (will be excluded)")
-        if len(problematic_stocks) <= 50:
-            print(f"  Problematic: {problematic_stocks}")
-    else:
-        print(f"[check] All stocks are valid!")
-    
-    print(f"[check] {len(valid_stocks)} valid stocks identified")
-    return valid_stocks, problematic_stocks
+    return data_source.validate_stocks(stocks, args, max_retries)
 
-def handle_yfinance_errors(stocks, args, max_retries=3):
+def fetch_stock_data(stocks, args, data_source: DataSource, max_retries=3):
     """
-    Utility function to handle yfinance errors gracefully.
+    Generic function to fetch stock data using the provided data source.
     
-    This function attempts to fetch stock data with error handling for:
-    - YFPricesMissingError: Stock may be delisted or has no data for the date range
-    - YFTzMissingError: Missing timezone information
-    - Other yfinance errors
+    This function delegates to the data source's fetch_stock_data method,
+    providing a consistent interface regardless of the underlying data provider.
     
     Args:
         stocks: List of stock tickers
         args: Date range arguments (either period string or [start, end] tuple)
+        data_source: DataSource instance to use for fetching data
         max_retries: Maximum number of retry attempts per stock (default: 3)
     
     Returns:
@@ -655,101 +549,12 @@ def handle_yfinance_errors(stocks, args, max_retries=3):
                - open_close_dataframe: DataFrame with MultiIndex columns (Open/Close, stock_symbols)
                - failed_stocks: Dictionary mapping error types to lists of failed stocks with details
     """
-    import time
-    
-    failed_stocks = {'YFPricesMissingError': [], 'YFTzMissingError': [], 'Other': []}
-    valid_stocks_data = []
-    valid_stocks = []
-    
-    # Try downloading each stock individually to handle errors gracefully
-    print(f"Fetching data for {len(stocks)} stocks...")
-    for i, stock in enumerate(stocks, 1):
-        if (i % 25 == 0) or (i == 1) or (i == len(stocks)):  # Print every 25 stocks, first, and last
-            print(f"  Progress: {i}/{len(stocks)} stocks processed...")
-        success = False
-        for attempt in range(max_retries):
-            try:
-                # Create a Ticker object for individual download
-                ticker = yf.Ticker(stock)
-                
-                if len(args) == 1:
-                    stock_data = ticker.history(period=args[0], repair=True)
-                elif len(args) == 2:
-                    stock_data = ticker.history(period=None, start=args[0], end=args[1], interval="1d", repair=True)
-                else:
-                    failed_stocks['Other'].append((stock, 'InvalidArgs', f'Invalid args: {args}'))
-                    break
-                
-                # Check if we have valid data with required columns
-                if stock_data is not None and not stock_data.empty:
-                    if "Open" in stock_data.columns and "Close" in stock_data.columns:
-                        # Check that we have some valid data (not all NaN)
-                        if not stock_data[["Open", "Close"]].isna().all().all():
-                            valid_stocks_data.append(stock_data[["Open", "Close"]])
-                            valid_stocks.append(stock)
-                            success = True
-                            break
-                        else:
-                            failed_stocks['YFPricesMissingError'].append((stock, 'AllNaN', 'All data is NaN'))
-                            break
-                    else:
-                        failed_stocks['Other'].append((stock, 'MissingColumns', 'Open or Close columns not found'))
-                        break
-                else:
-                    failed_stocks['YFPricesMissingError'].append((stock, 'EmptyData', 'No data returned'))
-                    break
-                    
-            except Exception as stock_error:
-                error_type = type(stock_error).__name__
-                error_msg = str(stock_error)
-                
-                # Last attempt, log the error
-                if attempt == max_retries - 1:
-                    if 'YFPricesMissingError' in error_type or 'no price data' in error_msg.lower() or 'delisted' in error_msg.lower():
-                        failed_stocks['YFPricesMissingError'].append((stock, error_type, error_msg))
-                    elif 'YFTzMissingError' in error_type or 'no timezone' in error_msg.lower():
-                        failed_stocks['YFTzMissingError'].append((stock, error_type, error_msg))
-                    else:
-                        failed_stocks['Other'].append((stock, error_type, error_msg))
-                else:
-                    # Wait before retrying
-                    time.sleep(0.5 * (attempt + 1))
-    
-    # Print summary of failures
-    total_failed = sum(len(failed_stocks[key]) for key in failed_stocks)
-    if total_failed > 0:
-        print(f"\n{total_failed} Failed downloads:")
-        for error_type, failures in failed_stocks.items():
-            if failures:
-                symbols = [f[0] for f in failures if isinstance(f, tuple)]
-                if len(symbols) <= 50:  # Only print if not too many
-                    print(f"{symbols}: {error_type}")
-                else:
-                    print(f"{len(symbols)} stocks: {error_type}")
-    else:
-        print("All downloads successful!")
-    
-    # Combine successful downloads into MultiIndex DataFrame
-    if valid_stocks_data:
-        # Combine all successful stock data
-        # yfinance Tickers.history() creates MultiIndex with (Open/Close, StockSymbol)
-        # So we need to replicate that structure
-        combined = pd.concat(valid_stocks_data, axis=1, keys=valid_stocks, names=['Stock', 'PriceType'])
-        # Swap levels to match yfinance format: (PriceType, Stock)
-        combined = combined.swaplevel(axis=1)
-        # Reorganize to match expected format: columns are (Level1: Open/Close, Level2: StockSymbol)
-        open_close = combined[["Open", "Close"]]
-        
-        print(f"Successfully fetched data for {len(valid_stocks)} stocks: {valid_stocks}")
-        return open_close, failed_stocks
-    else:
-        print("ERROR: No stocks were successfully downloaded!")
-        return None, failed_stocks
+    return data_source.fetch_stock_data(stocks, args, max_retries)
 
-def get_data(stocks, args, seq_len, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None, use_nlp=False, nlp_csv_paths=None, nlp_method="aggregated", period_type="LS"):
+def get_data(stocks, args, seq_len, data_source: DataSource, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None, use_nlp=False, nlp_csv_paths=None, nlp_method="aggregated", period_type="LS"):
     """
     Return 12-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest, Rev_test, Returns_test, Sp500_test)
-    Loads from .npz if present (and not force); otherwise builds from yfinance,
+    Loads from .npz if present (and not force); otherwise builds from the provided data source,
     saves .npz, and returns the tuple.
     
     Args:
@@ -759,6 +564,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
                 Must be specified explicitly. For period_type="LS", this is the lookback window
                 from which ~31 timesteps are sampled. For period_type="full", this is the
                 actual sequence length used.
+        data_source: DataSource instance to use for fetching stock data (required)
         force: Force rebuild even if cache exists
         prediction_type: Type of prediction (default: "classification")
         open_close_data: Optional pre-downloaded open_close DataFrame to avoid redundant download
@@ -798,6 +604,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
         cached_data = load_data_from_cache(
             stocks=stocks,
             args=args,
+            data_source=data_source,
             prediction_type=prediction_type,
             use_nlp=use_nlp,
             nlp_method=nlp_method,
@@ -829,6 +636,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
         cached_data = load_data_from_cache(
             stocks=valid_stocks,
             args=args,
+            data_source=data_source,
             prediction_type=prediction_type,
             use_nlp=use_nlp,
             nlp_method=nlp_method,
@@ -855,7 +663,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
         max_retries = 1 if len(valid_stocks) > 50 else 3
         
         print(f"[data] Downloading data for {len(valid_stocks)} stocks...")
-        open_close, failed_stocks = handle_yfinance_errors(valid_stocks, args, max_retries=max_retries)
+        open_close, failed_stocks = fetch_stock_data(valid_stocks, args, data_source, max_retries=max_retries)
         
         validate_dataframe_not_none(open_close, "open_close DataFrame")
 
@@ -953,6 +761,27 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
             
             elif nlp_method == "individual":
                 # Individual method: Use yfinance news per stock ticker
+                # Check if date range is historical (yfinance typically only has recent news)
+                from datetime import datetime, timedelta
+                if end_date is not None:
+                    if isinstance(end_date, str):
+                        end_date_parsed = pd.to_datetime(end_date).date()
+                    elif isinstance(end_date, datetime):
+                        end_date_parsed = end_date.date()
+                    else:
+                        end_date_parsed = end_date
+                    
+                    # Check if end_date is more than 1 year ago
+                    one_year_ago = datetime.now().date() - timedelta(days=365)
+                    if end_date_parsed < one_year_ago:
+                        import warnings
+                        warnings.warn(
+                            f"Individual NLP method with historical date range ({start_date} to {end_date}). "
+                            f"yfinance news API typically only provides recent news (last 1-3 months). "
+                            f"For historical data, consider using nlp_method='aggregated' with NYT articles instead.",
+                            UserWarning
+                        )
+                
                 print(f"[nlp] Extracting individual NLP features for {len(successfully_downloaded_stocks)} stocks...")
                 
                 stock_nlp_features = extract_daily_nlp_features_yfinance(
@@ -1031,7 +860,8 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     if prediction_type == "classification":
         xdata, ydata, dates, revenues, returns = get_feature_input_classification(
             op, cp, seq_len, op.shape[1], len(successfully_downloaded_stocks), date_index, 
-            nlp_features=nlp_features_dict, use_nlp=use_nlp, nlp_method=actual_nlp_method, successfully_downloaded_stocks=successfully_downloaded_stocks, period_type=period_type
+            nlp_features=nlp_features_dict, use_nlp=use_nlp, nlp_method=actual_nlp_method, successfully_downloaded_stocks=successfully_downloaded_stocks, period_type=period_type,
+            normalize_nlp_separately=True, normalize_per_stock=False
         )
     else:
         raise ValueError("Invalid prediction type - only 'classification' is supported")
@@ -1075,38 +905,43 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     samples_per_date = {date: len(indices) for date, indices in date_to_indices.items()}
     print(f"[split] Samples per date: min={min(samples_per_date.values())}, max={max(samples_per_date.values())}, mean={np.mean(list(samples_per_date.values())):.1f}")
     
-    # 3.3. Calculate split proportions and find split indices
+    # 3.3. Calculate split proportions and find split boundaries by UNIQUE DATES
+    # This ensures no data leakage - all samples from the same date go to the same split
     train_prop = 0.64   # 64% for training
     val_prop = 0.16     # 16% for validation  
     test_prop = 0.2     # 20% for test
     
-    # Calculate split indices based on total sample count
-    train_end_idx = int(n_total_samples * train_prop)
-    val_end_idx = int(n_total_samples * (train_prop + val_prop))
+    # Get unique dates sorted chronologically
+    unique_dates = sorted(uniq_dates)
+    n_unique_dates = len(unique_dates)
     
-    # Ensure we have at least 1 sample per split
-    if train_end_idx == 0:
-        train_end_idx = 1
-    if val_end_idx <= train_end_idx:
-        val_end_idx = train_end_idx + 1
-    if val_end_idx >= n_total_samples:
-        val_end_idx = n_total_samples - 1
+    # Calculate split boundaries based on unique dates (not sample count)
+    train_end_date_idx = int(n_unique_dates * train_prop)
+    val_end_date_idx = int(n_unique_dates * (train_prop + val_prop))
     
-    # Get the dates at the split indices (from sorted samples)
-    train_end_date = sorted_dates[train_end_idx - 1]  # Last date in training set
-    val_end_date = sorted_dates[val_end_idx - 1]       # Last date in validation set
+    # Ensure we have at least 1 date per split
+    if train_end_date_idx == 0:
+        train_end_date_idx = 1
+    if val_end_date_idx <= train_end_date_idx:
+        val_end_date_idx = train_end_date_idx + 1
+    if val_end_date_idx >= n_unique_dates:
+        val_end_date_idx = n_unique_dates - 1
+    
+    # Get the actual date boundaries
+    train_end_date = unique_dates[train_end_date_idx - 1]  # Last date in training set
+    val_end_date = unique_dates[val_end_date_idx - 1]      # Last date in validation set
     
     # Convert to comparable format
     train_end_date_ts = pd.Timestamp(train_end_date)
     val_end_date_ts = pd.Timestamp(val_end_date)
     
-    print(f"[split] Split boundaries (based on sample indices):")
-    print(f"  Train end index: {train_end_idx} (date: {train_end_date})")
-    print(f"  Val end index: {val_end_idx} (date: {val_end_date})")
-    print(f"  Test starts at index: {val_end_idx + 1}")
+    print(f"[split] Split boundaries (based on UNIQUE DATES to prevent data leakage):")
+    print(f"  Train end date: {train_end_date} (date index: {train_end_date_idx}/{n_unique_dates})")
+    print(f"  Val end date: {val_end_date} (date index: {val_end_date_idx}/{n_unique_dates})")
+    print(f"  Test starts after: {val_end_date}")
     
     # 3.4. Assign all samples to splits based on date boundaries
-    # All samples from same date go to same split
+    # All samples from same date go to same split - this prevents data leakage
     train_mask = np.zeros(n_total_samples, dtype=bool)
     val_mask = np.zeros(n_total_samples, dtype=bool)
     test_mask = np.zeros(n_total_samples, dtype=bool)
@@ -1115,7 +950,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     for date_val, indices in date_to_indices.items():
         date_val_ts = pd.Timestamp(date_val)
         
-        # Determine split based on date boundaries
+        # Determine split based on date boundaries (strict comparison)
         if date_val_ts <= train_end_date_ts:
             split = 'train'
         elif date_val_ts <= val_end_date_ts:
@@ -1131,6 +966,27 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
                 val_mask[idx] = True
             else:
                 test_mask[idx] = True
+    
+    # Validate: Ensure no date appears in multiple splits (data leakage check)
+    train_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[train_mask])
+    val_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[val_mask])
+    test_dates_set = set(pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[test_mask])
+    
+    date_overlap_train_val = train_dates_set & val_dates_set
+    date_overlap_train_test = train_dates_set & test_dates_set
+    date_overlap_val_test = val_dates_set & test_dates_set
+    
+    if date_overlap_train_val or date_overlap_train_test or date_overlap_val_test:
+        overlap_msg = []
+        if date_overlap_train_val:
+            overlap_msg.append(f"train-val: {len(date_overlap_train_val)} dates")
+        if date_overlap_train_test:
+            overlap_msg.append(f"train-test: {len(date_overlap_train_test)} dates")
+        if date_overlap_val_test:
+            overlap_msg.append(f"val-test: {len(date_overlap_val_test)} dates")
+        raise RuntimeError(f"DATA LEAKAGE DETECTED: Date overlap between splits ({', '.join(overlap_msg)})")
+    
+    print(f"[split] ✓ Data leakage check passed: No date overlap between splits")
     
     # Calculate actual sample counts and proportions
     n_train_samples = np.sum(train_mask)
@@ -1150,6 +1006,69 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     
     print(f"[split] Date assignments: {len(train_dates_set)} train dates, {len(val_dates_set)} val dates, {len(test_dates_set)} test dates")
     
+    # Validation: Check temporal order
+    print(f"\n[validation] Checking temporal order...")
+    train_dates_list = sorted([pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[train_mask]])
+    val_dates_list = sorted([pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[val_mask]])
+    test_dates_list = sorted([pd.Timestamp(d).date() if isinstance(d, (pd.Timestamp, np.datetime64)) else d for d in dates_np[test_mask]])
+    
+    if train_dates_list and val_dates_list:
+        max_train_date = max(train_dates_list)
+        min_val_date = min(val_dates_list)
+        if max_train_date >= min_val_date:
+            raise RuntimeError(f"TEMPORAL ORDER VIOLATION: Max train date ({max_train_date}) >= min val date ({min_val_date})")
+        print(f"  ✓ Train dates end before validation dates: {max_train_date} < {min_val_date}")
+    
+    if val_dates_list and test_dates_list:
+        max_val_date = max(val_dates_list)
+        min_test_date = min(test_dates_list)
+        if max_val_date >= min_test_date:
+            raise RuntimeError(f"TEMPORAL ORDER VIOLATION: Max val date ({max_val_date}) >= min test date ({min_test_date})")
+        print(f"  ✓ Validation dates end before test dates: {max_val_date} < {min_test_date}")
+    
+    # Validation: Monitor feature distributions across splits
+    print(f"\n[validation] Checking feature distributions across splits...")
+    X_train_samples = xdata[train_mask]
+    X_val_samples = xdata[val_mask]
+    X_test_samples = xdata[test_mask]
+    
+    # Compute statistics for each split
+    def compute_feature_stats(X_split, split_name):
+        if len(X_split) == 0:
+            return None
+        # Flatten to (N*W, F) for statistics
+        X_flat = X_split.reshape(-1, X_split.shape[-1])
+        return {
+            'mean': np.mean(X_flat, axis=0),
+            'std': np.std(X_flat, axis=0),
+            'min': np.min(X_flat, axis=0),
+            'max': np.max(X_flat, axis=0)
+        }
+    
+    train_stats = compute_feature_stats(X_train_samples, 'train')
+    val_stats = compute_feature_stats(X_val_samples, 'val')
+    test_stats = compute_feature_stats(X_test_samples, 'test')
+    
+    if train_stats and val_stats:
+        # Check if means are similar (should be if normalized together)
+        mean_diff = np.abs(train_stats['mean'] - val_stats['mean'])
+        std_diff = np.abs(train_stats['std'] - val_stats['std'])
+        max_mean_diff = np.max(mean_diff)
+        max_std_diff = np.max(std_diff)
+        
+        print(f"  Train/Val mean difference (max): {max_mean_diff:.6f}")
+        print(f"  Train/Val std difference (max): {max_std_diff:.6f}")
+        
+        if max_mean_diff > 0.5:  # Threshold for normalized features
+            print(f"  ⚠️  WARNING: Large mean difference between train and val ({max_mean_diff:.6f})")
+        else:
+            print(f"  ✓ Mean distributions are similar")
+        
+        if max_std_diff > 0.5:
+            print(f"  ⚠️  WARNING: Large std difference between train and val ({max_std_diff:.6f})")
+        else:
+            print(f"  ✓ Std distributions are similar")
+    
     # Warn if training data is very limited
     if n_train_samples < 100:
         print(f"[split] ⚠️  WARNING: Very few training samples ({n_train_samples}). Consider using a longer date range for better model training.")
@@ -1167,7 +1086,7 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
     Returns_f = returns[test_mask]
 
     # Fetch S&P 500 returns aligned with test dates
-    Sp500_f = _get_sp500_returns_for_dates(Dtest_f, date_index, op.shape[1])
+    Sp500_f = _get_sp500_returns_for_dates(Dtest_f, date_index, op.shape[1], data_source)
 
     # --- split summary ---
     n_tr, n_va, n_te = len(Dtrain_f), len(Dvalidation_f), len(Dtest_f)
@@ -1177,6 +1096,8 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
 
     # NOW create the ID based on successfully downloaded stocks (after error handling)
     # Include all parameters in ID generation
+    # Serialize data source for ID generation
+    data_source_str = _serialize_data_source(data_source)
     data_id = _get_data_id(
         successfully_downloaded_stocks, 
         args, 
@@ -1184,7 +1105,8 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
         nlp_method=nlp_method,
         prediction_type=prediction_type,
         period_type=period_type,
-        seq_len=seq_len
+        seq_len=seq_len,
+        data_source_str=data_source_str
     )
     
     # Save datasets separately
@@ -1240,12 +1162,13 @@ def get_data(stocks, args, seq_len, force=False, prediction_type="classification
         nlp_method=nlp_method,
         prediction_type=prediction_type,
         period_type=period_type,
-        seq_len=seq_len
+        seq_len=seq_len,
+        data_source_str=data_source_str
     )
     
     return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f, Returns_f, Sp500_f)
 
-def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp=False, nlp_method="aggregated", period_type="LS", seq_len=240):
+def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type="classification", use_nlp=False, nlp_method="aggregated", period_type="LS", seq_len=240):
     """
     Load data from cache files if they exist.
     
@@ -1256,6 +1179,8 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
     Args:
         stocks: List of stock tickers (may include problematic stocks - will be filtered)
         args: Date range arguments
+        data_source: DataSource instance (required). Used for matching cache entries and fetching
+                    S&P 500 data if needed for old cache formats.
         prediction_type: Type of prediction (default: "classification")
         use_nlp: Whether NLP features were used (default: False)
         nlp_method: NLP method used - "aggregated" or "individual" (default: "aggregated")
@@ -1275,7 +1200,7 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
     filtered_stocks = [stock for stock in stocks if stock not in problematic_stocks]
     
     # Step 3: Try to find cache using the mapping file
-    # We verify all 7 conditions explicitly:
+    # We verify all 8 conditions explicitly:
     # 1. Cleaned stock list matches
     # 2. Time period matches
     # 3. use_nlp matches
@@ -1283,9 +1208,13 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
     # 5. prediction_type matches
     # 6. period_type matches
     # 7. seq_len matches
+    # 8. data_source matches
     mapping = _load_id_mapping()
     found_cache = False
     data_id = None
+    
+    # Serialize data_source for comparison
+    data_source_str = _serialize_data_source(data_source)
     
     for cached_id, cached_info in mapping.items():
         cached_stocks = set(cached_info.get('stocks', []))
@@ -1295,12 +1224,16 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
         cached_prediction_type = cached_info.get('prediction_type', 'classification')
         cached_period_type = cached_info.get('period_type', 'LS')
         cached_seq_len = cached_info.get('seq_len', 240)
+        cached_data_source = cached_info.get('data_source')
+        if cached_data_source is None:
+            # Old cache format without data_source - skip this cache entry
+            continue
         
         # Normalize args for comparison (convert to list if needed)
         cached_args_list = list(cached_args) if cached_args else []
         args_list = list(args) if args else []
         
-        # Verify all 7 conditions:
+        # Verify all 8 conditions:
         # 1. Cleaned stock list matches
         stocks_match = set(filtered_stocks) == cached_stocks
         # 2. Time period matches
@@ -1315,10 +1248,12 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
         period_type_match = cached_period_type == period_type
         # 7. seq_len matches
         seq_len_match = cached_seq_len == seq_len
+        # 8. data_source matches
+        data_source_match = cached_data_source == data_source_str
         
-        # All 7 conditions must be satisfied
+        # All 8 conditions must be satisfied
         if (stocks_match and time_period_match and use_nlp_match and nlp_method_match and 
-            prediction_type_match and period_type_match and seq_len_match):
+            prediction_type_match and period_type_match and seq_len_match and data_source_match):
             # Found matching cache - verify files exist using the unique ID
             data_id = cached_id
             
@@ -1374,7 +1309,7 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
             # Old format - fetch S&P 500
             print("[util] Old metrics format detected, fetching S&P 500 returns...")
             Dte_temp = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
-            Sp500 = _get_sp500_returns_for_dates(Dte_temp, None, None)
+            Sp500 = _get_sp500_returns_for_dates(Dte_temp, None, None, data_source)
         Returns = metrics_data.get("Returns", None)
         if Returns is None:
             print("[util] Warning: Returns not found in metrics cache, using Rev as fallback")
@@ -1385,7 +1320,7 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
         metrics_data = _load_npz_progress(metrics_path, ["Rev"], desc="Loading metrics dataset (.npz)")
         print("[util] Old metrics format detected, fetching S&P 500 returns...")
         Dte_temp = [pd.Timestamp(d).to_pydatetime() for d in test_data["D"]]
-        Sp500 = _get_sp500_returns_for_dates(Dte_temp, None, None)
+        Sp500 = _get_sp500_returns_for_dates(Dte_temp, None, None, data_source)
         metrics_data["Returns"] = metrics_data["Rev"]
     
     # Convert back to torch tensors and Python datetime objects
@@ -1406,9 +1341,22 @@ def load_data_from_cache(stocks, args, prediction_type="classification", use_nlp
     
     return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev, Returns, Sp500)
 
-def save_data_locally(stocks, args, seq_len=240, force=False, prediction_type="classification"):
-    # Force a rebuild/save and return the 9-tuple
-    return get_data(stocks, args, seq_len=seq_len, force=True, prediction_type=prediction_type)
+def save_data_locally(stocks, args, seq_len, data_source: DataSource, force=False, prediction_type="classification"):
+    """
+    Force a rebuild/save and return the data tuple.
+    
+    Args:
+        stocks: List of stock tickers
+        args: Date range arguments
+        seq_len: Sequence length (lookback window size)
+        data_source: DataSource instance (required)
+        force: Force rebuild even if cache exists
+        prediction_type: Type of prediction (default: "classification")
+    
+    Returns:
+        Data tuple
+    """
+    return get_data(stocks, args, seq_len=seq_len, data_source=data_source, force=True, prediction_type=prediction_type)
 
 
 
@@ -1494,7 +1442,7 @@ def get_period(end_t, seq_len, mask_type="LS"):
 
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
-def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, date_index, nlp_features=None, use_nlp=False, nlp_method=None, successfully_downloaded_stocks=None, period_type="LS"):
+def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, date_index, nlp_features=None, use_nlp=False, nlp_method=None, successfully_downloaded_stocks=None, period_type="LS", normalize_nlp_separately=True, normalize_per_stock=False):
     """
     Get feature input for classification task.
     
@@ -1512,6 +1460,8 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
         period_type: Period type ("LS" or "full")
                     - "LS": Creates long periods (stepped) + short period (last 20% of seq_len)
                     - "full": Uses full sequence length window
+        normalize_nlp_separately: If True, normalize NLP features separately from price features
+        normalize_per_stock: If True, normalize price features per stock (instead of globally)
     """
     T = study_period
     
@@ -1587,6 +1537,11 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                 if np.isnan(vec).any():
                     dropped_feature_nan += 1
                     valid = False; break
+                
+                # Window-based robust z-score normalization
+                # Note: normalize_per_stock option would require a different normalization approach
+                # (e.g., normalizing all windows per stock before windowing). For now, we use
+                # window-based normalization which normalizes each window independently.
                 q1, q2, q3 = np.quantile(vec, [0.25, 0.5, 0.75])
                 iqr = (q3 - q1)
                 if iqr == 0:
@@ -1662,12 +1617,33 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                         # Date index out of range - use zeros
                         nlp_window[idx, :] = np.zeros(nlp_feature_dim, dtype=float)
                 
+                # Normalize NLP features separately if requested
+                if normalize_nlp_separately:
+                    # Standardize NLP features: (x - mean) / std per feature
+                    for feat_idx in range(nlp_feature_dim):
+                        nlp_feat = nlp_window[:, feat_idx]
+                        feat_mean = np.mean(nlp_feat)
+                        feat_std = np.std(nlp_feat)
+                        if feat_std > 1e-8:  # Avoid division by zero
+                            nlp_window[:, feat_idx] = (nlp_feat - feat_mean) / feat_std
+                        else:
+                            # If std is too small, just center (set to zero)
+                            nlp_window[:, feat_idx] = nlp_feat - feat_mean
+                
                 # Concatenate price features with NLP features
                 window = np.concatenate([window, nlp_window], axis=1)  # (len(period), 3 + nlp_feature_dim)
                 
                 # Debug: Print feature dimensions on first window
                 if len(X_list) == 0:
+                    norm_info = []
+                    if normalize_per_stock:
+                        norm_info.append("per-stock price normalization")
+                    else:
+                        norm_info.append("global price normalization")
+                    if normalize_nlp_separately:
+                        norm_info.append("separate NLP normalization")
                     print(f"[features] NLP features added: {nlp_feature_dim} features ({actual_method_for_features} method)")
+                    print(f"[features] Normalization: {', '.join(norm_info)}")
                     print(f"[features] Total features per timestep: {window.shape[1]} (3 base + {nlp_feature_dim} NLP)")
             else:
                 # Debug: Print when NLP features are NOT added

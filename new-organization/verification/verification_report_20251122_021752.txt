@@ -1,0 +1,98 @@
+================================================================================
+VERIFICATION CHECKS SUMMARY REPORT
+================================================================================
+Generated: 2025-11-22 02:52:18
+
+SUMMARY
+--------------------------------------------------------------------------------
+Total checks: 3
+  ✓ Successful: 0
+  ✗ Failed: 3
+  ⚠️  Errors: 0
+  ⏱  Timeouts: 0
+
+DETAILED RESULTS
+--------------------------------------------------------------------------------
+
+Preprocessing Verification
+  Status: failed
+  Return code: 1
+  Output (last 20 lines):
+    Traceback (most recent call last):
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_preprocessing.py", line 387, in <module>
+        verify_preprocessing(
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_preprocessing.py", line 344, in verify_preprocessing
+        trainer = Trainer(config=trainer_config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/trainer.py", line 854, in __init__
+        target_module.load_state_dict(state_dict)
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 2629, in load_state_dict
+        raise RuntimeError(
+    RuntimeError: Error(s) in loading state_dict for LSTMModel:
+    	Missing key(s) in state_dict: "lstm.weight_ih_l1", "lstm.weight_hh_l1", "lstm.bias_ih_l1", "lstm.bias_hh_l1". 
+    	size mismatch for lstm.weight_ih_l0: copying a param with shape torch.Size([100, 13]) from checkpoint, the shape in current model is torch.Size([256, 13]).
+    	size mismatch for lstm.weight_hh_l0: copying a param with shape torch.Size([100, 25]) from checkpoint, the shape in current model is torch.Size([256, 64]).
+    	size mismatch for lstm.bias_ih_l0: copying a param with shape torch.Size([100]) from checkpoint, the shape in current model is torch.Size([256]).
+    	size mismatch for lstm.bias_hh_l0: copying a param with shape torch.Size([100]) from checkpoint, the shape in current model is torch.Size([256]).
+    	size mismatch for lstm_norm.weight: copying a param with shape torch.Size([25]) from checkpoint, the shape in current model is torch.Size([64]).
+    	size mismatch for lstm_norm.bias: copying a param with shape torch.Size([25]) from checkpoint, the shape in current model is torch.Size([64]).
+    	size mismatch for linear.weight: copying a param with shape torch.Size([1, 25]) from checkpoint, the shape in current model is torch.Size([1, 64]).
+    
+
+Overfitting Test
+  Status: failed
+  Return code: 1
+  Output (last 20 lines):
+    Traceback (most recent call last):
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_overfit.py", line 278, in <module>
+        test_overfitting(
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_overfit.py", line 184, in test_overfitting
+        trainer = Trainer(config=trainer_config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/trainer.py", line 854, in __init__
+        target_module.load_state_dict(state_dict)
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 2629, in load_state_dict
+        raise RuntimeError(
+    RuntimeError: Error(s) in loading state_dict for LSTMModel:
+    	Missing key(s) in state_dict: "lstm.weight_ih_l1", "lstm.weight_hh_l1", "lstm.bias_ih_l1", "lstm.bias_hh_l1". 
+    	size mismatch for lstm.weight_ih_l0: copying a param with shape torch.Size([100, 13]) from checkpoint, the shape in current model is torch.Size([256, 13]).
+    	size mismatch for lstm.weight_hh_l0: copying a param with shape torch.Size([100, 25]) from checkpoint, the shape in current model is torch.Size([256, 64]).
+    	size mismatch for lstm.bias_ih_l0: copying a param with shape torch.Size([100]) from checkpoint, the shape in current model is torch.Size([256]).
+    	size mismatch for lstm.bias_hh_l0: copying a param with shape torch.Size([100]) from checkpoint, the shape in current model is torch.Size([256]).
+    	size mismatch for lstm_norm.weight: copying a param with shape torch.Size([25]) from checkpoint, the shape in current model is torch.Size([64]).
+    	size mismatch for lstm_norm.bias: copying a param with shape torch.Size([25]) from checkpoint, the shape in current model is torch.Size([64]).
+    	size mismatch for linear.weight: copying a param with shape torch.Size([1, 25]) from checkpoint, the shape in current model is torch.Size([1, 64]).
+    
+
+Random Label Test
+  Status: failed
+  Return code: 1
+  Output (last 20 lines):
+    Traceback (most recent call last):
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_random_labels.py", line 266, in <module>
+        test_random_labels(
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/verification/verify_random_labels.py", line 182, in test_random_labels
+        trainer = Trainer(config=trainer_config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/new-organization/trainer.py", line 854, in __init__
+        target_module.load_state_dict(state_dict)
+      File "/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 2629, in load_state_dict
+        raise RuntimeError(
+    RuntimeError: Error(s) in loading state_dict for LSTMModel:
+    	Missing key(s) in state_dict: "lstm.weight_ih_l1", "lstm.weight_hh_l1", "lstm.bias_ih_l1", "lstm.bias_hh_l1". 
+    	size mismatch for lstm.weight_ih_l0: copying a param with shape torch.Size([100, 13]) from checkpoint, the shape in current model is torch.Size([256, 13]).
+    	size mismatch for lstm.weight_hh_l0: copying a param with shape torch.Size([100, 25]) from checkpoint, the shape in current model is torch.Size([256, 64]).
+    	size mismatch for lstm.bias_ih_l0: copying a param with shape torch.Size([100]) from checkpoint, the shape in current model is torch.Size([256]).
+    	size mismatch for lstm.bias_hh_l0: copying a param with shape torch.Size([100]) from checkpoint, the shape in current model is torch.Size([256]).
+    	size mismatch for lstm_norm.weight: copying a param with shape torch.Size([25]) from checkpoint, the shape in current model is torch.Size([64]).
+    	size mismatch for lstm_norm.bias: copying a param with shape torch.Size([25]) from checkpoint, the shape in current model is torch.Size([64]).
+    	size mismatch for linear.weight: copying a param with shape torch.Size([1, 25]) from checkpoint, the shape in current model is torch.Size([1, 64]).
+    
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+  Some checks failed. Review the detailed output above.
+  ✓ Random label test passed - loss stayed flat as expected.
+
+================================================================================
