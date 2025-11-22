@@ -4,9 +4,10 @@ __pycache__*
 # Logs and databases #
 ######################
 *.log
-logan-version/runs/*
-logan-version/data/*
-logan-version/log_jobs/*
+*runs*
+*data*
+*log_jobs*
+*slurm*
 
 # OS things #
 ######################
@@ -15,5 +16,10 @@ logan-version/log_jobs/*
 ._*
 .Spotlight-V100
 .Trashes
+.venv
+.cursor
+.python-version
+.pytest_cache
+.vscode
 ehthumbs.db
 Thumbs.db

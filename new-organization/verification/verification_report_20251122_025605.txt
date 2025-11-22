@@ -1,0 +1,96 @@
+================================================================================
+VERIFICATION CHECKS SUMMARY REPORT
+================================================================================
+Generated: 2025-11-22 03:02:22
+
+SUMMARY
+--------------------------------------------------------------------------------
+Total checks: 3
+  ✓ Successful: 3
+  ✗ Failed: 0
+  ⚠️  Errors: 0
+  ⏱  Timeouts: 0
+
+DETAILED RESULTS
+--------------------------------------------------------------------------------
+
+Preprocessing Verification
+  Status: success
+  Output (last 20 lines):
+    Normalization Check:
+      X mean difference: 2.201965
+      X std difference:  11.163948
+    
+    Date Range Check:
+      Train date range: 1990-12-14 05:00:00 to 1991-03-18 05:00:00
+      Val date range:   1997-05-19 04:00:00 to 1997-08-18 04:00:00
+      Overlapping dates: 0
+    ✓ No date overlap (good)
+    
+    Index Overlap Check:
+      Overlapping indices: 128
+    
+    ================================================================================
+    ISSUES FOUND:
+      ⚠️  Large X mean difference: 2.201965 (may indicate different normalization)
+      ⚠️  Large X std difference: 11.163948 (may indicate different normalization)
+      ⚠️  Index overlap detected: 128 overlapping indices (data leakage risk!)
+    ================================================================================
+    
+
+Overfitting Test
+  Status: success
+  Output (last 20 lines):
+      Model output: 0/26 (0.00%)
+      Loss: 0/26 (0.00%)
+    Valid batches processed - Training: 16, Validation: 26
+    --------------------------------------------
+    
+    ================================================================================
+    Overfitting Test Results
+    ================================================================================
+    
+    Expected behavior:
+      - Training loss should decrease to near zero (< 0.01)
+      - Training accuracy should approach 100% (> 95%)
+    
+    If these conditions are NOT met, possible issues:
+      1. Bug in loss function
+      2. Bug in target construction
+      3. Optimizer/LR issues
+      4. Model architecture too small
+    ================================================================================
+    
+
+Random Label Test
+  Status: success
+  Output (last 20 lines):
+      Y_batch: 0/26 (0.00%)
+      Model output: 0/26 (0.00%)
+      Loss: 0/26 (0.00%)
+    Valid batches processed - Training: 102, Validation: 26
+    --------------------------------------------
+    
+    ================================================================================
+    Random Label Test Results
+    ================================================================================
+    
+    Expected behavior:
+      - Loss should stay roughly flat (not decrease significantly)
+      - Loss may fluctuate randomly but should not trend downward
+    
+    If loss decreases similarly to normal training:
+      - Bug in loss computation
+      - Bug in loss logging
+      - Labels not actually shuffled
+    ================================================================================
+    
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+  ⚠️  Data leakage detected! Check preprocessing verification output.
+  ⚠️  Normalization mismatch detected! Train and val may have different scaling.
+  ✓ Random label test passed - loss stayed flat as expected.
+
+================================================================================

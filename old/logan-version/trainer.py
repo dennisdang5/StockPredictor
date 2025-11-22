@@ -4,26 +4,13 @@ import torch
 import torch.optim as optim
 from torch import nn
 import torch.utils.data as data
-try:
-    from nlp_features import get_nlp_feature_dim
-except ImportError:
-    # Fallback function if nlp_features module is not available
-    def get_nlp_feature_dim(nlp_method: str) -> int:
-        """Return NLP feature dimension based on method."""
-        if nlp_method == "aggregated":
-            return 10
-        elif nlp_method == "individual":
-            return 10
-        else:
-            return 0
-# Import model registry system
-from models import create_model, ModelRegistry, get_available_models
-from models.configs import (
-    BaseModelConfig,
-    LSTMConfig, CNNLSTMConfig, AELSTMConfig, CNNAELSTMConfig, TimesNetConfig
+from nlp_features import get_nlp_feature_dim
+from model import (
+    LSTMModel, CNNLSTMModel, AELSTM, CNNAELSTM,
+    ModelConfig, LSTMConfig, CNNLSTMConfig, AutoEncoderConfig, 
+    CNNAutoEncoderConfig, AELSTMConfig, CNNAELSTMConfig, TimesNetConfig
 )
 import util
-from data_sources import YFinanceDataSource, DataSource
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
 import time
@@ -31,7 +18,7 @@ import matplotlib.pyplot as plt
 import datetime as dt
 import matplotlib.dates as mdates
 from tqdm import tqdm
-# Removed helpers_workers import - using simple defaults for workers
+from helpers_workers import dataloader_kwargs, autotune_num_workers
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler
@@ -41,136 +28,33 @@ from statsmodels.tsa.stattools import adfuller, acf, pacf
 import warnings
 warnings.filterwarnings('ignore')
 
-# Import metrics computation helpers from evaluator
-try:
-    from evaluation.evaluator import ModelEvaluator
-    _EVALUATOR_AVAILABLE = True
-except ImportError:
-    _EVALUATOR_AVAILABLE = False
-    print("[WARNING] evaluation.evaluator not available, metrics computation will be limited")
-
-
-def _compute_basic_metrics(predictions: np.ndarray, targets: np.ndarray) -> dict:
-    """
-    Compute basic classification metrics (reusing evaluator logic).
-    
-    Args:
-        predictions: Model predictions (numpy array)
-        targets: True values (numpy array)
-        
-    Returns:
-        Dictionary with accuracy, MSE, RMSE, MAE
-    """
-    metrics = {}
-    
-    # Classification accuracy (sign-based)
-    pred_sign = np.sign(predictions)
-    target_sign = np.sign(targets)
-    correct = np.sum(pred_sign == target_sign)
-    total = len(predictions)
-    metrics['accuracy'] = (correct / total) * 100 if total > 0 else 0
-    
-    # MSE for continuous predictions
-    from sklearn.metrics import mean_squared_error, mean_absolute_error
-    metrics['mse'] = mean_squared_error(targets, predictions)
-    metrics['rmse'] = np.sqrt(metrics['mse'])
-    metrics['mae'] = mean_absolute_error(targets, predictions)
-    
-    return metrics
-
-
-def _compute_directional_metrics(predictions: np.ndarray, targets: np.ndarray) -> dict:
-    """
-    Compute directional accuracy metrics (reusing evaluator logic).
-    
-    Args:
-        predictions: Model predictions (numpy array)
-        targets: True values (numpy array)
-        
-    Returns:
-        Dictionary with directional accuracy, upward/downward accuracy
-    """
-    metrics = {}
-    
-    # Classification accuracy
-    pred_sign = np.sign(predictions)
-    target_sign = np.sign(targets)
-    correct = np.sum(pred_sign == target_sign)
-    total_predictions = len(predictions)
-    metrics['directional_accuracy'] = (correct / total_predictions) * 100 if total_predictions > 0 else 0
-    
-    # Upward movement accuracy
-    up_mask = target_sign > 0
-    if np.sum(up_mask) > 0:
-        up_accuracy = np.sum((pred_sign > 0) & up_mask) / np.sum(up_mask) * 100
-        metrics['upward_accuracy'] = up_accuracy
-    else:
-        metrics['upward_accuracy'] = 0
-    
-    # Downward movement accuracy
-    down_mask = target_sign < 0
-    if np.sum(down_mask) > 0:
-        down_accuracy = np.sum((pred_sign < 0) & down_mask) / np.sum(down_mask) * 100
-        metrics['downward_accuracy'] = down_accuracy
-    else:
-        metrics['downward_accuracy'] = 0
-    
-    return metrics
-
 class TrainerConfig:
     """
     Configuration class for Trainer.
     Contains all training parameters and model-specific configurations.
     
-    Users must create both TrainerConfig and model config objects (e.g., LSTMConfig, TimesNetConfig).
-    
     Example usage:
-        from models.configs import LSTMConfig, TimesNetConfig
+        # Basic usage with model_config
+        from types import SimpleNamespace
         
-        # Example 1: LSTM model
-        # Create model-specific config
-        lstm_config = LSTMConfig(parameters={
-            'input_shape': (31, 13),  # Will be overridden by TrainerConfig based on data
-            'hidden_size': 64,
-            'num_layers': 2,
-            'dropout': 0.1
-        })
-        
-        # Create trainer config
-        from data_sources import YFinanceDataSource
-        trainer_config = TrainerConfig(
-            stocks=["AAPL", "MSFT"],
-            time_args=["1990-01-01", "2015-12-31"],
-            batch_size=32,
-            num_epochs=1000,
-            model_type="LSTM",
-            model_config=lstm_config,
-            period_type="LS",
-            lookback=240,  # Days of historical data used for feature extraction
-            data_source=YFinanceDataSource(),  # Required: specify data source
-            use_nlp=True,
-            nlp_method="aggregated"
+        # Create model-specific config (e.g., for TimesNet)
+        # Note: seq_len is NOT included here - it should be set in TrainerConfig
+        timesnet_config = SimpleNamespace(
+            task_name='classification',
+            # seq_len is set in TrainerConfig, not here
+            enc_in=13,
+            num_class=2,
+            d_model=256,
+            e_layers=2,
+            top_k=5,
+            num_kernels=6,
+            dropout=0.1,
+            embed='timeF',
+            freq='d'
         )
         
-        # Use with Trainer
-        trainer = Trainer(config=trainer_config)
-        
-        # Example 2: TimesNet model
-        timesnet_config = TimesNetConfig(parameters={
-            'input_shape': (31, 13),  # Will be overridden by TrainerConfig based on data
-            'task_name': 'classification',
-            'enc_in': 13,
-            'num_class': 2,
-            'd_model': 256,
-            'e_layers': 2,
-            'top_k': 5,
-            'num_kernels': 6,
-            'dropout': 0.1,
-            'embed': 'timeF',
-            'freq': 'd'
-        })
-        
-        trainer_config = TrainerConfig(
+        # Create trainer config
+        config = TrainerConfig(
             stocks=["AAPL", "MSFT"],
             time_args=["1990-01-01", "2015-12-31"],
             batch_size=32,
@@ -178,12 +62,13 @@ class TrainerConfig:
             model_type="TimesNet",
             model_config=timesnet_config,
             period_type="LS",
-            lookback=240,  # Days of historical data used for feature extraction
+            seq_len=31,  # Sequence length for data generation and model architecture
             use_nlp=True,
             nlp_method="aggregated"
         )
         
-        trainer = Trainer(config=trainer_config)
+        # Use with Trainer
+        trainer = Trainer(config=config)
     """
     def __init__(
         self,
@@ -201,8 +86,7 @@ class TrainerConfig:
         early_stop_patience=7,
         early_stop_min_delta=0.001,
             period_type="LS",
-        lookback=None,
-        data_source: DataSource = None,
+        seq_len=None,
         **model_args
     ):
         """
@@ -218,30 +102,21 @@ class TrainerConfig:
             k: Number of top/bottom positions for long-short portfolio
             cost_bps_per_side: Transaction costs per side in basis points
             save_every_epochs: Save model every N epochs (0 to disable periodic saves)
-            model_type: Type of model ("LSTM", "CNNLSTM", "AELSTM", "CNNAELSTM", "TimesNet", etc.)
-            model_config: Model-specific configuration object. Must be an instance of the appropriate
-                         config class (e.g., LSTMConfig for "LSTM", TimesNetConfig for "TimesNet").
-                         Users must create this config object themselves - see class docstring for examples.
-                         The config type will be validated to match the model_type.
+            model_type: Type of model ("LSTM", "CNNLSTM", "AELSTM", "CNNAELSTM", etc.)
+            model_config: Model-specific configuration object (e.g., TimesNet config)
+                         This can be any object/namespace/dict containing model-specific params
             early_stop_patience: Number of epochs to wait before early stopping (default: 7)
             early_stop_min_delta: Minimum change in validation loss to qualify as improvement (default: 0.001)
             period_type: Period type for feature extraction ("LS" or "full"). Default: "LS"
-                    - "LS": Samples timesteps from lookback window (e.g., 31 timesteps from 240-day lookback)
-                    - "full": Uses all days from lookback window (e.g., 240 timesteps from 240-day lookback)
-            lookback: Days of historical data used for feature extraction (default: None).
-                    This is the window size used to extract features. For example:
-                    - lookback=240 means use 240 days of historical data
-                    - With period_type="LS": samples ~31 timesteps from this 240-day window
-                    - With period_type="full": uses all 240 timesteps from this window
-                    If None, defaults to 240.
-                    Note: The actual seq_len (model input timesteps) is determined by period_type
-                    and data, not by lookback directly.
-            data_source: DataSource instance to use for fetching stock data (required)
+                    - "LS": Creates long periods (stepped) + short period (last 20% of seq_len)
+                    - "full": Uses full sequence length window
+            seq_len: Sequence length for period window calculation and model architecture (default: None).
+                    This parameter controls both data generation (feature extraction window) and model architecture.
+                    If None, will be extracted from model_config.seq_len (for backward compatibility) or 
+                    model_config.input_shape[0] if available. Otherwise defaults to 240.
+                    Note: For TimesNet and other models, seq_len should be set here, not in model_config.
             **model_args: Additional model arguments (e.g., use_nlp, nlp_method, kernel_size)
         """
-        if data_source is None:
-            raise ValueError("data_source is required for TrainerConfig. Please specify a DataSource instance (e.g., YFinanceDataSource()).")
-        
         self.stocks = stocks
         self.time_args = time_args
         self.batch_size = batch_size
@@ -262,16 +137,13 @@ class TrainerConfig:
         # Period type for feature extraction
         self.period_type = period_type
         
-        # Lookback: Days of historical data used for feature extraction
-        # If not provided, defaults to 240
-        self.lookback = lookback if lookback is not None else 240
-        
-        # Data source: Required parameter
-        self.data_source = data_source
+        # Sequence length for period window calculation
+        # If not provided, will be extracted from model_config if available, otherwise defaults to 240
+        self.seq_len = seq_len
         
         # Extract common model args for convenience
-        self.use_nlp = model_args.get("use_nlp", True)  # Default to True
-        self.nlp_method = model_args.get("nlp_method", "aggregated")  # Default to aggregated
+        self.use_nlp = model_args.get("use_nlp", False)
+        self.nlp_method = model_args.get("nlp_method", None)
     
     def to_dict(self):
         """Convert config to dictionary for easy inspection."""
@@ -291,75 +163,12 @@ class TrainerConfig:
             'early_stop_patience': self.early_stop_patience,
             'early_stop_min_delta': self.early_stop_min_delta,
             'period_type': self.period_type,
-            'lookback': self.lookback,
-            'data_source': type(self.data_source).__name__ if self.data_source else None,
+            'seq_len': self.seq_len,
         }
     
     def __repr__(self):
         """String representation of config."""
         return f"TrainerConfig(model_type={self.model_type}, batch_size={self.batch_size}, num_epochs={self.num_epochs})"
-
-########################################################
-# validation helper functions
-########################################################
-
-def validate_trainer_config(config):
-    """
-    Validate that config is an instance of TrainerConfig.
-    
-    Args:
-        config: Config object to validate
-    
-    Returns:
-        bool: True if valid
-    
-    Raises:
-        TypeError: If config is not an instance of TrainerConfig
-    """
-    if not isinstance(config, TrainerConfig):
-        raise TypeError(
-            f"config must be an instance of TrainerConfig, got {type(config).__name__}. "
-            f"Please create a TrainerConfig object and pass it to Trainer."
-        )
-    return True
-
-def validate_model_config(model_config, model_type, expected_config_class):
-    """
-    Validate that model_config matches the expected model type.
-    
-    Args:
-        model_config: Model configuration object
-        model_type: Expected model type string
-        expected_config_class: Expected config class
-    
-    Returns:
-        bool: True if valid
-    
-    Raises:
-        ValueError: If model_config is missing or doesn't match model_type
-    """
-    if expected_config_class is None:
-        from models import get_available_models
-        available_models = get_available_models()
-        raise ValueError(
-            f"Unknown model type: {model_type}. "
-            f"Available models: {', '.join(available_models) if available_models else 'None registered'}"
-        )
-    
-    if model_config is None:
-        raise ValueError(
-            f"model_config is required for model type '{model_type}'. "
-            f"Please create a {expected_config_class.__name__} instance and pass it to TrainerConfig."
-        )
-    
-    if not isinstance(model_config, expected_config_class):
-        raise ValueError(
-            f"Config type mismatch: model_type='{model_type}' requires {expected_config_class.__name__}, "
-            f"but got {type(model_config).__name__}. "
-            f"Please create a {expected_config_class.__name__} instance and pass it to TrainerConfig."
-        )
-    
-    return True
 
 def setup_dist():
     if not torch.cuda.is_available() or os.getenv("RANK") is None:
@@ -478,52 +287,32 @@ class Trainer():
         """
         Initialize Trainer.
         
-        Users must create a TrainerConfig object (with a model config object inside it)
-        and pass it to the Trainer.
-        
-        Example workflow:
-            1. Create model config:
-               from models.configs import LSTMConfig
-               model_config = LSTMConfig(parameters={'hidden_size': 64, ...})
-            
-            2. Create trainer config:
-               trainer_config = TrainerConfig(
-                   stocks=["AAPL", "MSFT"],
-                   model_type="LSTM",
-                   model_config=model_config,
-                   ...
-               )
-            
-            3. Create trainer:
-               trainer = Trainer(config=trainer_config)
-        
         Args:
             config: TrainerConfig instance containing all training parameters.
-                    The TrainerConfig must contain a model_config that matches the model_type.
             
         Raises:
             TypeError: If config is not an instance of TrainerConfig.
-            ValueError: If model_config is missing or doesn't match the model_type.
         """
-        validate_trainer_config(config)
+        if not isinstance(config, TrainerConfig):
+            raise TypeError("config must be an instance of TrainerConfig")
         
         self.config = config
         
         # Extract parameters from config
-        self.stocks = config.stocks
-        self.time_args = config.time_args
-        self.batch_size = config.batch_size
-        self.num_epochs = config.num_epochs
-        self.saved_model = config.saved_model
-        self.prediction_type = config.prediction_type
-        self.k = config.k
-        self.cost_bps_per_side = config.cost_bps_per_side
-        self.save_every_epochs = config.save_every_epochs
-        self.model_type = config.model_type
-        self.model_config = config.model_config
-        self.model_args = config.model_args.copy() if config.model_args else {}
-        self.use_nlp = config.use_nlp
-        self.nlp_method = config.nlp_method
+        stocks = config.stocks
+        time_args = config.time_args
+        batch_size = config.batch_size
+        num_epochs = config.num_epochs
+        saved_model = config.saved_model
+        prediction_type = config.prediction_type
+        k = config.k
+        cost_bps_per_side = config.cost_bps_per_side
+        save_every_epochs = config.save_every_epochs
+        model_type = config.model_type
+        model_config = config.model_config
+        model_args = config.model_args.copy() if config.model_args else {}
+        use_nlp = config.use_nlp
+        nlp_method = config.nlp_method
         
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
@@ -531,6 +320,18 @@ class Trainer():
         self.world_size = dist.get_world_size() if self.is_dist else 1
         self.is_main = (self.rank == 0)
 
+        self.stocks = stocks    
+        self.time_args = time_args
+        self.batch_size = batch_size
+        self.num_epochs = num_epochs  # Number of training epochs
+        self.prediction_type = prediction_type
+        self.k = k  # Number of top/bottom positions for long-short portfolio
+        self.cost_bps_per_side = cost_bps_per_side  # Transaction costs per side in basis points
+        self.model_type = model_type  # Store model_type for later use
+        self.model_config = model_config  # Store model-specific config (e.g., TimesNet config)
+        self.model_args = model_args  # Store model_args for later use
+        self.use_nlp = use_nlp
+        self.nlp_method = nlp_method
         # Only rank 0 creates TensorBoard writer
         self.writer = SummaryWriter() if self.is_main else None
 
@@ -544,22 +345,30 @@ class Trainer():
         self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.use_amp)
         
 
-        # Set simple defaults for DataLoader workers
-        # Use 0 workers on macOS/MPS to avoid multiprocessing import issues
-        if self.device.type == "mps":
-            self.num_workers = 0
-            self.persistent_workers = False
-        else:
-            self.num_workers = 1
-            self.persistent_workers = True  # Use persistent workers when num_workers > 0
-        self.pin_memory = True if self.device.type == "cuda" else False  # Pin memory for CUDA
-        
-        # Create loader_args dict for DataLoader
-        self.loader_args = {
-            "num_workers": self.num_workers,
-            "persistent_workers": self.persistent_workers,
-            "pin_memory": self.pin_memory,
-        }
+        self.num_workers = 0
+        # =========================
+        # RECOMMENDED WORKERS HERE
+        # =========================
+        # Choose an I/O profile for your pipeline (edit as needed)
+        io_profile = "medium"   # {"light","medium","heavy"}
+
+        # Get heuristic kwargs for DataLoader based on device + SLURM CPU budget
+        loader_args = dataloader_kwargs(self.device, io=io_profile)
+
+        # Save to instance attributes for consistency + logging
+        #self.num_workers        = loader_args["num_workers"]
+        self.num_workers        = 1
+        self.persistent_workers = loader_args["persistent_workers"]
+        self.pin_memory         = loader_args["pin_memory"]
+
+        # Update loader_args with the overridden num_workers value
+        loader_args["num_workers"] = self.num_workers
+        loader_args["persistent_workers"] = bool(self.num_workers)
+
+        # DataLoader doesn't accept None for prefetch_factor, so strip it if absent
+        if loader_args.get("prefetch_factor", None) is None:
+            loader_args.pop("prefetch_factor", None)
+        self.loader_args = loader_args
 
         # Only rank 0 prints info
         if self.is_main:
@@ -572,41 +381,65 @@ class Trainer():
                 print("[mps] Apple Metal Performance Shaders backend")
             print(f"[dataloader] num_workers={self.num_workers}, persistent_workers={self.persistent_workers}, pin_memory={self.pin_memory}")
 
-        # Extract lookback for data loading: days of historical data used for feature extraction
-        lookback = self.config.lookback  # Days of historical data window
+        # Extract seq_len early for data loading: prioritize TrainerConfig.seq_len
+        # Note: seq_len is primarily a TrainerConfig parameter (controls data generation)
+        # For backward compatibility, we allow fallback to model_config.seq_len or input_shape
+        seq_len_for_data = self.config.seq_len  # Start with TrainerConfig.seq_len (primary source)
+        if seq_len_for_data is None and self.model_config is not None:
+            # Fallback: check model_config.seq_len (for backward compatibility)
+            if hasattr(self.model_config, 'seq_len'):
+                seq_len_for_data = self.model_config.seq_len
+            elif hasattr(self.model_config, 'input_shape') and isinstance(self.model_config.input_shape, tuple):
+                seq_len_for_data = self.model_config.input_shape[0]
+        if seq_len_for_data is None:
+            seq_len_for_data = 240  # Default sequence length
 
-        # Data loading: use util.get_data which handles cache checking, problematic stock filtering,
-        # downloading, and processing. In distributed mode, only rank 0 downloads/processes.
-        # Use data source from config
-        data_source = self.config.data_source
-        
+        # data - distributed loading: only rank 0 downloads/processes, all ranks load from cache
+        # Optimized flow:
+        # Step 1: Check cache first with full stock list (if exact match exists, use it - saves all time!)
+        # Step 2: Load saved problematic stocks for this time period (if exists)
+        # Step 3: Remove problematic stocks from input set
+        # Step 4: Check cache with filtered stocks
+        # Step 5: If cache doesn't exist, download data (which will save problematic stocks)
+        # Step 6: Process and save data
         if self.is_dist:
-            # Distributed mode: rank 0 downloads/processes, other ranks load from cache
+            # Only rank 0 processes data
             if self.is_main:
-                # Rank 0: get_data handles everything (cache check, filtering, download, processing)
+
                 input_data = util.get_data(
-                    self.stocks, self.time_args, 
-                    seq_len=lookback,  # util.get_data uses seq_len parameter name for backward compatibility
-                    data_source=data_source,
+                    self.stocks, self.time_args, data_dir="data", 
                     prediction_type=self.prediction_type, 
                     use_nlp=self.use_nlp, 
                     nlp_method=self.nlp_method, 
-                    period_type=self.config.period_type
+                    period_type=self.config.period_type,
+                    seq_len=seq_len_for_data
                 )
             
             # Synchronize - ensure rank 0 finishes downloading/processing before others proceed
             dist.barrier()
             
-            # Other ranks: load from cache (load_data_from_cache already filters problematic stocks)
+            # Now all ranks load from cache (they need to filter the same way to get the same cache key)
             if not self.is_main:
+                # Step 2: Load saved problematic stocks (same as rank 0)
+                problematic_stocks_saved = util._load_problematic_stocks(time_args, data_dir="data")
+                
+                # Step 3: Remove problematic stocks from input set (same as rank 0)
+                if problematic_stocks_saved:
+                    valid_stocks = [stock for stock in stocks if stock not in problematic_stocks_saved]
+                else:
+                    valid_stocks = stocks
+                
+                if len(valid_stocks) == 0:
+                    raise RuntimeError("No valid stocks found after filtering problematic stocks.")
+                
+                # Step 4: Load from cache with filtered stocks
                 input_data = util.load_data_from_cache(
-                    self.stocks, self.time_args, 
+                    valid_stocks, time_args, data_dir="data", 
                     prediction_type=self.prediction_type, 
                     use_nlp=self.use_nlp, 
                     nlp_method=self.nlp_method,
                     period_type=self.config.period_type,
-                    seq_len=lookback,  # util.get_data uses seq_len parameter name for backward compatibility
-                    data_source=data_source
+                    seq_len=seq_len_for_data
                 )
                 if input_data is None:
                     raise RuntimeError(f"Cache files not found after rank 0 processing. Expected cache should exist.")
@@ -614,34 +447,119 @@ class Trainer():
             # Synchronize again - ensure all ranks have loaded data
             dist.barrier()
         else:
-            # Non-distributed: get_data handles everything (cache check, filtering, download, processing)
-            input_data = util.get_data(
-                self.stocks, self.time_args, 
-                seq_len=lookback,  # util.get_data uses seq_len parameter name for backward compatibility
-                data_source=data_source,
+            # Non-distributed: optimized flow
+            # Step 1: Check cache first with full stock list
+            input_data = util.load_data_from_cache(
+                stocks, time_args, data_dir="data", 
                 prediction_type=self.prediction_type, 
                 use_nlp=self.use_nlp, 
-                nlp_method=self.nlp_method, 
-                period_type=self.config.period_type
+                nlp_method=self.nlp_method,
+                period_type=self.config.period_type,
+                seq_len=seq_len_for_data
             )
+            
+            if input_data is None:
+                # Step 2: Load saved problematic stocks for this time period
+                problematic_stocks_saved = util._load_problematic_stocks(time_args, data_dir="data")
+                
+                # Step 3: Remove problematic stocks from input set
+                if problematic_stocks_saved:
+                    valid_stocks = [stock for stock in stocks if stock not in problematic_stocks_saved]
+                    print(f"[data] Loaded {len(problematic_stocks_saved)} previously identified problematic stocks for this time period")
+                    print(f"[data] Filtered input: {len(stocks)} -> {len(valid_stocks)} stocks")
+                else:
+                    valid_stocks = stocks
+                
+                if len(valid_stocks) == 0:
+                    raise RuntimeError("No valid stocks found after filtering problematic stocks.")
+                
+                # Step 4: Check cache with filtered stocks
+                input_data = util.load_data_from_cache(
+                    valid_stocks, time_args, data_dir="data", 
+                    prediction_type=self.prediction_type, 
+                    use_nlp=self.use_nlp, 
+                    nlp_method=self.nlp_method,
+                    period_type=self.config.period_type,
+                    seq_len=seq_len_for_data
+                )
+                
+                if input_data is None:
+                    # Step 5: Download data (will save problematic stocks for future runs)
+                    print("[data] Cache not found, downloading data...")
+                    open_close, failed_stocks_dict = util.handle_yfinance_errors(valid_stocks, time_args, max_retries=1)
+                    
+                    if open_close is None:
+                        raise RuntimeError("ERROR: Failed to download any stock data. Cannot proceed.")
+                    
+                    # Calculate problematic stocks from this download (new problematic stocks found in valid_stocks)
+                    new_problematic = [stock for stock in valid_stocks if stock not in open_close["Open"].columns]
+                    # Combine with previously known problematic stocks
+                    all_problematic = list(problematic_stocks_saved) + new_problematic if problematic_stocks_saved else new_problematic
+                    
+                    # Step 6: Process and save data (get_data will save problematic stocks)
+                    print("[data] Processing downloaded data and saving to cache...")
+                    input_data = util.get_data(
+                        valid_stocks, time_args, data_dir="data", 
+                        prediction_type=self.prediction_type, 
+                        open_close_data=open_close, 
+                        problematic_stocks=all_problematic if all_problematic else None, 
+                        use_nlp=self.use_nlp, 
+                        nlp_method=self.nlp_method, 
+                        period_type=self.config.period_type,
+                        seq_len=seq_len_for_data
+                    )
+                    if isinstance(input_data, int):
+                        raise RuntimeError("Error getting data from util.get_data()")
+                else:
+                    print("[data] Found cache for filtered stocks")
+            else:
+                print("[data] Loaded from cache")
         
-        # Unpack data tuple (12 elements: X_train, X_val, X_test, Y_train, Y_val, Y_test, 
-        # D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test)
-        X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test = input_data
+        # Handle multiple data formats:
+        # - 10 elements: old format (no S&P 500, no Returns)
+        # - 11 elements: format with S&P 500 but no Returns
+        # - 12 elements: new format with S&P 500 and Returns
+        if len(input_data) == 10:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test = input_data
+            Returns_test = None  # Old format doesn't have Returns
+            Sp500_test = None  # Old format doesn't have S&P 500
+        elif len(input_data) == 11:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Sp500_test = input_data
+            Returns_test = None  # Format doesn't have Returns
+        elif len(input_data) == 12:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test = input_data
+        else:
+            raise ValueError(f"Unexpected number of elements in input_data: {len(input_data)}. Expected 10, 11, or 12 elements.")
         
-        # Determine input_shape from actual data dimensions
+        # Validate data shapes immediately after loading
+        # Expected data format:
+        #   X_train, X_val, X_test: numpy arrays with shape (num_samples, sequence_length, num_features)
+        #     - num_samples: number of examples in the dataset
+        #     - sequence_length: number of timesteps per sample (varies by period_type)
+        #       * When period_type="full": sequence_length = seq_len (all consecutive days [0, 1, 2, ..., seq_len-1])
+        #       * When period_type="LS": sequence_length < seq_len (sampled timesteps only, no gap filling)
+        #         The LS scheme samples timesteps as:
+        #         - Short term: last int(seq_len/12)+1 consecutive days
+        #         - Long term: remaining days sampled with stride int(seq_len/12), starting from 2*int(seq_len/12)
+        #         Total is fewer than seq_len (only sampled points, gaps are NOT filled)
+        #     - num_features: number of features per timestep
+        #       * 3 base features (ir, cpr, opr) if use_nlp=False
+        #       * 3 base + NLP features if use_nlp=True (3 + 10 for aggregated, 3 + 4 for individual)
+        #   Y_train, Y_val, Y_test: numpy arrays with shape (num_samples,) for classification
+        #   D_train, D_val, D_test: arrays of dates corresponding to each sample
         if self.is_main:
             print(f"[data] Data loaded successfully")
-            seq_len = X_train.shape[1] if hasattr(X_train, 'shape') and len(X_train) > 0 else 0
+            actual_seq_len_train = X_train.shape[1] if hasattr(X_train, 'shape') else len(X_train[0]) if len(X_train) > 0 else 0
             print(f"  X_train shape: {X_train.shape if hasattr(X_train, 'shape') else f'list with {len(X_train)} samples'}")
             print(f"  X_val shape: {X_val.shape if hasattr(X_val, 'shape') else f'list with {len(X_val)} samples'}")
             print(f"  X_test shape: {X_test.shape if hasattr(X_test, 'shape') else f'list with {len(X_test)} samples'}")
             if self.config.period_type == "full":
-                print(f"  Lookback: {lookback} days, Sequence length (seq_len): {seq_len} timesteps")
-                print(f"  Period type: full (all consecutive days from lookback window)")
+                print(f"  Expected X shape: (num_samples, seq_len={seq_len_for_data}, num_features)")
+                print(f"  Period type: full (all consecutive days)")
             else:
-                print(f"  Lookback: {lookback} days, Sequence length (seq_len): {seq_len} timesteps (sampled)")
-                print(f"  Period type: LS (sampled timesteps from lookback window)")
+                print(f"  Expected X shape: (num_samples, <seq_len={seq_len_for_data}, num_features) - sampled timesteps only")
+                print(f"  Actual sequence length: {actual_seq_len_train}")
+                print(f"  Period type: LS (sampled timesteps, no gap filling)")
         
         # Store dates for later reference (even when data is shuffled)
         self.train_dates = D_train
@@ -657,6 +575,17 @@ class Trainer():
         self.val_sampler   = DistributedSampler(val_ds,   shuffle=False, drop_last=False) if self.is_dist else None
         self.test_sampler   = DistributedSampler(test_ds,   shuffle=False, drop_last=False) if self.is_dist else None
 
+        # (Optional) quick autotune once; uncomment if you want to probe
+        #tuned = autotune_num_workers(self.train_ds, self.batch_size, self.device, candidates=(0,1,2,4,8))
+        #print(f"[dataloader] autotuned num_workers={tuned}")
+        #self.num_workers = tuned
+        #self.persistent_workers = bool(tuned)
+        ## Update loader_args with tuned values, handling prefetch_factor correctly
+        #self.loader_args.update(num_workers=tuned, persistent_workers=bool(tuned))
+        #if tuned == 0:
+        #    self.loader_args.pop("prefetch_factor", None)
+        #else:
+        #    self.loader_args["prefetch_factor"] = 2
 
         # =========================
         # BUILD DATALOADERS (use heuristics)
@@ -708,28 +637,104 @@ class Trainer():
         # =========================
         # MODEL
         # =========================
+        # seq_len_for_data was already extracted earlier for data loading
         # Determine input_shape from actual data dimensions
+        # Expected data shape: (num_samples, sequence_length, num_features)
+        #   - num_samples: number of training examples
+        #   - sequence_length: number of timesteps per sample (varies by period_type)
+        #     * When period_type="full": sequence_length = seq_len (all consecutive days [0, 1, 2, ..., seq_len-1])
+        #     * When period_type="LS": sequence_length < seq_len (sampled timesteps only, no gap filling)
+        #       The LS scheme samples timesteps as:
+        #       - Short term: last int(seq_len/12)+1 consecutive days
+        #       - Long term: remaining days sampled with stride int(seq_len/12), starting from 2*int(seq_len/12)
+        #       Total is fewer than seq_len (only sampled points, gaps are NOT filled)
+        #   - num_features: number of features per timestep (3 base features + NLP features if enabled)
         try:
             if len(X_train) > 0:
-                actual_features = X_train.shape[2]
-                seq_len = X_train.shape[1]  # Actual model input timesteps
-                input_shape = (seq_len, actual_features)
+                # Get actual data shape: (batch, sequence_length, features)
+                if hasattr(X_train, 'shape'):
+                    if len(X_train.shape) != 3:
+                        if self.is_main:
+                            print(f"[WARNING] Expected X_train to be 3D array with shape (num_samples, sequence_length, num_features), "
+                                  f"but got shape {X_train.shape} with {len(X_train.shape)} dimensions.")
+                        # Try to continue anyway
+                        actual_num_samples = X_train.shape[0] if len(X_train.shape) > 0 else len(X_train)
+                        actual_seq_length = X_train.shape[1] if len(X_train.shape) > 1 else 1
+                        actual_features = X_train.shape[2] if len(X_train.shape) > 2 else X_train.shape[-1] if len(X_train.shape) > 0 else 1
+                    else:
+                        actual_num_samples = X_train.shape[0]
+                        actual_seq_length = X_train.shape[1]  # Sequence length dimension
+                        actual_features = X_train.shape[2]     # Feature dimension
+                else:
+                    # Fallback for list/array inputs
+                    sample = np.array(X_train[0])
+                    if len(sample.shape) != 2:
+                        if self.is_main:
+                            print(f"[WARNING] Expected each sample in X_train to be 2D array with shape (sequence_length, num_features), "
+                                  f"but got shape {sample.shape} with {len(sample.shape)} dimensions.")
+                        # Try to continue anyway
+                        actual_num_samples = len(X_train)
+                        actual_seq_length = sample.shape[0] if len(sample.shape) > 0 else 1
+                        actual_features = sample.shape[1] if len(sample.shape) > 1 else sample.shape[0] if len(sample.shape) > 0 else 1
+                    else:
+                        actual_num_samples = len(X_train)
+                        actual_seq_length = sample.shape[0]
+                        actual_features = sample.shape[1]
+                
+                # Determine expected feature count based on NLP usage
+                if self.use_nlp:
+                    if self.nlp_method == None:
+                        raise ValueError("nlp_method must be provided if use_nlp is True")
+                    nlp_dim = get_nlp_feature_dim(self.nlp_method)
+                    expected_features = 3 + nlp_dim
+                else:
+                    expected_features = 3
+                
+                # Check feature dimension and warn if mismatch
+                if actual_features != expected_features:
+                    if self.is_main:
+                        warning_msg = (
+                            f"[WARNING] Data feature dimension mismatch!\n"
+                            f"  Expected: {expected_features} features ({'3 base + ' + str(nlp_dim) + ' NLP' if self.use_nlp else '3 base only'})\n"
+                            f"  Actual: {actual_features} features\n"
+                        )
+                        if self.use_nlp:
+                            warning_msg += f"  This likely means the cache was created without NLP features. Consider deleting the cache and regenerating with use_nlp=True."
+                        else:
+                            warning_msg += f"  This likely means the cache was created with NLP features. Consider deleting the cache or setting use_nlp=True."
+                        print(warning_msg)
+                
+                # Check sequence length and warn if mismatch
+                if actual_seq_length != seq_len_for_data:
+                    if self.is_main:
+                        expected_seq_len = seq_len_for_data if self.config.period_type == "full" else f"<{seq_len_for_data} (sampled)"
+                        print(
+                            f"[WARNING] Data sequence length ({actual_seq_length}) differs from config seq_len ({seq_len_for_data}). "
+                            f"Expected: {expected_seq_len} for period_type='{self.config.period_type}'. "
+                            f"Using actual data shape."
+                        )
+                
+                # Use actual data shape for input_shape (ensures consistency)
+                input_shape = (actual_seq_length, actual_features)
                 
                 if self.is_main:
-                    print(f"[config] Determined input_shape from data: {input_shape} (seq_len={seq_len}, features={actual_features})")
+                    print(f"[config] Data shape validation:")
+                    print(f"  X_train shape: ({actual_num_samples}, {actual_seq_length}, {actual_features})")
+                    print(f"  Expected shape: (num_samples, {seq_len_for_data}, {expected_features})")
+                    print(f"  ✓ Feature dimension matches: {actual_features} == {expected_features}")
+                    print(f"  {'✓' if actual_seq_length == seq_len_for_data else '⚠️'} Sequence length: {actual_seq_length} {'==' if actual_seq_length == seq_len_for_data else '!='} {seq_len_for_data}")
+                    print(f"[config] Determined input_shape from data: {input_shape} (seq_len={actual_seq_length}, features={actual_features})")
             else:
                 # Fallback if no data available (shouldn't happen, but handle gracefully)
-                # Estimate seq_len based on period_type
-                if self.config.period_type == "full":
-                    estimated_seq_len = lookback
+                if self.use_nlp:
+                    if self.nlp_method == None:
+                        raise ValueError("nlp_method must be provided if use_nlp is True")
+                    nlp_dim = get_nlp_feature_dim(self.nlp_method)
+                    input_shape = (seq_len_for_data, 3 + nlp_dim)
                 else:
-                    # For LS, estimate ~31 timesteps from 240-day lookback
-                    estimated_seq_len = int(lookback / 12) + 1 + 10  # Approximate LS sampling
-                
-                estimated_features = 3 + (get_nlp_feature_dim(self.nlp_method) if self.use_nlp and self.nlp_method else 0)
-                input_shape = (estimated_seq_len, estimated_features)
+                    input_shape = (seq_len_for_data, 3)
                 if self.is_main:
-                    print(f"[config] No data available, using estimated input_shape: {input_shape} (lookback={lookback}, estimated_seq_len={estimated_seq_len})")
+                    print(f"[config] No data available, using default input_shape: {input_shape} (based on seq_len={seq_len_for_data})")
         except Exception as e:
             print(f"[ERROR] Failed to determine input_shape: {e}")
             return None
@@ -738,65 +743,95 @@ class Trainer():
         # Create appropriate ModelConfig class instance based on model_type
         final_model_config = self._create_model_config(input_shape)
         
-        # Initialize model using registry system
-        try:
-            self.Model = create_model(self.model_type, final_model_config).to(self.device)
+        # Initialize models with model_config only
+        if self.model_type.upper() == "LSTM":
+            self.Model = LSTMModel(model_config=final_model_config).to(self.device)
+        elif self.model_type.upper() == "CNNLSTM":
+            self.Model = CNNLSTMModel(model_config=final_model_config).to(self.device)
+        elif self.model_type.upper() == "AELSTM":
+            self.Model = AELSTM(model_config=final_model_config).to(self.device)
+        elif self.model_type.upper() == "CNNAELSTM":
+            self.Model = CNNAELSTM(model_config=final_model_config).to(self.device)
+        elif self.model_type.upper() == "TIMESNET":
+            # TimesNet requires special handling - import from Time-Series-Library
+            import sys
+            import os
             
-            # Handle TimesNet-specific encoder freezing if requested
-            if self.model_type.upper() == "TIMESNET":
-                freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
-                if freeze_encoder:
-                    # Freeze encoder components: enc_embedding, model (TimesBlock layers), and layer_norm
-                    # Keep projection (classifier head) trainable
-                    model_to_freeze = self.Model.module if hasattr(self.Model, 'module') else self.Model
-                    if hasattr(model_to_freeze, 'timesnet'):
-                        # If using adapter, access the underlying TimesNet model
-                        timesnet_model = model_to_freeze.timesnet
-                    else:
-                        timesnet_model = model_to_freeze
-                    
-                    if hasattr(timesnet_model, 'enc_embedding'):
-                        for param in timesnet_model.enc_embedding.parameters():
-                            param.requires_grad = False
-                    if hasattr(timesnet_model, 'model'):
-                        for param in timesnet_model.model.parameters():
-                            param.requires_grad = False
-                    if hasattr(timesnet_model, 'layer_norm'):
-                        for param in timesnet_model.layer_norm.parameters():
-                            param.requires_grad = False
-                    
-                    # Ensure projection remains trainable
-                    if hasattr(timesnet_model, 'projection'):
-                        for param in timesnet_model.projection.parameters():
-                            param.requires_grad = True
+            # Add Time-Series-Library to path if not already there
+            cwd = os.getcwd()
+            if 'logan-version' in cwd:
+                project_root = os.path.dirname(cwd)
+            else:
+                project_root = cwd
+            
+            timeseries_lib_path = os.path.join(project_root, 'Time-Series-Library')
+            if timeseries_lib_path not in sys.path:
+                sys.path.insert(0, timeseries_lib_path)
+            
+            from models.TimesNet import Model as TimesNetModel
+            
+            # TimesNet expects config object with specific attributes
+            # Create config dict from final_model_config
+            timesnet_config_dict = {}
+            for attr in dir(final_model_config):
+                if not attr.startswith('_'):
+                    try:
+                        value = getattr(final_model_config, attr)
+                        if not callable(value):
+                            timesnet_config_dict[attr] = value
+                    except:
+                        pass
+            
+            # Ensure required TimesNet config attributes are present
+            if 'task_name' not in timesnet_config_dict:
+                timesnet_config_dict['task_name'] = 'classification'
+            if 'pred_len' not in timesnet_config_dict or timesnet_config_dict['pred_len'] is None:
+                timesnet_config_dict['pred_len'] = 0
+            if 'label_len' not in timesnet_config_dict or timesnet_config_dict['label_len'] is None:
+                timesnet_config_dict['label_len'] = 0
+            
+            # Create config namespace for TimesNet
+            from types import SimpleNamespace
+            timesnet_config = SimpleNamespace(**timesnet_config_dict)
+            
+            # Initialize TimesNet model
+            self.Model = TimesNetModel(timesnet_config).to(self.device)
+            
+            # Handle encoder freezing if requested
+            freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
+            if freeze_encoder:
+                # Freeze encoder components: enc_embedding, model (TimesBlock layers), and layer_norm
+                # Keep projection (classifier head) trainable
+                if hasattr(self.Model, 'enc_embedding'):
+                    for param in self.Model.enc_embedding.parameters():
+                        param.requires_grad = False
+                if hasattr(self.Model, 'model'):
+                    for param in self.Model.model.parameters():
+                        param.requires_grad = False
+                if hasattr(self.Model, 'layer_norm'):
+                    for param in self.Model.layer_norm.parameters():
+                        param.requires_grad = False
+                
+                # Ensure projection remains trainable
+                if hasattr(self.Model, 'projection'):
+                    for param in self.Model.projection.parameters():
+                        param.requires_grad = True
                 
                 if self.is_main:
-                    print(f"[TimesNet] Model initialized with config:")
-                    if hasattr(final_model_config, 'lookback'):
-                        print(f"  lookback: {final_model_config.lookback} days")
-                    if hasattr(final_model_config, 'seq_len'):
-                        print(f"  seq_len: {final_model_config.seq_len} timesteps")
-                    if hasattr(final_model_config, 'enc_in'):
-                        print(f"  enc_in: {final_model_config.enc_in}")
-                    if hasattr(final_model_config, 'num_class'):
-                        print(f"  num_class: {final_model_config.num_class}")
-                    if hasattr(final_model_config, 'd_model'):
-                        print(f"  d_model: {final_model_config.d_model}")
-                    print(f"  freeze_encoder: {freeze_encoder}")
-        except ValueError as e:
-            # Provide helpful error message with available models
-            available_models = get_available_models()
-            if available_models:
-                available_str = ", ".join(available_models)
-                raise ValueError(
-                    f"Failed to create model '{self.model_type}': {e}\n"
-                    f"Available models: {available_str}"
-                )
-            else:
-                raise ValueError(
-                    f"Failed to create model '{self.model_type}': {e}\n"
-                    f"No models are currently registered. Make sure model modules are imported."
-                )
+                    # Count frozen and trainable parameters
+                    frozen_params = sum(p.numel() for p in self.Model.parameters() if not p.requires_grad)
+                    trainable_params = sum(p.numel() for p in self.Model.parameters() if p.requires_grad)
+                    print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
+            
+            if self.is_main:
+                print(f"[TimesNet] Model initialized with config:")
+                print(f"  seq_len: {timesnet_config.seq_len}")
+                print(f"  enc_in: {timesnet_config.enc_in}")
+                print(f"  num_class: {timesnet_config.num_class}")
+                print(f"  d_model: {timesnet_config.d_model}")
+                print(f"  freeze_encoder: {freeze_encoder}")
+        else:
+            raise ValueError(f"Invalid model type: {self.model_type.upper()}")
         
         # Wrap with DDP if in distributed mode
         if self.is_dist:
@@ -809,75 +844,28 @@ class Trainer():
             if self.is_main:
                 print(f"[DataParallel] using {torch.cuda.device_count()} GPUs")
 
-        # Count and print parameters after wrapping (for consistency)
         if self.is_main:
-            # Get unwrapped model for accurate parameter counting
-            model_to_count = self.Model.module if hasattr(self.Model, 'module') else self.Model
-            
-            # Count total parameters
-            total_params = sum(param.numel() for param in model_to_count.parameters())
-            print(f"{total_params:,} total parameters")
-            
-            # If TimesNet with frozen encoder, show detailed breakdown
-            if self.model_type.upper() == "TIMESNET":
-                freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
-                if freeze_encoder:
-                    # Access the underlying TimesNet model
-                    if hasattr(model_to_count, 'timesnet'):
-                        timesnet_model = model_to_count.timesnet
-                    else:
-                        timesnet_model = model_to_count
-                    
-                    # Count frozen and trainable parameters
-                    frozen_params = sum(p.numel() for p in model_to_count.parameters() if not p.requires_grad)
-                    trainable_params = sum(p.numel() for p in model_to_count.parameters() if p.requires_grad)
-                    print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
+            print("{} total parameters".format(sum(param.numel() for param in self.Model.parameters())))
         
-        # Determine the save path for the model using unique ID system
-        # First check if a model exists with matching config
-        existing_model_path = None
+        # Determine the save path for the model
+        # If saved_model is provided, use it for both loading and saving
+        # Otherwise, default to "savedmodel.pth"
+        if self.config.saved_model is not None:
+            self.save_path = self.config.saved_model
+        else:
+            self.save_path = "savedmodel.pth"
         
         if self.config.saved_model is not None:
-            # User explicitly provided a path - use it (legacy behavior)
-            self.save_path = self.config.saved_model
             if os.path.exists(self.config.saved_model):
-                existing_model_path = self.config.saved_model
-        else:
-            # Use unique ID system: check if model exists with matching config
-            model_id, existing_model_path = util.find_model_by_config(self.config.model_config)
-            
-            if existing_model_path is not None:
-                # Found matching model - use its ID-based path
-                self.save_path = existing_model_path
+                state_dict = torch.load(self.config.saved_model, map_location="cpu")
+                # Load into underlying module if DataParallel/DDP is active
+                target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
+                target_module.load_state_dict(state_dict)
                 if self.is_main:
-                    print(f"[model] Found existing model with matching config (ID: {model_id})")
-                    print(f"[model] Using model path: {self.save_path}")
+                    print(f"[load] restored weights from {self.config.saved_model}")
             else:
-                # No matching model found - generate new ID and create new path
-                model_id = util._get_model_id(self.config.model_config)
-                # Ensure models directory exists
-                os.makedirs(util.MODELS_DIR, exist_ok=True)
-                self.save_path = os.path.join(util.MODELS_DIR, f"{model_id}.pth")
                 if self.is_main:
-                    print(f"[model] No matching model found, creating new model (ID: {model_id})")
-                    print(f"[model] Model will be saved to: {self.save_path}")
-                # Save mapping for new model
-                util._save_model_mapping(model_id, self.config.model_config)
-        
-        # Load model weights if file exists
-        if existing_model_path is not None and os.path.exists(existing_model_path):
-            state_dict = torch.load(existing_model_path, map_location="cpu")
-            # Load into underlying module if DataParallel/DDP is active
-            target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
-            target_module.load_state_dict(state_dict)
-            if self.is_main:
-                print(f"[load] Restored weights from {existing_model_path}")
-        else:
-            if self.is_main:
-                if self.config.saved_model is not None:
                     print(f"[load] No saved model found at {self.config.saved_model}, starting with random weights")
-                else:
-                    print(f"[load] Starting training with random weights (new model)")
 
         # Use a lower learning rate to prevent instability
         # Even lower learning rate for more stability
@@ -917,49 +905,150 @@ class Trainer():
     
     def _create_model_config(self, input_shape):
         """
-        Validate that the provided config object matches the model type.
+        Create appropriate ModelConfig instance based on model_type.
         
-        The user must create the config object themselves and provide it to TrainerConfig.
-        This method validates that the config type matches the model type and updates
-        input_shape, seq_len, and lookback from TrainerConfig/data.
+        Priority order:
+        1. If self.model_config is already a ModelConfig instance, use it (but update input_shape)
+        2. If self.model_config is provided (SimpleNamespace or dict-like), extract values
+        3. Extract from model_args
+        4. Use defaults
         
         Args:
-            input_shape (tuple): Input shape determined from data (seq_len, num_features)
+            input_shape (tuple): Input shape determined from data
             
         Returns:
-            BaseModelConfig instance (the provided config with updated attributes):
-            - input_shape: (seq_len, num_features) - actual model input dimensions
-            - seq_len: number of timesteps fed to model (from data)
-            - lookback: days of historical data used for feature extraction (from TrainerConfig)
-            
-        Raises:
-            ValueError: If config is not provided or doesn't match the model type
+            ModelConfig instance appropriate for the model type
         """
         model_type_upper = self.model_type.upper()
         
-        # Get expected config class from registry
-        expected_config_class = ModelRegistry.get_config_class(model_type_upper)
+        # Special handling for TimesNet - it uses custom config, not ModelConfig classes
+        if model_type_upper == "TIMESNET":
+            # For TimesNet, use the provided model_config directly
+            if self.model_config is None:
+                raise ValueError("TimesNet requires model_config to be provided with TimesNet-specific parameters")
+            
+            # Create a copy of the config and ensure input_shape is set
+            from types import SimpleNamespace
+            if isinstance(self.model_config, SimpleNamespace):
+                # Create a new SimpleNamespace with all attributes
+                final_config = SimpleNamespace()
+                for attr in dir(self.model_config):
+                    if not attr.startswith('_'):
+                        try:
+                            value = getattr(self.model_config, attr)
+                            if not callable(value):
+                                setattr(final_config, attr, value)
+                        except:
+                            pass
+            else:
+                # If it's already a dict-like or other object, use it directly
+                final_config = self.model_config
+            
+            # seq_len comes from TrainerConfig, not model_config
+            # Use TrainerConfig.seq_len (which was already extracted as seq_len_for_data)
+            # This ensures consistency: data generation and model architecture use the same seq_len
+            seq_len_from_trainer = self.config.seq_len
+            if seq_len_from_trainer is None:
+                # Fallback to input_shape if TrainerConfig.seq_len not set
+                seq_len_from_trainer = input_shape[0]
+                if self.is_main:
+                    print(f"[config] TrainerConfig.seq_len not set, using data shape: {input_shape[0]}")
+            
+            # Set seq_len from TrainerConfig (this is the source of truth)
+            final_config.seq_len = seq_len_from_trainer
+            
+            # Warn if seq_len doesn't match data shape (but use TrainerConfig value)
+            if input_shape[0] != seq_len_from_trainer:
+                if self.is_main:
+                    print(f"[config] ⚠️  Warning: TrainerConfig.seq_len ({seq_len_from_trainer}) differs from data sequence length ({input_shape[0]}). Using TrainerConfig value.")
+            
+            # Remove seq_len from model_config if it was set there (to avoid confusion)
+            # We've already set it from TrainerConfig above
+            if hasattr(final_config, 'seq_len') and hasattr(self.model_config, 'seq_len'):
+                if self.model_config.seq_len != seq_len_from_trainer:
+                    if self.is_main:
+                        print(f"[config] Note: Overriding model_config.seq_len ({self.model_config.seq_len}) with TrainerConfig.seq_len ({seq_len_from_trainer})")
+            
+            # Set input_shape for reference (actual data shape)
+            final_config.input_shape = input_shape
+            
+            # Ensure freeze_encoder parameter exists (default to False if not provided)
+            if not hasattr(final_config, 'freeze_encoder'):
+                final_config.freeze_encoder = False
+            
+            return final_config
         
-        # Validate model config using helper function
-        validate_model_config(self.model_config, self.model_type, expected_config_class)
+        # Determine which config class to use for standard models
+        config_class_map = {
+            "LSTM": LSTMConfig,
+            "CNNLSTM": CNNLSTMConfig,
+            "AELSTM": AELSTMConfig,
+            "CNNAELSTM": CNNAELSTMConfig,
+        }
         
-        # Config is valid - use it and update attributes from TrainerConfig/data
-        final_config = self.model_config
+        if model_type_upper not in config_class_map:
+            raise ValueError(f"Unknown model type: {self.model_type}")
         
-        # Extract values
-        seq_len = input_shape[0]  # Actual model input timesteps (from data)
-        lookback = self.config.lookback  # Historical data window (from TrainerConfig)
+        config_class = config_class_map[model_type_upper]
         
-        # Update input_shape and attributes (these come from TrainerConfig/data, not user config)
-        if hasattr(final_config, 'parameters'):
-            final_config.parameters['input_shape'] = input_shape
-            final_config.parameters['seq_len'] = seq_len
-            final_config.parameters['lookback'] = lookback
+        # Start with defaults - get default values from config class
+        default_config = config_class(input_shape=input_shape)
+        config_dict = default_config.to_dict()
         
-        # Always set as attributes for easy access
-        final_config.input_shape = input_shape  # (seq_len, num_features)
-        final_config.seq_len = seq_len  # Actual model input timesteps
-        final_config.lookback = lookback  # Historical data window
+        # Override with model_args if present
+        if self.model_args:
+            for key in config_dict.keys():
+                if key in self.model_args and key != 'input_shape':
+                    config_dict[key] = self.model_args[key]
+        
+        # Override with self.model_config if provided (highest priority)
+        if self.model_config is not None:
+            # If it's already a ModelConfig instance, use its attributes
+            if isinstance(self.model_config, ModelConfig):
+                for key in config_dict.keys():
+                    if hasattr(self.model_config, key):
+                        config_dict[key] = getattr(self.model_config, key)
+                # Copy any additional attributes (for custom configs like TimesNet)
+                for attr in dir(self.model_config):
+                    if not attr.startswith('_') and attr not in config_dict:
+                        try:
+                            value = getattr(self.model_config, attr)
+                            if not callable(value):
+                                config_dict[attr] = value
+                        except:
+                            pass
+            else:
+                # It's a SimpleNamespace or dict-like object
+                for key in config_dict.keys():
+                    if hasattr(self.model_config, key):
+                        config_dict[key] = getattr(self.model_config, key)
+                # Copy any additional attributes
+                for attr in dir(self.model_config):
+                    if not attr.startswith('_') and attr not in config_dict:
+                        try:
+                            value = getattr(self.model_config, attr)
+                            if not callable(value):
+                                config_dict[attr] = value
+                        except:
+                            pass
+        
+        # Always use the input_shape determined from data
+        config_dict['input_shape'] = input_shape
+        
+        # Create config instance
+        final_config = config_class(**config_dict)
+        
+        # Copy any extra attributes that aren't in the config class signature
+        # (useful for custom configs like TimesNet)
+        if self.model_config is not None:
+            for attr in dir(self.model_config):
+                if not attr.startswith('_') and not hasattr(final_config, attr):
+                    try:
+                        value = getattr(self.model_config, attr)
+                        if not callable(value):
+                            setattr(final_config, attr, value)
+                    except:
+                        pass
         
         return final_config
     
@@ -1046,13 +1135,6 @@ class Trainer():
         stop_condition=None
         train_batches_processed = 0  # Track actual batches processed (excluding skipped NaN batches)
         
-        # Collect predictions and targets for metrics computation
-        train_predictions = []
-        train_targets = []
-        
-        # Track gradient norms for diagnostics (only on main rank)
-        grad_norms = [] if self.is_main else None
-        
         # Count NaN/Inf occurrences in training
         train_nan_x_batch = 0
         train_nan_y_batch = 0
@@ -1123,10 +1205,7 @@ class Trainer():
                 self.scaler.scale(loss).backward()
                 # Gradient clipping
                 self.scaler.unscale_(self.optimizer)
-                # Compute gradient norm before clipping (for diagnostics)
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
-                if self.is_main:
-                    grad_norms.append(grad_norm.item())
+                torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 
@@ -1185,10 +1264,7 @@ class Trainer():
                     continue
                 loss.backward()
                 # Gradient clipping
-                # Compute gradient norm before clipping (for diagnostics)
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
-                if self.is_main:
-                    grad_norms.append(grad_norm.item())
+                torch.nn.utils.clip_grad_norm_(self.Model.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 
                 # Check for NaN in model weights after optimizer step
@@ -1215,12 +1291,6 @@ class Trainer():
 
             train_loss += loss.item()
             train_batches_processed += 1
-            
-            # Collect predictions and targets for metrics (only on main rank to avoid duplication)
-            if self.is_main:
-                # Detach and convert to numpy for metrics computation
-                train_predictions.append(Y_pred.detach().cpu().numpy().flatten())
-                train_targets.append(Y_batch.detach().cpu().numpy().flatten())
             
             if self.is_main:
                 pbar.set_postfix(avg_train=train_loss/(train_batches_processed or 1))
@@ -1264,10 +1334,6 @@ class Trainer():
         self.Model.eval()
         val_batches_processed = 0  # Track actual batches processed (excluding skipped NaN batches)
         
-        # Collect predictions and targets for metrics computation
-        val_predictions = []
-        val_targets = []
-        
         # Count NaN/Inf occurrences in validation
         val_nan_x_batch = 0
         val_nan_y_batch = 0
@@ -1310,13 +1376,6 @@ class Trainer():
                     continue
                 val_loss += loss.item()
                 val_batches_processed += 1
-                
-                # Collect predictions and targets for metrics (only on main rank)
-                if self.is_main:
-                    # Detach and convert to numpy for metrics computation
-                    val_predictions.append(Y_pred.detach().cpu().numpy().flatten())
-                    val_targets.append(Y_batch.detach().cpu().numpy().flatten())
-                
                 if self.is_main:
                     vbar.set_postfix(avg_val=val_loss/(val_batches_processed or 1))
             
@@ -1376,41 +1435,10 @@ class Trainer():
 
         end_time = time.perf_counter()
         
-        # Compute metrics if we have predictions and targets
-        train_metrics = {}
-        val_metrics = {}
-        if self.is_main and len(train_predictions) > 0 and len(train_targets) > 0:
-            try:
-                train_pred_array = np.concatenate(train_predictions)
-                train_target_array = np.concatenate(train_targets)
-                train_metrics = _compute_basic_metrics(train_pred_array, train_target_array)
-                train_dir_metrics = _compute_directional_metrics(train_pred_array, train_target_array)
-                train_metrics.update(train_dir_metrics)
-            except Exception as e:
-                if self.is_main:
-                    print(f"[WARNING] Failed to compute training metrics: {e}")
-        
-        if self.is_main and len(val_predictions) > 0 and len(val_targets) > 0:
-            try:
-                val_pred_array = np.concatenate(val_predictions)
-                val_target_array = np.concatenate(val_targets)
-                val_metrics = _compute_basic_metrics(val_pred_array, val_target_array)
-                val_dir_metrics = _compute_directional_metrics(val_pred_array, val_target_array)
-                val_metrics.update(val_dir_metrics)
-            except Exception as e:
-                if self.is_main:
-                    print(f"[WARNING] Failed to compute validation metrics: {e}")
-        
         # Only rank 0 prints and logs
         if self.is_main:
             print("Training Loss: {}".format(avg_train))
             print("Validation Loss: {}".format(avg_val))
-            if train_metrics:
-                print("Training Metrics - Accuracy: {:.2f}%, Directional Accuracy: {:.2f}%".format(
-                    train_metrics.get('accuracy', 0), train_metrics.get('directional_accuracy', 0)))
-            if val_metrics:
-                print("Validation Metrics - Accuracy: {:.2f}%, Directional Accuracy: {:.2f}%".format(
-                    val_metrics.get('accuracy', 0), val_metrics.get('directional_accuracy', 0)))
             print("Training Time: {:.6f}s".format(end_time-start_time))
             
             # Print NaN/Inf statistics
@@ -1439,38 +1467,6 @@ class Trainer():
                 self.writer.add_scalar('Loss/train', avg_train, epoch+1)
                 self.writer.add_scalars('Loss/trainVSvalidation', {"Training":(avg_train), "Validation":(avg_val)}, epoch+1)
                 self.writer.add_scalar('Train Time', (end_time-start_time), epoch+1)
-                
-                # Log learning rate
-                current_lr = self.optimizer.param_groups[0]['lr']
-                self.writer.add_scalar('Learning Rate', current_lr, epoch+1)
-                
-                # Log metrics
-                if train_metrics:
-                    self.writer.add_scalar('Metrics/Train/Accuracy', train_metrics.get('accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Train/DirectionalAccuracy', train_metrics.get('directional_accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Train/UpwardAccuracy', train_metrics.get('upward_accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Train/DownwardAccuracy', train_metrics.get('downward_accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Train/RMSE', train_metrics.get('rmse', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Train/MAE', train_metrics.get('mae', 0), epoch+1)
-                
-                if val_metrics:
-                    self.writer.add_scalar('Metrics/Val/Accuracy', val_metrics.get('accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Val/DirectionalAccuracy', val_metrics.get('directional_accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Val/UpwardAccuracy', val_metrics.get('upward_accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Val/DownwardAccuracy', val_metrics.get('downward_accuracy', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Val/RMSE', val_metrics.get('rmse', 0), epoch+1)
-                    self.writer.add_scalar('Metrics/Val/MAE', val_metrics.get('mae', 0), epoch+1)
-                
-                # Log batch statistics
-                self.writer.add_scalar('Batches/Train/Processed', train_batches_processed, epoch+1)
-                self.writer.add_scalar('Batches/Val/Processed', val_batches_processed, epoch+1)
-                
-                # Log gradient norm statistics
-                if grad_norms and len(grad_norms) > 0:
-                    self.writer.add_scalar('Gradients/Norm/Mean', np.mean(grad_norms), epoch+1)
-                    self.writer.add_scalar('Gradients/Norm/Max', np.max(grad_norms), epoch+1)
-                    self.writer.add_scalar('Gradients/Norm/Min', np.min(grad_norms), epoch+1)
-                
                 self.writer.flush()
         
         # Periodic save regardless of validation loss improvement
@@ -2443,16 +2439,15 @@ class Trainer():
         
         return avg_test_loss
 
-    def load_separate_datasets(self, stocks, time_args):
+    def load_separate_datasets(self, stocks, time_args, data_dir="data"):
         """
         Load train, validation, and test datasets from separate .npz files.
         This method can be used to explicitly load separate datasets.
         """
         # Use load_data_from_cache which handles separate .npz files
-        # Use default seq_len=240 (lookback window) for backward compatibility
-        input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method, seq_len=self.config.lookback, data_source=self.config.data_source)
+        input_data = util.load_data_from_cache(stocks, time_args, data_dir=data_dir, prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method)
         if input_data is None:
-            raise RuntimeError(f"Could not load separate datasets from cache in {util.DATA_DIR}. Data may need to be downloaded first.")
+            raise RuntimeError(f"Could not load separate datasets from cache in {data_dir}. Data may need to be downloaded first.")
         return input_data
 
     def stop(self):

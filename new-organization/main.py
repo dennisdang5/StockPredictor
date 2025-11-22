@@ -63,7 +63,8 @@ class ModelTrainingConfig:
             lookback: Days of historical data used for feature extraction
             use_nlp: Whether to use NLP features
             nlp_method: NLP method ("aggregated" or "individual") if use_nlp=True
-            saved_model: Path to saved model to load (optional)
+            saved_model: Path to saved model to load (optional). If None, uses unique ID system
+                         to find/create model based on config (saves to trained_models/models/{model_id}.pth)
             save_every_epochs: Save model every N epochs
             early_stop_patience: Early stopping patience
             early_stop_min_delta: Early stopping minimum delta
@@ -246,17 +247,19 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
     }
     
     try:
-        # Auto-generate save path if not provided
-        if config.saved_model is None:
-            # Create unique save path based on model name
-            config.saved_model = f"savedmodel_{config.name}.pth"
-            print(f"[save] Auto-generated save path: {config.saved_model}")
-        
         # Create trainer config
+        # If saved_model is None, trainer will use unique ID system to find/create model
         trainer_config = config.create_trainer_config()
         
         # Create trainer
+        # Trainer will automatically:
+        # - Check for existing model with matching config
+        # - Use existing model if found, or create new one with unique ID
+        # - Save to trained_models/models/{model_id}.pth
         trainer = Trainer(config=trainer_config)
+        
+        # Get the actual save path from trainer (set by unique ID system)
+        actual_save_path = trainer.save_path
         
         # Train: run training loop
         # Trainer uses train_one_epoch which handles early stopping internally
@@ -272,11 +275,11 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
         
         result['success'] = True
         result['training_time'] = time.time() - start_time
-        result['saved_model'] = config.saved_model  # Include save path in results
+        result['saved_model'] = actual_save_path  # Include actual save path from trainer
         
         print(f"\n✓ Successfully trained {config.name}")
         print(f"  Training time: {result['training_time']:.2f} seconds")
-        print(f"  Model saved to: {config.saved_model}")
+        print(f"  Model saved to: {actual_save_path}")
         
     except Exception as e:
         result['success'] = False

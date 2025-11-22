@@ -49,6 +49,7 @@ from models.configs import (
     TimesNetConfig,
 )
 import util
+from data_sources import YFinanceDataSource
 
 
 class ModelEvaluator:
@@ -190,15 +191,20 @@ class ModelEvaluator:
         # Load data using the same method as training
         # Try cache first, then download if needed
         # Use default seq_len=240 for backward compatibility
+        # Create data source (explicitly specify YFinanceDataSource)
+        data_source = YFinanceDataSource()
+        
         input_data = util.load_data_from_cache(
             self.stocks, self.time_args, 
             prediction_type="classification", use_nlp=self.use_nlp, nlp_method=self.nlp_method,
-            seq_len=240
+            seq_len=240,
+            data_source=data_source
         )
         if input_data is None:
             input_data = util.get_data(
                 self.stocks, self.time_args, 
                 seq_len=240,  # Required parameter - use default for backward compatibility
+                data_source=data_source,
                 prediction_type="classification", use_nlp=self.use_nlp, nlp_method=self.nlp_method
             )
         if isinstance(input_data, int):
