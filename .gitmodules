@@ -1,0 +1,3 @@
+[submodule "new-organization/data_sources/FNSPID_Financial_News_Dataset"]
+	path = new-organization/data_sources/FNSPID_Financial_News_Dataset
+	url = git@github.com:Zdong104/FNSPID_Financial_News_Dataset.git

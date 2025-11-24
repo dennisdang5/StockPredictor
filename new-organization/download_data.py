@@ -23,6 +23,25 @@ from data_sources import YFinanceDataSource
 # Configuration Variables - Edit these to customize the download
 # ============================================================================
 
+"""
+STOCKS = [
+# Top Technology & Growth
+"AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
+
+# Major Financial Services
+"JPM", "BAC", "V", "MA", "WFC", "GS", "BLK", "AXP",
+
+# Healthcare Leaders
+"JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO",
+
+# Consumer & Retail Giants
+"WMT", "PG", "HD", "COST", "MCD", "NKE",
+
+# Industrial & Energy Leaders
+"BA", "CAT", "XOM", "CVX"
+]
+"""
+
 # Stock tickers to download
 STOCKS = [
 # Communication Services
@@ -59,6 +78,8 @@ STOCKS = [
 "AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE", "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW", "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
 ]
 
+
+
 # Time range arguments
 # Option 1: Date range (start and end dates)
 TIME_ARGS = ["1990-01-01", "2015-12-31"]
@@ -77,7 +98,7 @@ PREDICTION_TYPE = "classification"
 
 # NLP options
 USE_NLP = True  # Set to True to include NLP features
-NLP_METHOD = "individual"  # "aggregated" (NYT headlines) or "individual" (yfinance per stock)
+NLP_METHOD = "aggregated"  # "aggregated" (NYT headlines) or "individual" (yfinance per stock)
 
 # Cache options
 FORCE = True  # Set to True to force re-download even if cache exists

@@ -55,3 +55,13 @@ class AELSTM(BaseModel):
         x = self.AE(x)
         x = self.LSTM(x)
         return x
+
+    @classmethod
+    def from_config(cls, model_config):
+        """Factory hook so the registry can instantiate the model."""
+        return cls(model_config)
+
+
+# Register the model with the central registry
+from ..registry import ModelRegistry
+ModelRegistry.register("AELSTM", lambda config: AELSTM(config), AELSTMConfig)

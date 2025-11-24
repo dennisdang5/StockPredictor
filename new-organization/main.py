@@ -8,17 +8,93 @@ Each model configuration consists of a model config and a trainer config.
 import os
 import time
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 
 from trainer import Trainer, TrainerConfig
 from models.configs import (
-    LSTMConfig, 
-    CNNLSTMConfig, 
-    AELSTMConfig, 
-    CNNAELSTMConfig, 
-    TimesNetConfig
+    LSTMConfig,
+    AELSTMConfig,
+    TimesNetConfig,
+    TabPFNConfig,
+    PortfolioConfig,
 )
 from models import get_available_models
+from data_sources import YFinanceDataSource
+
+# Full stock universe (mirrors STOCKS in download_data.py)
+LARGE_STOCKS = [
+    # Communication Services
+    "GOOGL", "GOOG", "T", "CHTR", "CMCSA", "EA", "FOXA", "FOX", "IPG", "LYV", "MTCH",
+    "META", "NFLX", "NWSA", "NWS", "OMC", "PSKY", "TMUS", "TTWO", "TKO", "TTD", "VZ",
+    "DIS", "WBD",
+
+    # Consumer Discretionary
+    "ABNB", "AMZN", "APTV", "AZO", "BBY", "BKNG", "CZR", "KMX", "CCL", "CMG", "DRI",
+    "DECK", "DPZ", "DASH", "DHI", "EBAY", "EXPE", "F", "GRMN", "GM", "GPC", "HAS",
+    "HLT", "HD", "LVS", "LEN", "LKQ", "LOW", "LULU", "MAR", "MCD", "MGM", "MHK",
+    "NKE", "NCLH", "NVR", "ORLY", "POOL", "PHM", "RL", "ROST", "RCL", "SBUX", "TPR",
+    "TSLA", "TJX", "TSCO", "ULTA", "WSM", "WYNN", "YUM",
+
+    # Consumer Staples
+    "MO", "ADM", "BF.B", "BG", "CPB", "CHD", "CLX", "KO", "CL", "CAG", "STZ", "COST",
+    "DG", "DLTR", "EL", "GIS", "HSY", "HRL", "K", "KVUE", "KDP", "KMB", "KHC", "KR",
+    "LW", "MKC", "TAP", "MDLZ", "MNST", "PEP", "PM", "PG", "SJM", "SYY", "TGT", "TSN",
+    "WBA", "WMT",
+
+    # Energy
+    "APA", "BKR", "CVX", "COP", "CTRA", "DVN", "FANG", "EOG", "EQT", "EXE", "XOM",
+    "HAL", "KMI", "MPC", "OXY", "OKE", "PSX", "SLB", "TRGP", "TPL", "VLO", "WMB",
+
+    # Financials
+    "AFL", "ALL", "AXP", "AIG", "AMP", "AON", "APO", "ACGL", "AJG", "AIZ", "BAC",
+    "BRK.B", "BLK", "BX", "XYZ", "BK", "BRO", "COF", "CBOE", "SCHW", "CB", "CINF",
+    "C", "CFG", "CME", "COIN", "CPAY", "ERIE", "EG", "FDS", "FIS", "FITB", "FI",
+    "BEN", "GPN", "GL", "GS", "HIG", "HBAN", "ICE", "IVZ", "JKHY", "JPM", "KEY",
+    "KKR", "L", "MTB", "MKTX", "MMC", "MA", "MET", "MCO", "MS", "MSCI", "NDAQ",
+    "NTRS", "PYPL", "PNC", "PFG", "PGR", "PRU", "RJF", "RF", "SPGI", "STT", "SYF",
+    "TROW", "TRV", "TFC", "USB", "V", "WRB", "WFC", "WTW",
+
+    # Healthcare
+    "ABT", "ABBV", "A", "ALGN", "AMGN", "BAX", "BDX", "TECH", "BIIB", "BSX", "BMY",
+    "CAH", "COR", "CNC", "CRL", "CI", "COO", "CVS", "DHR", "DVA", "DXCM", "EW", "ELV",
+    "GEHC", "GILD", "HCA", "HSIC", "HOLX", "HUM", "IDXX", "INCY", "PODD", "ISRG",
+    "IQV", "JNJ", "LH", "LLY", "MCK", "MDT", "MRK", "MTD", "MRNA", "MOH", "PFE",
+    "DGX", "REGN", "RMD", "RVTY", "SOLV", "STE", "SYK", "TMO", "UNH", "UHS", "VRTX",
+    "VTRS", "WAT", "WST", "ZBH", "ZTS",
+
+    # Industrials
+    "MMM", "AOS", "ALLE", "AME", "ADP", "AXON", "BA", "BR", "BLDR", "CHRW", "CARR",
+    "CAT", "CTAS", "CPRT", "CSX", "CMI", "DAY", "DE", "DAL", "DOV", "ETN", "EMR",
+    "EFX", "EXPD", "FAST", "FDX", "FTV", "GE", "GEV", "GNRC", "GD", "HON", "HWM",
+    "HUBB", "HII", "IEX", "ITW", "IR", "JBHT", "J", "JCI", "LHX", "LDOS", "LII", "LMT",
+    "MAS", "NDSN", "NSC", "NOC", "ODFL", "OTIS", "PCAR", "PH", "PAYX", "PAYC", "PNR",
+    "PWR", "RTX", "RSG", "ROK", "ROL", "SNA", "LUV", "SWK", "TXT", "TT", "TDG",
+    "UBER", "UNP", "UAL", "UPS", "URI", "VLTO", "VRSK", "GWW", "WAB", "WM", "XYL",
+
+    # Information Technology
+    "ACN", "ADBE", "AMD", "AKAM", "APH", "ADI", "AAPL", "AMAT", "ANET", "ADSK", "AVGO",
+    "CDNS", "CDW", "CSCO", "CTSH", "GLW", "CRWD", "DDOG", "DELL", "ENPH", "EPAM",
+    "FFIV", "FICO", "FSLR", "FTNT", "IT", "GEN", "GDDY", "HPE", "HPQ", "IBM", "INTC",
+    "INTU", "JBL", "KEYS", "KLAC", "LRCX", "MCHP", "MU", "MSFT", "MPWR", "MSI",
+    "NTAP", "NVDA", "NXPI", "ON", "ORCL", "PLTR", "PANW", "PTC", "QCOM", "ROP", "CRM",
+    "STX", "NOW", "SWKS", "SMCI", "SNPS", "TEL", "TDY", "TER", "TXN", "TRMB", "TYL",
+    "VRSN", "WDC", "WDAY", "ZBRA",
+
+    # Materials
+    "APD", "ALB", "AMCR", "AVY", "BALL", "CF", "CTVA", "DOW", "DD", "EMN", "ECL",
+    "FCX", "IFF", "IP", "LIN", "LYB", "MLM", "MOS", "NEM", "NUE", "PKG", "PPG", "SHW",
+    "SW", "STLD", "VMC",
+
+    # Real Estate
+    "ARE", "AMT", "AVB", "BXP", "CPT", "CBRE", "CSGP", "CCI", "DLR", "EQIX", "EQR",
+    "ESS", "EXR", "FRT", "DOC", "HST", "INVH", "IRM", "KIM", "MAA", "PLD", "PSA", "O",
+    "REG", "SBAC", "SPG", "UDR", "VTR", "VICI", "WELL", "WY",
+
+    # Utilities
+    "AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE",
+    "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW",
+    "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
+]
 
 
 class ModelTrainingConfig:
@@ -46,6 +122,9 @@ class ModelTrainingConfig:
         early_stop_min_delta: float = 0.001,
         k: int = 10,
         cost_bps_per_side: float = 5.0,
+        data_source: Optional[YFinanceDataSource] = None,
+        enabled: bool = True,
+        notes: Optional[str] = None,
         **kwargs
     ):
         """
@@ -70,6 +149,9 @@ class ModelTrainingConfig:
             early_stop_min_delta: Early stopping minimum delta
             k: Number of top/bottom positions for portfolio
             cost_bps_per_side: Transaction costs per side in basis points
+            data_source: Optional DataSource instance (defaults to YFinanceDataSource)
+            enabled: Toggle to include/exclude this config when training
+            notes: Optional string describing the intent/requirements for this config
             **kwargs: Additional arguments passed to TrainerConfig
         """
         self.name = name
@@ -89,6 +171,9 @@ class ModelTrainingConfig:
         self.early_stop_min_delta = early_stop_min_delta
         self.k = k
         self.cost_bps_per_side = cost_bps_per_side
+        self.data_source = data_source if data_source is not None else YFinanceDataSource()
+        self.enabled = enabled
+        self.notes = notes
         self.kwargs = kwargs
     
     def create_trainer_config(self) -> TrainerConfig:
@@ -110,6 +195,7 @@ class ModelTrainingConfig:
             early_stop_min_delta=self.early_stop_min_delta,
             k=self.k,
             cost_bps_per_side=self.cost_bps_per_side,
+            data_source=self.data_source,
             **self.kwargs
         )
 
@@ -122,91 +208,283 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     """
     configs = []
     
-    # Common stock list
-    common_stocks = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"]
-    common_time_args = ["2000-01-01", "2020-12-31"]
+    # Shared stock/time splits
+    stock_tiers = {
+        "large": list(LARGE_STOCKS),  # Full S&P-like universe from download_data
+        "base": [
+            # Core diversified basket (≈34 names) from download_data.py doc block
+            "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
+            "JPM", "BAC", "V", "MA", "WFC", "GS", "BLK", "AXP",
+            "JNJ", "UNH", "PFE", "ABBV", "MRK", "TMO",
+            "WMT", "PG", "HD", "COST", "MCD", "NKE",
+            "BA", "CAT", "XOM", "CVX"
+        ],
+        "small": [
+            # Growth-heavy subset between base and micro tiers
+            "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "NFLX", "AVGO", "ORCL"
+        ],
+        "micro": ["AAPL", "MSFT", "NVDA"]
+    }
+    large_stocks = stock_tiers["large"]
+    base_stocks = stock_tiers["base"]
+    small_stocks = stock_tiers["small"]
+    micro_stocks = stock_tiers["micro"]
     
-    # Example 1: Basic LSTM
-    lstm_config = LSTMConfig(parameters={
-        'input_shape': (31, 13),  # 3 base + 10 NLP features (aggregated method) - will be overridden by actual data
-        'hidden_size': 64,
-        'num_layers': 2,
+    short_history = ["1990-01-01", "1999-01-01"]
+    long_history = ["1990-01-01", "2015-12-31"]
+    
+    # ---------------------------------------------------------------------
+    # 1. Base LSTM (no NLP features)
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="lstm_base",
+        model_type="LSTM",
+        model_config=LSTMConfig(parameters={
+            'input_shape': (31, 3),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.2
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None
+    ))
+    
+    # ---------------------------------------------------------------------
+    # 2. Base LSTM + aggregated NLP
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="lstm_base_nlp",
+        model_type="LSTM",
+        model_config=LSTMConfig(parameters={
+            'input_shape': (31, 13),  # 3 price + 10 aggregated NLP features
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=48,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated"
+    ))
+    
+    # ---------------------------------------------------------------------
+    # 3. Base AELSTM (no NLP)
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="aelstm_base",
+        model_type="AELSTM",
+        model_config=AELSTMConfig(parameters={
+            'input_shape': (31, 3),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=48,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None
+    ))
+    
+    # ---------------------------------------------------------------------
+    # 4. Base AELSTM + aggregated NLP
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="aelstm_base_nlp",
+        model_type="AELSTM",
+        model_config=AELSTMConfig(parameters={
+            'input_shape': (31, 13),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=40,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated"
+    ))
+    
+    # ---------------------------------------------------------------------
+    # 4b. Large-tier LSTM reference (disabled by default due to size)
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="lstm_large_reference",
+        model_type="LSTM",
+        model_config=LSTMConfig(parameters={
+            'input_shape': (31, 13),
+            'hidden_size': 64,
+            'num_layers': 2,
+            'dropout': 0.2
+        }),
+        stocks=large_stocks,
+        time_args=short_history,
+        batch_size=32,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated",
+        enabled=False,
+        notes="Full universe (large tier) benchmark — enable when sufficient compute is available."
+    ))
+    
+    # ---------------------------------------------------------------------
+    # 5. TabFPN (TabPFN) + aggregated NLP (placeholder, disabled)
+    # ---------------------------------------------------------------------
+    tabfpn_note = (
+        "Per-stock TabPFN portfolio (client backend). Ensure per-stock rows stay below 50k."
+    )
+    configs.append(ModelTrainingConfig(
+        name="tabfpn_nlp_aggregated",
+        model_type="TabPFN",
+        model_config=TabPFNConfig(parameters={
+            'backend': 'client',
+            'max_samples': 50000,
+            'random_state': 42
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=2048,
+        num_epochs=2,  # TabPFN is non-iterative; this placeholder indicates a single fit
+        period_type="LS",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated",
+        enabled=True,
+        notes=tabfpn_note
+    ))
+    
+    # ---------------------------------------------------------------------
+    # 6. TabFPN + individual NLP on smaller dataset (placeholder, disabled)
+    # ---------------------------------------------------------------------
+    small_tabfpn_note = (
+        "TabPFN portfolio with individual NLP features. Keep per-stock samples <=50k rows."
+    )
+    configs.append(ModelTrainingConfig(
+        name="tabfpn_nlp_individual_small",
+        model_type="TabPFN",
+        model_config=TabPFNConfig(parameters={
+            'backend': 'client',
+            'max_samples': 50000,
+            'random_state': 42
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=2048,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated",
+        enabled=True,
+        notes=small_tabfpn_note
+    ))
+
+    # ---------------------------------------------------------------------
+    # 7. Portfolio architecture (independent per-stock LSTMs) - disabled
+    # ---------------------------------------------------------------------
+    shared_portfolio_base = LSTMConfig(parameters={
+        'input_shape': (31, 13),
+        'hidden_size': 48,
+        'num_layers': 1,
         'dropout': 0.1
     })
     configs.append(ModelTrainingConfig(
-        name="lstm_basic",
-        model_type="LSTM",
-        model_config=lstm_config,
-        stocks=common_stocks,
-        time_args=common_time_args,
-        batch_size=32,
-        num_epochs=100,
+        name="portfolio_lstm_independent",
+        model_type="Portfolio",
+        model_config=PortfolioConfig(parameters={
+            'stocks': micro_stocks,
+            'base_model_type': 'LSTM',
+            'base_model_config': shared_portfolio_base,
+            'strategy': 'independent',
+            'mlp_hidden_dims': [128, 64],
+            'embedding_dim': 32,
+            'use_stock_embeddings': True,
+            'dropout': 0.1,
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
         use_nlp=True,
-        nlp_method="aggregated"
+        nlp_method="aggregated",
+        enabled=False,
+        notes="Builds one LSTM backbone per stock and feeds their outputs into a shared MLP head."
+    ))
+
+    # ---------------------------------------------------------------------
+    # 8. Portfolio architecture (shared backbone + embeddings) - disabled
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="portfolio_lstm_shared",
+        model_type="Portfolio",
+        model_config=PortfolioConfig(parameters={
+            'stocks': micro_stocks,
+            'base_model_type': 'LSTM',
+            'base_model_config': shared_portfolio_base,
+            'strategy': 'shared',
+            'mlp_hidden_dims': [96, 48],
+            'embedding_dim': 24,
+            'use_stock_embeddings': True,
+            'dropout': 0.15,
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated",
+        enabled=False,
+        notes="Shared LSTM backbone across stocks with learnable embeddings before the MLP portfolio head."
     ))
     
-    # Example 2: CNN-LSTM with NLP (aggregated)
-    cnn_lstm_config = CNNLSTMConfig(parameters={
-        'input_shape': (31, 13),  # 3 base + 10 NLP features
-        'kernel_size': 3,
-        'hidden_size': 64,
-        'num_layers': 2,
-        'dropout': 0.2
-    })
+    # ---------------------------------------------------------------------
+    # 7. TimesNet + aggregated NLP on smaller dataset
+    # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="cnn_lstm_nlp_agg",
-        model_type="CNNLSTM",
-        model_config=cnn_lstm_config,
-        stocks=common_stocks,
-        time_args=common_time_args,
-        batch_size=32,
-        num_epochs=150,
-        use_nlp=True,
-        nlp_method="aggregated"
-    ))
-    
-    # Example 3: AutoEncoder-LSTM
-    ae_lstm_config = AELSTMConfig(parameters={
-        'input_shape': (31, 13),  # 3 base + 10 NLP features (aggregated method) - will be overridden by actual data
-        'hidden_size': 64,
-        'num_layers': 2,
-        'dropout': 0.15
-    })
-    configs.append(ModelTrainingConfig(
-        name="ae_lstm",
-        model_type="AELSTM",
-        model_config=ae_lstm_config,
-        stocks=common_stocks,
-        time_args=common_time_args,
-        batch_size=32,
-        num_epochs=150,
-        use_nlp=True,
-        nlp_method="aggregated"
-    ))
-    
-    # Example 4: TimesNet with full period
-    timesnet_config = TimesNetConfig(parameters={
-        'input_shape': (240, 13),  # Full period: all timesteps, 3 base + 10 NLP features (aggregated method)
-        'task_name': 'classification',
-        'enc_in': 13,  # 3 base + 10 NLP features (aggregated method)
-        'num_class': 2,
-        'd_model': 256,
-        'e_layers': 2,
-        'top_k': 5,
-        'num_kernels': 6,
-        'dropout': 0.1,
-        'embed': 'timeF',
-        'freq': 'd'
-    })
-    configs.append(ModelTrainingConfig(
-        name="timesnet_full",
+        name="timesnet_small_agg",
         model_type="TimesNet",
-        model_config=timesnet_config,
-        stocks=common_stocks[:3],  # Fewer stocks for TimesNet (more computationally intensive)
-        time_args=common_time_args,
-        batch_size=16,  # Smaller batch for full period
-        num_epochs=150,
-        period_type="full",  # Use all consecutive days
+        model_config=TimesNetConfig(parameters={
+            'input_shape': (240, 13),  # full window with NLP
+            'task_name': 'classification',
+            'enc_in': 13,
+            'num_class': 3,
+            'd_model': 256,
+            'd_ff': 1024,
+            'e_layers': 2,
+            'top_k': 5,
+            'num_kernels': 6,
+            'dropout': 0.1,
+            'embed': 'timeF',
+            'freq': 'd'
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=16,
+        num_epochs=2,
+        period_type="LS",
+        lookback=240,
         use_nlp=True,
         nlp_method="aggregated"
     ))
@@ -225,6 +503,9 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
     Returns:
         Dictionary with training results and metadata
     """
+    if not config.enabled:
+        raise ValueError(f"Config '{config.name}' is disabled. Enable it before training.")
+    
     print("\n" + "=" * 80)
     print(f"Training Model: {config.name}")
     print("=" * 80)
@@ -317,7 +598,12 @@ def train_all_models(
     print(f"\n{'=' * 80}")
     print(f"Starting Training Session")
     print(f"{'=' * 80}")
-    print(f"Total models to train: {len(configs)}")
+    enabled_count = sum(1 for cfg in configs if cfg.enabled)
+    skipped_count = len(configs) - enabled_count
+    print(f"Total models defined: {len(configs)}")
+    print(f"Models scheduled to train: {enabled_count}")
+    if skipped_count:
+        print(f"Models skipped (disabled): {skipped_count}")
     print(f"Log directory: {log_dir}")
     print(f"Continue on error: {continue_on_error}")
     print(f"{'=' * 80}\n")
@@ -326,7 +612,22 @@ def train_all_models(
     session_start = time.time()
     
     for i, config in enumerate(configs, 1):
-        print(f"\n[{i}/{len(configs)}] Processing: {config.name}")
+        status_prefix = "[SKIP]" if not config.enabled else "[RUN]"
+        print(f"\n[{i}/{len(configs)}] {status_prefix} {config.name}")
+        
+        if not config.enabled:
+            reason = config.notes or "Disabled via configuration"
+            print(f"  ↳ Skipping (disabled). Reason: {reason}")
+            results.append({
+                'name': config.name,
+                'model_type': config.model_type,
+                'success': None,
+                'error': None,
+                'training_time': None,
+                'skipped': True,
+                'reason': reason
+            })
+            continue
         
         try:
             result = train_model(config, log_dir)
@@ -353,15 +654,17 @@ def train_all_models(
     
     # Summary
     session_time = time.time() - session_start
-    successful = sum(1 for r in results if r['success'])
-    failed = len(results) - successful
+    successful = sum(1 for r in results if r.get('success'))
+    failed = sum(1 for r in results if r.get('success') is False)
+    skipped = sum(1 for r in results if r.get('skipped'))
     
     print(f"\n{'=' * 80}")
     print(f"Training Session Complete")
     print(f"{'=' * 80}")
-    print(f"Total models: {len(results)}")
+    print(f"Total processed: {len(results)}")
     print(f"Successful: {successful}")
     print(f"Failed: {failed}")
+    print(f"Skipped: {skipped}")
     print(f"Total time: {session_time:.2f} seconds ({session_time/60:.2f} minutes)")
     print(f"{'=' * 80}\n")
     
@@ -399,9 +702,22 @@ if __name__ == "__main__":
     
     print(f"Created {len(model_configs)} model configurations:")
     for cfg in model_configs:
-        print(f"  - {cfg.name} ({cfg.model_type})")
+        status = "enabled" if cfg.enabled else "disabled"
+        extra = f" | notes: {cfg.notes}" if cfg.notes else ""
+        print(f"  - {cfg.name} ({cfg.model_type}) [{status}]{extra}")
     print()
     
+    # Optionally override number of epochs for quick tests via env var
+    override_epochs = os.environ.get("QUICK_TEST_EPOCHS")
+    if override_epochs:
+        try:
+            override_epochs = int(override_epochs)
+            print(f"\n[quick-test] Overriding num_epochs to {override_epochs} for all configs\n")
+            for cfg in model_configs:
+                cfg.num_epochs = override_epochs
+        except ValueError:
+            print(f"[quick-test] Invalid QUICK_TEST_EPOCHS value: {override_epochs}. Ignoring override.")
+
     # Train all models
     results = train_all_models(
         configs=model_configs,
@@ -412,10 +728,13 @@ if __name__ == "__main__":
     # Print final summary
     print("\nFinal Results:")
     for result in results:
-        status = "✓" if result['success'] else "✗"
-        time_str = f"{result['training_time']:.2f}s" if result['training_time'] else "N/A"
+        if result.get('skipped'):
+            print(f"  - {result['name']}: skipped ({result.get('reason', 'disabled')})")
+            continue
+        status = "✓" if result.get('success') else "✗"
+        time_str = f"{result['training_time']:.2f}s" if result.get('training_time') else "N/A"
         print(f"  {status} {result['name']}: {time_str}")
-        if result['success'] and 'saved_model' in result:
+        if result.get('success') and result.get('saved_model'):
             print(f"    Saved to: {result['saved_model']}")
-        if not result['success']:
-            print(f"    Error: {result['error']}")
+        if not result.get('success'):
+            print(f"    Error: {result.get('error')}")

@@ -51,13 +51,21 @@ def _save_npz_progress(path: str, arrays: dict, desc="Saving dataset"):
             bar.update(1)
         bar.close()
 
-def _load_npz_progress(path: str, names: list, desc="Loading dataset"):
+def _load_npz_progress(path: str, names: list, desc="Loading dataset", optional_names=None):
     # Use numpy.load for correctness but show progress as we realize arrays.
+    optional_names = optional_names or []
+    total = len(names) + len(optional_names)
     with np.load(path, allow_pickle=False) as z:
         out = {}
-        bar = tqdm(total=len(names), desc=desc)
+        bar = tqdm(total=total, desc=desc)
         for n in names:
             out[n] = z[n]            # triggers decompression/read for that entry
+            bar.update(1)
+        for n in optional_names:
+            if n in z.files:
+                out[n] = z[n]
+            else:
+                out[n] = None
             bar.update(1)
         bar.close()
         return out
@@ -267,12 +275,12 @@ DEFAULT_MODELS_SUBDIR = "models"
 def get_default_models_dir():
     """
     Get the absolute path to the default models directory.
-    Returns: Absolute path to new-organization/trained_models/models/
+    Returns: Absolute path to StockPredictor/new-organization/trained_models/models/
     """
-    # Get directory where util.py is located (new-organization/)
-    util_dir = os.path.dirname(os.path.abspath(__file__))
+    util_dir = os.path.dirname(os.path.abspath(__file__))  # .../StockPredictor/new-organization
     models_base_dir = os.path.join(util_dir, DEFAULT_MODELS_DIR)
     models_subdir = os.path.join(models_base_dir, DEFAULT_MODELS_SUBDIR)
+    os.makedirs(models_subdir, exist_ok=True)
     return models_subdir
 
 # Compute models directory once at module load time
@@ -551,7 +559,7 @@ def fetch_stock_data(stocks, args, data_source: DataSource, max_retries=3):
     """
     return data_source.fetch_stock_data(stocks, args, max_retries)
 
-def get_data(stocks, args, seq_len, data_source: DataSource, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None, use_nlp=False, nlp_csv_paths=None, nlp_method="aggregated", period_type="LS"):
+def get_data(stocks, args, seq_len, data_source: DataSource, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None, use_nlp=False, nlp_csv_paths=None, nlp_method="aggregated", period_type="LS", return_stock_indices=False):
     """
     Return 12-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest, Rev_test, Returns_test, Sp500_test)
     Loads from .npz if present (and not force); otherwise builds from the provided data source,
@@ -609,7 +617,8 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
             use_nlp=use_nlp,
             nlp_method=nlp_method,
             period_type=period_type,
-            seq_len=seq_len
+            seq_len=seq_len,
+            return_stock_indices=return_stock_indices
         )
         if cached_data is not None:
             print(f"[cache] Loaded data from cache (prediction_type={prediction_type}, use_nlp={use_nlp}, nlp_method={nlp_method})")
@@ -641,7 +650,8 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
             use_nlp=use_nlp,
             nlp_method=nlp_method,
             period_type=period_type,
-            seq_len=seq_len
+            seq_len=seq_len,
+            return_stock_indices=return_stock_indices
         )
         if cached_data is not None:
             print(f"[cache] Loaded data from cache (filtered stocks)")
@@ -857,16 +867,22 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
             # Note: use_nlp might have been set to False during extraction, so this may not be reached
             actual_nlp_method = nlp_method
     
+    stock_indices = None
     if prediction_type == "classification":
-        xdata, ydata, dates, revenues, returns = get_feature_input_classification(
+        feature_result = get_feature_input_classification(
             op, cp, seq_len, op.shape[1], len(successfully_downloaded_stocks), date_index, 
             nlp_features=nlp_features_dict, use_nlp=use_nlp, nlp_method=actual_nlp_method, successfully_downloaded_stocks=successfully_downloaded_stocks, period_type=period_type,
-            normalize_nlp_separately=True, normalize_per_stock=False
+            normalize_nlp_separately=True, normalize_per_stock=False, return_stock_indices=return_stock_indices
         )
+        if return_stock_indices:
+            xdata, ydata, dates, revenues, returns, stock_indices = feature_result
+        else:
+            xdata, ydata, dates, revenues, returns = feature_result
     else:
         raise ValueError("Invalid prediction type - only 'classification' is supported")
     xdata = torch.from_numpy(xdata).to(torch.float32)  # (N, W, L, F) where N is number of samples
     ydata = torch.from_numpy(ydata).to(torch.float32)  # (N, 1)
+    stock_indices_np = stock_indices if stock_indices is not None else None
     
     print(f"[features] Extracted {len(xdata):,} samples")
 
@@ -1038,6 +1054,9 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
             return None
         # Flatten to (N*W, F) for statistics
         X_flat = X_split.reshape(-1, X_split.shape[-1])
+        # Convert to numpy if it's a torch tensor
+        if isinstance(X_flat, torch.Tensor):
+            X_flat = X_flat.detach().cpu().numpy()
         return {
             'mean': np.mean(X_flat, axis=0),
             'std': np.std(X_flat, axis=0),
@@ -1077,11 +1096,12 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         X = xdata[mask]
         Y = ydata[mask]
         D = [pd.Timestamp(d).to_pydatetime() for d in dates_np[mask]]
-        return X, Y, D
+        S = stock_indices_np[mask].tolist() if stock_indices_np is not None else None
+        return X, Y, D, S
 
-    Xtr_f, Ytr_f, Dtrain_f = _sel(train_mask)
-    Xva_f, Yva_f, Dvalidation_f = _sel(val_mask)
-    Xte_f, Yte_f, Dtest_f = _sel(test_mask)
+    Xtr_f, Ytr_f, Dtrain_f, Strain_f = _sel(train_mask)
+    Xva_f, Yva_f, Dvalidation_f, Sval_f = _sel(val_mask)
+    Xte_f, Yte_f, Dtest_f, Stest_f = _sel(test_mask)
     Rev_f = revenues[test_mask]
     Returns_f = returns[test_mask]
 
@@ -1119,25 +1139,34 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
     metrics_path = os.path.join(DATA_DIR, f"{data_id}_metrics.npz")
     
     # Save training dataset
-    _save_npz_progress(train_path, {
+    train_payload = {
         "X": _to_np(Xtr_f),
         "Y": _to_np(Ytr_f),
         "D": np.array(Dtrain_f, dtype="datetime64[ns]")
-    }, desc="Saving training dataset (.npz)")
+    }
+    if Strain_f is not None:
+        train_payload["S"] = np.array(Strain_f, dtype=np.int32)
+    _save_npz_progress(train_path, train_payload, desc="Saving training dataset (.npz)")
     
     # Save validation dataset
-    _save_npz_progress(val_path, {
+    val_payload = {
         "X": _to_np(Xva_f),
         "Y": _to_np(Yva_f),
         "D": np.array(Dvalidation_f, dtype="datetime64[ns]")
-    }, desc="Saving validation dataset (.npz)")
+    }
+    if Sval_f is not None:
+        val_payload["S"] = np.array(Sval_f, dtype=np.int32)
+    _save_npz_progress(val_path, val_payload, desc="Saving validation dataset (.npz)")
     
     # Save test dataset
-    _save_npz_progress(test_path, {
+    test_payload = {
         "X": _to_np(Xte_f),
         "Y": _to_np(Yte_f),
         "D": np.array(Dtest_f, dtype="datetime64[ns]")
-    }, desc="Saving test dataset (.npz)")
+    }
+    if Stest_f is not None:
+        test_payload["S"] = np.array(Stest_f, dtype=np.int32)
+    _save_npz_progress(test_path, test_payload, desc="Saving test dataset (.npz)")
 
     _save_npz_progress(metrics_path, {
         "Rev": _to_np(Rev_f),
@@ -1166,9 +1195,14 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         data_source_str=data_source_str
     )
     
-    return (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f, Returns_f, Sp500_f)
+    data_tuple = (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f, Returns_f, Sp500_f)
 
-def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type="classification", use_nlp=False, nlp_method="aggregated", period_type="LS", seq_len=240):
+    if return_stock_indices:
+        return data_tuple + (Strain_f, Sval_f, Stest_f, successfully_downloaded_stocks)
+    
+    return data_tuple
+
+def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type="classification", use_nlp=False, nlp_method="aggregated", period_type="LS", seq_len=240, return_stock_indices=False):
     """
     Load data from cache files if they exist.
     
@@ -1284,9 +1318,9 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
     metrics_path = os.path.join(DATA_DIR, f"{data_id}_metrics.npz")
     
     # Load from cache using the unique ID
-    train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)")
-    val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset (.npz)")
-    test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset (.npz)")
+    train_data = _load_npz_progress(train_path, ["X", "Y", "D"], desc="Loading training dataset (.npz)", optional_names=["S"])
+    val_data = _load_npz_progress(val_path, ["X", "Y", "D"], desc="Loading validation dataset (.npz)", optional_names=["S"])
+    test_data = _load_npz_progress(test_path, ["X", "Y", "D"], desc="Loading test dataset (.npz)", optional_names=["S"])
     
     # Validate that cached data has expected NLP features if NLP is requested
     if use_nlp:
@@ -1339,7 +1373,24 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
     Rev = metrics_data["Rev"]
     Returns = metrics_data.get("Returns", Rev)
     
-    return (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev, Returns, Sp500)
+    Str = train_data.get("S")
+    Sva = val_data.get("S")
+    Ste = test_data.get("S")
+    if Str is not None:
+        Str = [int(x) for x in Str.tolist()]
+    if Sva is not None:
+        Sva = [int(x) for x in Sva.tolist()]
+    if Ste is not None:
+        Ste = [int(x) for x in Ste.tolist()]
+    
+    if return_stock_indices and (Str is None or Sva is None or Ste is None):
+        print("[cache] Missing stock index metadata in cache. Regenerating dataset.")
+        return None
+    
+    result = (Xtr, Xva, Xte, Ytr, Yva, Yte, Dtr, Dva, Dte, Rev, Returns, Sp500)
+    if return_stock_indices:
+        return result + (Str, Sva, Ste, filtered_stocks)
+    return result
 
 def save_data_locally(stocks, args, seq_len, data_source: DataSource, force=False, prediction_type="classification"):
     """
@@ -1442,7 +1493,7 @@ def get_period(end_t, seq_len, mask_type="LS"):
 
 # op[x] is the op vector for stock x
 # op and cp has indices from time 0 to T_study-1
-def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, date_index, nlp_features=None, use_nlp=False, nlp_method=None, successfully_downloaded_stocks=None, period_type="LS", normalize_nlp_separately=True, normalize_per_stock=False):
+def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, date_index, nlp_features=None, use_nlp=False, nlp_method=None, successfully_downloaded_stocks=None, period_type="LS", normalize_nlp_separately=True, normalize_per_stock=False, return_stock_indices=False):
     """
     Get feature input for classification task.
     
@@ -1501,6 +1552,7 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
     
     print(f"[features] Step 1/2 complete. Step 2/2: Building feature windows (this may take several minutes)...")
     X_list, y_list, d_list, rev_list, return_list = [], [], [], [], []
+    stock_index_list = []
     # --- counters ---
     total_candidates = 0
     kept = 0
@@ -1657,6 +1709,8 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
             d_list.append(date_index[end_t])
             rev_list.append(rev)
             return_list.append(ret)
+            if return_stock_indices:
+                stock_index_list.append(n)
             kept += 1
     
     # Close progress bar
@@ -1677,6 +1731,10 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
     revenues = np.array(rev_list, dtype=float)
     returns = np.array(return_list, dtype=float)
 
+    if return_stock_indices:
+        stock_indices = np.array(stock_index_list, dtype=np.int32)
+        return X, y, dates, revenues, returns, stock_indices
+    
     return X, y, dates, revenues, returns
 
     """

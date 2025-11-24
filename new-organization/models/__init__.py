@@ -21,6 +21,8 @@ from .configs import (
     AELSTMConfig,
     CNNAELSTMConfig,
     TimesNetConfig,
+    TabPFNConfig,
+    PortfolioConfig,
 )
 
 # Import custom models (this triggers their @register_model decorators)
@@ -44,6 +46,8 @@ __all__ = [
     'AELSTMConfig',
     'CNNAELSTMConfig',
     'TimesNetConfig',
+    'TabPFNConfig',
+    'PortfolioConfig',
     # Convenience functions
     'get_available_models',
     'list_models',

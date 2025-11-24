@@ -182,3 +182,51 @@ class TimesNetConfig(BaseModelConfig):
         self.label_len = parameters.get('label_len', 0)
         self.c_out = parameters.get('c_out', 3)
         self.freeze_encoder = parameters.get('freeze_encoder', False)
+
+
+class TabPFNConfig(BaseModelConfig):
+    """
+    Lightweight configuration holder for TabPFN adapters.
+
+    Args:
+        backend (str): Which TabPFN backend to use ("client" or "local"). Default: "client"
+        max_samples (int): Safety limit for the number of tabular rows. Default: 50_000
+        random_state (int): Random seed passed to TabPFN estimators. Default: 42
+        model_params (dict): Extra keyword arguments forwarded to the underlying estimator.
+    """
+    def __init__(self, parameters=None):
+        super().__init__(parameters)
+        self.backend = parameters.get('backend', 'client')
+        self.max_samples = parameters.get('max_samples', 50_000)
+        self.random_state = parameters.get('random_state', 42)
+        self.model_params = parameters.get('model_params', {})
+
+
+class PortfolioConfig(BaseModelConfig):
+    """
+    Configuration container for PortfolioArchitecture.
+
+    Args:
+        stocks (list[str]): Ordered list of stock tickers represented in each batch.
+        base_model_type (str): Name of the single-stock model to instantiate (e.g., "TabPFN", "LSTM").
+        base_model_config (BaseModelConfig): Config object forwarded to each base model.
+        strategy (str): Composition strategy. Options: "independent", "shared".
+        mlp_hidden_dims (list[int]): Hidden layer sizes for the portfolio MLP head.
+        activation (str): Activation name supported by torch.nn (default: "relu").
+        dropout (float): Dropout applied between MLP layers.
+        embedding_dim (int): Dimensionality of stock embeddings (shared strategy only).
+        use_stock_embeddings (bool): Whether to concatenate stock embeddings before the MLP.
+        freeze_base_models (bool): Freeze inner models during portfolio training.
+    """
+    def __init__(self, parameters=None):
+        super().__init__(parameters)
+        self.stocks = parameters.get('stocks', [])
+        self.base_model_type = parameters.get('base_model_type', 'TabPFN')
+        self.base_model_config = parameters.get('base_model_config')
+        self.strategy = parameters.get('strategy', 'independent').lower()
+        self.mlp_hidden_dims = parameters.get('mlp_hidden_dims', [128, 64])
+        self.activation = parameters.get('activation', 'relu')
+        self.dropout = parameters.get('dropout', 0.1)
+        self.embedding_dim = parameters.get('embedding_dim', 32)
+        self.use_stock_embeddings = parameters.get('use_stock_embeddings', True)
+        self.freeze_base_models = parameters.get('freeze_base_models', False)

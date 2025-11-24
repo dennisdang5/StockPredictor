@@ -21,7 +21,7 @@ from evaluation.evaluator import ModelEvaluator
 
 
 # Shared configuration for both training and evaluation
-
+"""
 STOCKS = [
 # Top Technology & Growth
 "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "ORCL", "CRM",
@@ -74,7 +74,7 @@ STOCKS = [
 # Utilities
 "AES", "LNT", "AEE", "AEP", "AWK", "ATO", "CNP", "CMS", "ED", "CEG", "D", "DTE", "DUK", "EIX", "ETR", "EVRG", "ES", "EXC", "FE", "NEE", "NI", "NRG", "PCG", "PNW", "PPL", "PEG", "SRE", "SO", "VST", "WEC", "XEL"
 ]
-"""
+
     
 TIME_ARGS = ["1990-01-01", "2015-12-31"]
 

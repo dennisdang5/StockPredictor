@@ -4,6 +4,8 @@ import torch
 import torch.optim as optim
 from torch import nn
 import torch.utils.data as data
+import copy
+import pickle
 try:
     from nlp_features import get_nlp_feature_dim
 except ImportError:
@@ -20,10 +22,11 @@ except ImportError:
 from models import create_model, ModelRegistry, get_available_models
 from models.configs import (
     BaseModelConfig,
-    LSTMConfig, CNNLSTMConfig, AELSTMConfig, CNNAELSTMConfig, TimesNetConfig
+    LSTMConfig, CNNLSTMConfig, AELSTMConfig, CNNAELSTMConfig, TimesNetConfig, TabPFNConfig
 )
+from models.external.TabPFN import TabPFNAdapter
 import util
-from data_sources import YFinanceDataSource, DataSource
+from data_sources import YFinanceDataSource, StaticFileDataSource, DataSource
 from torchsummary import summary
 from torch.utils.tensorboard import SummaryWriter
 import time
@@ -137,7 +140,6 @@ class TrainerConfig:
         })
         
         # Create trainer config
-        from data_sources import YFinanceDataSource
         trainer_config = TrainerConfig(
             stocks=["AAPL", "MSFT"],
             time_args=["1990-01-01", "2015-12-31"],
@@ -147,7 +149,8 @@ class TrainerConfig:
             model_config=lstm_config,
             period_type="LS",
             lookback=240,  # Days of historical data used for feature extraction
-            data_source=YFinanceDataSource(),  # Required: specify data source
+            # Example using yfinance price data + NYT HuggingFace headlines (static CSVs)
+            data_source=YFinanceDataSource(),  # Or: StaticFileDataSource(file_path="path/to/prices.parquet")
             use_nlp=True,
             nlp_method="aggregated"
         )
@@ -522,6 +525,9 @@ class Trainer():
         self.model_type = config.model_type
         self.model_config = config.model_config
         self.model_args = config.model_args.copy() if config.model_args else {}
+        self.model_type_upper = self.model_type.upper()
+        self.is_tabpfn = self.model_type_upper == "TABPFN"
+        self.requires_stock_indices = self.model_type_upper in ("PORTFOLIO", "TABPFN")
         self.use_nlp = config.use_nlp
         self.nlp_method = config.nlp_method
         
@@ -591,7 +597,8 @@ class Trainer():
                     prediction_type=self.prediction_type, 
                     use_nlp=self.use_nlp, 
                     nlp_method=self.nlp_method, 
-                    period_type=self.config.period_type
+                    period_type=self.config.period_type,
+                    return_stock_indices=self.requires_stock_indices
                 )
             
             # Synchronize - ensure rank 0 finishes downloading/processing before others proceed
@@ -606,7 +613,8 @@ class Trainer():
                     nlp_method=self.nlp_method,
                     period_type=self.config.period_type,
                     seq_len=lookback,  # util.get_data uses seq_len parameter name for backward compatibility
-                    data_source=data_source
+                    data_source=data_source,
+                    return_stock_indices=self.requires_stock_indices
                 )
                 if input_data is None:
                     raise RuntimeError(f"Cache files not found after rank 0 processing. Expected cache should exist.")
@@ -622,12 +630,24 @@ class Trainer():
                 prediction_type=self.prediction_type, 
                 use_nlp=self.use_nlp, 
                 nlp_method=self.nlp_method, 
-                period_type=self.config.period_type
+                period_type=self.config.period_type,
+                return_stock_indices=self.requires_stock_indices
             )
         
         # Unpack data tuple (12 elements: X_train, X_val, X_test, Y_train, Y_val, Y_test, 
         # D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test)
-        X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test = input_data
+        filtered_stocks = None
+        if len(input_data) == 16:
+            (X_train, X_val, X_test,
+             Y_train, Y_val, Y_test,
+             D_train, D_val, D_test,
+             Rev_test, Returns_test, Sp500_test,
+             Strain, Sval, Stest, filtered_stocks) = input_data
+        elif len(input_data) == 12:
+            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test = input_data
+            Strain = Sval = Stest = None
+        else:
+            raise ValueError(f"Unexpected data tuple length {len(input_data)} from util.get_data")
         
         # Determine input_shape from actual data dimensions
         if self.is_main:
@@ -649,6 +669,25 @@ class Trainer():
         self.test_dates = D_test
         self.test_revenues = Rev_test
         self.test_returns = Returns_test  # Store Returns_test if available
+        self.train_stock_indices_tensor = torch.tensor(Strain, dtype=torch.long) if Strain is not None else None
+        self.val_stock_indices_tensor = torch.tensor(Sval, dtype=torch.long) if Sval is not None else None
+        self.test_stock_indices_tensor = torch.tensor(Stest, dtype=torch.long) if Stest is not None else None
+        if filtered_stocks is not None:
+            self.stocks = list(filtered_stocks)
+            if hasattr(self.model_config, 'stocks'):
+                self.model_config.stocks = list(filtered_stocks)
+        self.filtered_stock_list = list(self.stocks)
+        if self.is_tabpfn:
+            if any(x is None for x in (Strain, Sval, Stest)):
+                raise ValueError(
+                    "TabPFN models require stock index metadata. "
+                    "Please regenerate data with return_stock_indices=True."
+                )
+            self._prepare_tabpfn_portfolio_data(
+                X_train, Y_train, self.train_stock_indices_tensor,
+                X_val, Y_val, self.val_stock_indices_tensor,
+                X_test, Y_test, self.test_stock_indices_tensor
+            )
         self.train_ds = IndexedDataset(X_train, Y_train, D_train)
         val_ds   = IndexedDataset(X_val,   Y_val,   D_val)
         test_ds  = IndexedDataset(X_test,  Y_test,  D_test)
@@ -712,20 +751,15 @@ class Trainer():
         try:
             if len(X_train) > 0:
                 actual_features = X_train.shape[2]
-                seq_len = X_train.shape[1]  # Actual model input timesteps
+                seq_len = X_train.shape[1]
                 input_shape = (seq_len, actual_features)
-                
                 if self.is_main:
                     print(f"[config] Determined input_shape from data: {input_shape} (seq_len={seq_len}, features={actual_features})")
             else:
-                # Fallback if no data available (shouldn't happen, but handle gracefully)
-                # Estimate seq_len based on period_type
                 if self.config.period_type == "full":
                     estimated_seq_len = lookback
                 else:
-                    # For LS, estimate ~31 timesteps from 240-day lookback
-                    estimated_seq_len = int(lookback / 12) + 1 + 10  # Approximate LS sampling
-                
+                    estimated_seq_len = int(lookback / 12) + 1 + 10
                 estimated_features = 3 + (get_nlp_feature_dim(self.nlp_method) if self.use_nlp and self.nlp_method else 0)
                 input_shape = (estimated_seq_len, estimated_features)
                 if self.is_main:
@@ -734,167 +768,132 @@ class Trainer():
             print(f"[ERROR] Failed to determine input_shape: {e}")
             return None
         
-        # Move model to device first
-        # Create appropriate ModelConfig class instance based on model_type
         final_model_config = self._create_model_config(input_shape)
-        
-        # Initialize model using registry system
-        try:
-            self.Model = create_model(self.model_type, final_model_config).to(self.device)
-            
-            # Handle TimesNet-specific encoder freezing if requested
-            if self.model_type.upper() == "TIMESNET":
-                freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
-                if freeze_encoder:
-                    # Freeze encoder components: enc_embedding, model (TimesBlock layers), and layer_norm
-                    # Keep projection (classifier head) trainable
-                    model_to_freeze = self.Model.module if hasattr(self.Model, 'module') else self.Model
-                    if hasattr(model_to_freeze, 'timesnet'):
-                        # If using adapter, access the underlying TimesNet model
-                        timesnet_model = model_to_freeze.timesnet
-                    else:
-                        timesnet_model = model_to_freeze
-                    
-                    if hasattr(timesnet_model, 'enc_embedding'):
-                        for param in timesnet_model.enc_embedding.parameters():
-                            param.requires_grad = False
-                    if hasattr(timesnet_model, 'model'):
-                        for param in timesnet_model.model.parameters():
-                            param.requires_grad = False
-                    if hasattr(timesnet_model, 'layer_norm'):
-                        for param in timesnet_model.layer_norm.parameters():
-                            param.requires_grad = False
-                    
-                    # Ensure projection remains trainable
-                    if hasattr(timesnet_model, 'projection'):
-                        for param in timesnet_model.projection.parameters():
-                            param.requires_grad = True
-                
-                if self.is_main:
-                    print(f"[TimesNet] Model initialized with config:")
-                    if hasattr(final_model_config, 'lookback'):
-                        print(f"  lookback: {final_model_config.lookback} days")
-                    if hasattr(final_model_config, 'seq_len'):
-                        print(f"  seq_len: {final_model_config.seq_len} timesteps")
-                    if hasattr(final_model_config, 'enc_in'):
-                        print(f"  enc_in: {final_model_config.enc_in}")
-                    if hasattr(final_model_config, 'num_class'):
-                        print(f"  num_class: {final_model_config.num_class}")
-                    if hasattr(final_model_config, 'd_model'):
-                        print(f"  d_model: {final_model_config.d_model}")
-                    print(f"  freeze_encoder: {freeze_encoder}")
-        except ValueError as e:
-            # Provide helpful error message with available models
-            available_models = get_available_models()
-            if available_models:
-                available_str = ", ".join(available_models)
-                raise ValueError(
-                    f"Failed to create model '{self.model_type}': {e}\n"
-                    f"Available models: {available_str}"
-                )
-            else:
-                raise ValueError(
-                    f"Failed to create model '{self.model_type}': {e}\n"
-                    f"No models are currently registered. Make sure model modules are imported."
-                )
-        
-        # Wrap with DDP if in distributed mode
-        if self.is_dist:
-            self.Model = DDP(self.Model, device_ids=[self.local_rank])
-            if self.is_main:
-                print(f"[DDP] using {self.world_size} processes across {dist.get_world_size()} GPUs")
-        # For single-GPU or single-node multi-GPU without torchrun, use DataParallel
-        elif self.device.type == "cuda" and torch.cuda.device_count() > 1:
-            self.Model = nn.DataParallel(self.Model)
-            if self.is_main:
-                print(f"[DataParallel] using {torch.cuda.device_count()} GPUs")
 
-        # Count and print parameters after wrapping (for consistency)
-        if self.is_main:
-            # Get unwrapped model for accurate parameter counting
-            model_to_count = self.Model.module if hasattr(self.Model, 'module') else self.Model
-            
-            # Count total parameters
-            total_params = sum(param.numel() for param in model_to_count.parameters())
-            print(f"{total_params:,} total parameters")
-            
-            # If TimesNet with frozen encoder, show detailed breakdown
-            if self.model_type.upper() == "TIMESNET":
-                freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
-                if freeze_encoder:
-                    # Access the underlying TimesNet model
-                    if hasattr(model_to_count, 'timesnet'):
-                        timesnet_model = model_to_count.timesnet
-                    else:
-                        timesnet_model = model_to_count
-                    
-                    # Count frozen and trainable parameters
-                    frozen_params = sum(p.numel() for p in model_to_count.parameters() if not p.requires_grad)
-                    trainable_params = sum(p.numel() for p in model_to_count.parameters() if p.requires_grad)
-                    print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
-        
         # Determine the save path for the model using unique ID system
-        # First check if a model exists with matching config
         existing_model_path = None
-        
         if self.config.saved_model is not None:
-            # User explicitly provided a path - use it (legacy behavior)
             self.save_path = self.config.saved_model
             if os.path.exists(self.config.saved_model):
                 existing_model_path = self.config.saved_model
         else:
-            # Use unique ID system: check if model exists with matching config
             model_id, existing_model_path = util.find_model_by_config(self.config.model_config)
-            
             if existing_model_path is not None:
-                # Found matching model - use its ID-based path
                 self.save_path = existing_model_path
                 if self.is_main:
                     print(f"[model] Found existing model with matching config (ID: {model_id})")
                     print(f"[model] Using model path: {self.save_path}")
             else:
-                # No matching model found - generate new ID and create new path
                 model_id = util._get_model_id(self.config.model_config)
-                # Ensure models directory exists
                 os.makedirs(util.MODELS_DIR, exist_ok=True)
                 self.save_path = os.path.join(util.MODELS_DIR, f"{model_id}.pth")
                 if self.is_main:
                     print(f"[model] No matching model found, creating new model (ID: {model_id})")
                     print(f"[model] Model will be saved to: {self.save_path}")
-                # Save mapping for new model
                 util._save_model_mapping(model_id, self.config.model_config)
-        
-        # Load model weights if file exists
-        if existing_model_path is not None and os.path.exists(existing_model_path):
-            state_dict = torch.load(existing_model_path, map_location="cpu")
-            # Load into underlying module if DataParallel/DDP is active
-            target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
-            target_module.load_state_dict(state_dict)
-            if self.is_main:
-                print(f"[load] Restored weights from {existing_model_path}")
-        else:
-            if self.is_main:
-                if self.config.saved_model is not None:
-                    print(f"[load] No saved model found at {self.config.saved_model}, starting with random weights")
-                else:
-                    print(f"[load] Starting training with random weights (new model)")
 
-        # Use a lower learning rate to prevent instability
-        # Even lower learning rate for more stability
-        self.optimizer = optim.Adam(self.Model.parameters(), lr=5e-5, weight_decay=1e-5)
-        self.loss_fn = nn.MSELoss()
-        # More aggressive gradient clipping to prevent exploding gradients
-        self.max_grad_norm = 0.5
-        # Use early stopping parameters from config
-        early_stop_patience = self.config.early_stop_patience
-        early_stop_min_delta = self.config.early_stop_min_delta
-        self.stopper = EarlyStopper(
-            patience=early_stop_patience,
-            min_delta=early_stop_min_delta,
-            is_dist=self.is_dist,
-            rank=self.rank,
-            save_path=self.save_path
-        )
+        if self.is_tabpfn:
+            self.Model = None
+            self.optimizer = None
+            self.loss_fn = None
+            self.max_grad_norm = None
+            self.stopper = None
+            self.num_model_parameters = 0
+            if self.is_main:
+                print(f"[TabPFN] Portfolio mode enabled for {len(self.filtered_stock_list)} stocks.")
+        else:
+            try:
+                self.Model = create_model(self.model_type, final_model_config).to(self.device)
+                if self.model_type_upper == "TIMESNET":
+                    freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
+                    if freeze_encoder:
+                        model_to_freeze = self.Model.module if hasattr(self.Model, 'module') else self.Model
+                        timesnet_model = model_to_freeze.timesnet if hasattr(model_to_freeze, 'timesnet') else model_to_freeze
+                        if hasattr(timesnet_model, 'enc_embedding'):
+                            for param in timesnet_model.enc_embedding.parameters():
+                                param.requires_grad = False
+                        if hasattr(timesnet_model, 'model'):
+                            for param in timesnet_model.model.parameters():
+                                param.requires_grad = False
+                        if hasattr(timesnet_model, 'layer_norm'):
+                            for param in timesnet_model.layer_norm.parameters():
+                                param.requires_grad = False
+                        if hasattr(timesnet_model, 'projection'):
+                            for param in timesnet_model.projection.parameters():
+                                param.requires_grad = True
+                    if self.is_main:
+                        print(f"[TimesNet] Model initialized with config:")
+                        if hasattr(final_model_config, 'lookback'):
+                            print(f"  lookback: {final_model_config.lookback} days")
+                        if hasattr(final_model_config, 'seq_len'):
+                            print(f"  seq_len: {final_model_config.seq_len} timesteps")
+                        if hasattr(final_model_config, 'enc_in'):
+                            print(f"  enc_in: {final_model_config.enc_in}")
+                        if hasattr(final_model_config, 'num_class'):
+                            print(f"  num_class: {final_model_config.num_class}")
+                        if hasattr(final_model_config, 'd_model'):
+                            print(f"  d_model: {final_model_config.d_model}")
+                        print(f"  freeze_encoder: {freeze_encoder}")
+            except ValueError as e:
+                available_models = get_available_models()
+                if available_models:
+                    available_str = ", ".join(available_models)
+                    raise ValueError(
+                        f"Failed to create model '{self.model_type}': {e}\n"
+                        f"Available models: {available_str}"
+                    )
+                else:
+                    raise ValueError(
+                        f"Failed to create model '{self.model_type}': {e}\n"
+                        f"No models are currently registered. Make sure model modules are imported."
+                    )
+            
+            if self.is_dist:
+                self.Model = DDP(self.Model, device_ids=[self.local_rank])
+                if self.is_main:
+                    print(f"[DDP] using {self.world_size} processes across {dist.get_world_size()} GPUs")
+            elif self.device.type == "cuda" and torch.cuda.device_count() > 1:
+                self.Model = nn.DataParallel(self.Model)
+                if self.is_main:
+                    print(f"[DataParallel] using {torch.cuda.device_count()} GPUs")
+            
+            if self.is_main:
+                model_to_count = self.Model.module if hasattr(self.Model, 'module') else self.Model
+                total_params = sum(param.numel() for param in model_to_count.parameters())
+                print(f"{total_params:,} total parameters")
+                if self.model_type_upper == "TIMESNET":
+                    freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
+                    if freeze_encoder:
+                        timesnet_model = model_to_count.timesnet if hasattr(model_to_count, 'timesnet') else model_to_count
+                        frozen_params = sum(p.numel() for p in model_to_count.parameters() if not p.requires_grad)
+                        trainable_params = sum(p.numel() for p in model_to_count.parameters() if p.requires_grad)
+                        print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
+            
+            if existing_model_path is not None and os.path.exists(existing_model_path):
+                state_dict = torch.load(existing_model_path, map_location="cpu")
+                target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
+                target_module.load_state_dict(state_dict)
+                if self.is_main:
+                    print(f"[load] Restored weights from {existing_model_path}")
+            else:
+                if self.is_main:
+                    if self.config.saved_model is not None:
+                        print(f"[load] No saved model found at {self.config.saved_model}, starting with random weights")
+                    else:
+                        print(f"[load] Starting training with random weights (new model)")
+
+            self.optimizer = optim.Adam(self.Model.parameters(), lr=5e-5, weight_decay=1e-5)
+            self.loss_fn = nn.MSELoss()
+            self.max_grad_norm = 0.5
+            early_stop_patience = self.config.early_stop_patience
+            early_stop_min_delta = self.config.early_stop_min_delta
+            self.stopper = EarlyStopper(
+                patience=early_stop_patience,
+                min_delta=early_stop_min_delta,
+                is_dist=self.is_dist,
+                rank=self.rank,
+                save_path=self.save_path
+            )
         
         # Storage for evaluation metrics
         self.predicted_returns = []
@@ -908,7 +907,10 @@ class Trainer():
         self.daily_returns = []  # Daily portfolio returns (one per trading day)
         
         # Store model parameter count for AIC/BIC
-        self.num_model_parameters = sum(p.numel() for p in self.Model.parameters())
+        if self.Model is not None:
+            self.num_model_parameters = sum(p.numel() for p in self.Model.parameters())
+        else:
+            self.num_model_parameters = 0
         
         # Track recovery attempts to prevent infinite loops
         self.nan_recovery_attempts = 0
@@ -950,16 +952,21 @@ class Trainer():
         seq_len = input_shape[0]  # Actual model input timesteps (from data)
         lookback = self.config.lookback  # Historical data window (from TrainerConfig)
         
+        num_features = input_shape[1]
         # Update input_shape and attributes (these come from TrainerConfig/data, not user config)
         if hasattr(final_config, 'parameters'):
             final_config.parameters['input_shape'] = input_shape
             final_config.parameters['seq_len'] = seq_len
             final_config.parameters['lookback'] = lookback
+            if 'enc_in' in final_config.parameters:
+                final_config.parameters['enc_in'] = num_features
         
         # Always set as attributes for easy access
         final_config.input_shape = input_shape  # (seq_len, num_features)
         final_config.seq_len = seq_len  # Actual model input timesteps
         final_config.lookback = lookback  # Historical data window
+        if hasattr(final_config, 'enc_in'):
+            final_config.enc_in = num_features
         
         return final_config
     
@@ -1026,7 +1033,313 @@ class Trainer():
                 print(f"[ERROR] Failed to recover from NaN: {e}")
             return False
 
+    # ------------------------------------------------------------------
+    # TabPFN portfolio helpers
+    # ------------------------------------------------------------------
+    def _flatten_tabpfn_tensor(self, tensor):
+        arr = tensor.detach().cpu().numpy()
+        if arr.ndim == 3:
+            flat = arr.reshape(arr.shape[0], arr.shape[1] * arr.shape[2])
+        elif arr.ndim == 2:
+            flat = arr
+        else:
+            raise ValueError(f"TabPFN expects 2D/3D tensors, received shape {arr.shape}")
+        flat = np.nan_to_num(flat, nan=0.0, posinf=0.0, neginf=0.0)
+        return flat.astype(np.float32)
+
+    def _encode_tabpfn_targets(self, tensor):
+        arr = tensor.detach().cpu().numpy().reshape(-1)
+        arr = np.nan_to_num(arr, nan=0.0)
+        encoded = (arr >= 0).astype(np.int64)
+        return encoded, arr.astype(np.float32)
+
+    def _downsample_tabpfn_rows(self, X, y_encoded, y_raw, stock_idx):
+        max_rows = getattr(self.model_config, 'max_samples', 50000)
+        if len(X) <= max_rows:
+            return X, y_encoded, y_raw
+        rng_seed = getattr(self.model_config, 'random_state', 42) + int(stock_idx)
+        rng = np.random.default_rng(rng_seed)
+        indices = rng.choice(len(X), size=max_rows, replace=False)
+        return X[indices], y_encoded[indices], y_raw[indices]
+
+    def _build_tabpfn_split(self, X_tensor, Y_tensor, stock_indices_tensor):
+        flat_features = self._flatten_tabpfn_tensor(X_tensor)
+        encoded_targets, raw_targets = self._encode_tabpfn_targets(Y_tensor)
+        stock_indices = stock_indices_tensor.detach().cpu().numpy()
+        feature_dim = flat_features.shape[1] if flat_features.size else self.tabpfn_feature_dim
+
+        per_stock = {}
+        for stock_idx in range(len(self.filtered_stock_list)):
+            mask = stock_indices == stock_idx
+            stock_X = flat_features[mask]
+            stock_y_enc = encoded_targets[mask]
+            stock_y_raw = raw_targets[mask]
+            if stock_X.size == 0:
+                stock_X = np.zeros((1, feature_dim), dtype=np.float32)
+                stock_y_enc = np.zeros((1,), dtype=np.int64)
+                stock_y_raw = np.zeros((1,), dtype=np.float32)
+            else:
+                stock_X, stock_y_enc, stock_y_raw = self._downsample_tabpfn_rows(
+                    stock_X, stock_y_enc, stock_y_raw, stock_idx
+                )
+            per_stock[stock_idx] = {
+                'X': stock_X,
+                'y_encoded': stock_y_enc,
+                'y_raw': stock_y_raw,
+                'indices': np.where(mask)[0]
+            }
+        return {
+            'flat_X': flat_features,
+            'targets_raw': raw_targets,
+            'targets_encoded': encoded_targets,
+            'stock_indices': stock_indices,
+            'per_stock': per_stock,
+            'total_samples': len(flat_features)
+        }
+
+    def _prepare_tabpfn_portfolio_data(
+        self,
+        X_train, Y_train, Strain,
+        X_val, Y_val, Sval,
+        X_test, Y_test, Stest
+    ):
+        self.tabpfn_feature_dim = int(X_train.shape[1] * X_train.shape[2]) if X_train.ndim == 3 else X_train.shape[-1]
+        self.tabpfn_data = {
+            'train': self._build_tabpfn_split(X_train, Y_train, Strain),
+            'val': self._build_tabpfn_split(X_val, Y_val, Sval),
+            'test': self._build_tabpfn_split(X_test, Y_test, Stest)
+        }
+        self.tabpfn_models = {}
+        self.tabpfn_results = {}
+        self.tabpfn_trained = False
+
+    def _fit_tabpfn_models(self):
+        self.tabpfn_models = {}
+        for stock_idx, ticker in enumerate(self.filtered_stock_list):
+            stock_data = self.tabpfn_data['train']['per_stock'].get(stock_idx)
+            if stock_data is None:
+                continue
+            config_clone = copy.deepcopy(self.model_config)
+            try:
+                model = TabPFNAdapter(config_clone)
+                model.fit(stock_data['X'], stock_data['y_encoded'])
+                self.tabpfn_models[stock_idx] = model
+                if self.is_main:
+                    print(f"[TabPFN] Fitted model for {ticker} ({len(stock_data['X'])} rows)")
+            except Exception as e:
+                self.tabpfn_models[stock_idx] = None
+                if self.is_main:
+                    print(f"[TabPFN] Warning: failed to fit model for {ticker}: {e}")
+
+    def _decode_tabpfn_predictions(self, labels):
+        labels = np.asarray(labels).reshape(-1)
+        return np.where(labels > 0, 1.0, -1.0).astype(np.float32)
+
+    def _predict_tabpfn_for_split(self, split_name):
+        split = self.tabpfn_data[split_name]
+        preds = np.zeros(split['total_samples'], dtype=np.float32)
+        for stock_idx, ticker in enumerate(self.filtered_stock_list):
+            stock_info = split['per_stock'].get(stock_idx)
+            if stock_info is None or len(stock_info['indices']) == 0:
+                continue
+            model = self.tabpfn_models.get(stock_idx)
+            if model is None or not getattr(model, 'is_fitted', False):
+                preds[stock_info['indices']] = 0.0
+                continue
+            try:
+                labels = model.predict(stock_info['X'])
+                decoded = self._decode_tabpfn_predictions(labels)
+                preds[stock_info['indices']] = decoded
+            except Exception as e:
+                preds[stock_info['indices']] = 0.0
+                if self.is_main:
+                    print(f"[TabPFN] Warning: prediction failed for {ticker}: {e}")
+        return preds
+
+    def _print_tabpfn_metrics(self):
+        if not self.is_main:
+            return
+        print("\n[TabPFN] Aggregate metrics:")
+        for split in ('train', 'val', 'test'):
+            preds = self.tabpfn_results[split]['preds']
+            targets = self.tabpfn_results[split]['targets']
+            metrics = _compute_basic_metrics(preds, targets)
+            dir_metrics = _compute_directional_metrics(preds, targets)
+            print(f"  {split.title()}: accuracy={metrics.get('accuracy', 0):.2f}%, "
+                  f"dir_acc={dir_metrics.get('directional_accuracy', 0):.2f}%")
+
+    def _train_tabpfn_epoch(self, epoch):
+        if epoch > 0 or getattr(self, 'tabpfn_trained', False):
+            if self.is_main:
+                print("[TabPFN] Non-iterative model — skipping additional epochs.")
+            return True
+        if not hasattr(self, 'tabpfn_data'):
+            raise RuntimeError("TabPFN data has not been prepared.")
+
+        if self.is_main:
+            print(f"[TabPFN] Training {len(self.filtered_stock_list)} per-stock models...")
+        self._fit_tabpfn_models()
+
+        results = {}
+        for split in ('train', 'val', 'test'):
+            preds = self._predict_tabpfn_for_split(split)
+            targets = self.tabpfn_data[split]['targets_raw']
+            results[split] = {'preds': preds, 'targets': targets}
+        self.tabpfn_results = results
+        self.tabpfn_trained = True
+
+        self._print_tabpfn_metrics()
+        self._save_tabpfn_models()
+        return True
+
+    def _save_tabpfn_models(self):
+        if not getattr(self, 'tabpfn_models', None):
+            return
+        save_path = self.save_path if self.save_path.endswith(".pkl") else f"{self.save_path}.pkl"
+        serializable = {}
+        for stock_idx, model in self.tabpfn_models.items():
+            if model is not None and getattr(model, 'is_fitted', False):
+                serializable[self.filtered_stock_list[stock_idx]] = model.estimator
+        try:
+            with open(save_path, "wb") as handle:
+                pickle.dump({
+                    'backend': self.model_config.backend,
+                    'stocks': self.filtered_stock_list,
+                    'models': serializable,
+                    'feature_dim': self.tabpfn_feature_dim
+                }, handle)
+            if self.is_main:
+                print(f"[TabPFN] Saved fitted models to {save_path}")
+        except Exception as e:
+            if self.is_main:
+                print(f"[TabPFN] Warning: failed to save models to {save_path}: {e}")
+
+    def _evaluate_tabpfn_predictions(self):
+        if not getattr(self, 'tabpfn_trained', False):
+            if self.is_main:
+                print("[TabPFN] Evaluation skipped — model not trained.")
+            return 0.0
+
+        test_preds = self.tabpfn_results['test']['preds']
+        test_targets = self.tabpfn_results['test']['targets']
+        metrics = _compute_basic_metrics(test_preds, test_targets)
+        dir_metrics = _compute_directional_metrics(test_preds, test_targets)
+
+        if self.is_main:
+            print("\n[TabPFN] Test metrics:")
+            print(f"  Accuracy: {metrics.get('accuracy', 0):.2f}%")
+            print(f"  Directional Accuracy: {dir_metrics.get('directional_accuracy', 0):.2f}%")
+            print(f"  MSE: {metrics.get('mse', 0):.6f}, MAE: {metrics.get('mae', 0):.6f}")
+
+        self.predicted_values = test_preds.tolist()
+        self.actual_values = test_targets.tolist()
+        self.residuals = (test_targets - test_preds).tolist()
+        self.evaluation_dates = self.test_dates
+        self.predicted_returns = []
+        self.actual_returns = []
+        self.real_world_returns = []
+        self.daily_returns = []
+
+        if self.test_revenues is not None:
+            if isinstance(self.test_revenues, torch.Tensor):
+                revenues = self._tensor_to_numpy(self.test_revenues)
+            else:
+                revenues = np.asarray(self.test_revenues)
+            by_date = {}
+            for idx, date in enumerate(self.test_dates):
+                ret = revenues[idx] if idx < len(revenues) else 0
+                by_date.setdefault(date, []).append((test_preds[idx], ret))
+            for d in sorted(by_date.keys()):
+                pairs = by_date[d]
+                if len(pairs) < 2:
+                    continue
+                pairs.sort(key=lambda x: x[0])
+                actual_k = min(self.k, len(pairs) // 2)
+                if actual_k == 0:
+                    continue
+                top_k_returns = [r for (_, r) in pairs[-actual_k:]]
+                bottom_k_returns = [r for (_, r) in pairs[:actual_k]]
+                r_d = np.mean(top_k_returns) - np.mean(bottom_k_returns)
+                if self.cost_bps_per_side > 0:
+                    r_d -= 2 * self.cost_bps_per_side / 10000.0
+                self.daily_returns.append(r_d)
+            if self.daily_returns:
+                self.equity_curve = np.cumprod(1 + np.array(self.daily_returns)).tolist()
+
+        if self.is_main:
+            print("\n" + "="*60)
+            print("TRADING PERFORMANCE METRICS")
+            print("="*60)
+            trading_metrics = self.get_trading_performance_metrics()
+            for key, value in trading_metrics.items():
+                if isinstance(value, dict):
+                    print(f"{key}:")
+                    for sub_key, sub_value in value.items():
+                        print(f"  {sub_key}: {sub_value}")
+                else:
+                    print(f"{key}: {value}")
+            print("\n" + "="*60)
+            print("STATISTICAL TESTS")
+            print("="*60)
+            statistical_tests = self.get_statistical_tests()
+            for test_name, test_results in statistical_tests.items():
+                print(f"{test_name}:")
+                if isinstance(test_results, dict):
+                    for key, value in test_results.items():
+                        print(f"  {key}: {value}")
+                else:
+                    print(f"  {test_results}")
+            print("\n" + "="*60)
+            print("TIME SERIES DIAGNOSTICS")
+            print("="*60)
+            diagnostics = self.get_time_series_diagnostics()
+            for key, value in diagnostics.items():
+                if isinstance(value, dict):
+                    print(f"{key}:")
+                    for sub_key, sub_value in value.items():
+                        if sub_key != 'values' or len(str(sub_value)) < 100:
+                            print(f"  {sub_key}: {sub_value}")
+                else:
+                    print(f"{key}: {value}")
+        return metrics.get('mse', 0.0)
+
+    def _build_model_params(self, indices, split: str):
+        """
+        Construct optional parameter dict passed to the model forward pass.
+        Includes stock index tensors for portfolio architectures.
+        """
+        if not getattr(self, 'requires_stock_indices', False):
+            return None
+        
+        split_map = {
+            'train': getattr(self, 'train_stock_indices_tensor', None),
+            'val': getattr(self, 'val_stock_indices_tensor', None),
+            'test': getattr(self, 'test_stock_indices_tensor', None)
+        }.get(split)
+        
+        if split_map is None:
+            raise ValueError(f"Stock indices not available for split '{split}'.")
+        
+        if isinstance(indices, torch.Tensor):
+            idx_tensor = indices.long().cpu()
+        else:
+            idx_tensor = torch.tensor(indices, dtype=torch.long)
+        
+        stock_ids = split_map[idx_tensor]
+        return {'stock_indices': stock_ids.to(self.device)}
+
+    def _call_model(self, inputs, indices, split: str):
+        """
+        Helper to route a batch through the model with optional extra params.
+        """
+        params = self._build_model_params(indices, split)
+        if params is not None:
+            return self.Model(inputs, params=params)
+        return self.Model(inputs)
+
     def train_one_epoch(self, epoch):
+        if self.is_tabpfn:
+            return self._train_tabpfn_epoch(epoch)
 
         # Ensure DDP shuffles differently each epoch for all samplers
         if self.is_dist:
@@ -1088,7 +1401,7 @@ class Trainer():
             # forward + loss (+AMP on CUDA)
             if self.use_amp:
                 with torch.amp.autocast(device_type=self.device.type):
-                    Y_pred = self.Model(X_batch)
+                    Y_pred = self._call_model(X_batch, indices, split="train")
                     # Check for NaN/Inf in model output
                     if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                         train_nan_model_output += 1
@@ -1151,7 +1464,7 @@ class Trainer():
                         avg_val = float('nan')
                         break
             else:
-                Y_pred = self.Model(X_batch)
+                Y_pred = self._call_model(X_batch, indices, split="train")
                 # Check for NaN/Inf in model output
                 if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                     train_nan_model_output += 1
@@ -1293,13 +1606,13 @@ class Trainer():
                 batch_dates = [self.val_dates[idx] for idx in indices.tolist()]
                 if self.use_amp:
                     with torch.amp.autocast(device_type=self.device.type):
-                        Y_pred = self.Model(X_batch)
+                        Y_pred = self._call_model(X_batch, indices, split="val")
                         if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                             val_nan_model_output += 1
                             continue
                         loss = self.loss_fn(Y_pred, Y_batch)
                 else:
-                    Y_pred = self.Model(X_batch)
+                    Y_pred = self._call_model(X_batch, indices, split="val")
                     if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                         val_nan_model_output += 1
                         continue
@@ -2274,6 +2587,8 @@ class Trainer():
 
 
     def evaluate(self):
+        if self.is_tabpfn:
+            return self._evaluate_tabpfn_predictions()
         self.Model.eval()
         test_loss = 0
         individual_losses = []
@@ -2306,9 +2621,9 @@ class Trainer():
                 
                 if self.use_amp:
                     with torch.amp.autocast(device_type=self.device.type):
-                        Y_pred = self.Model(X_batch)
+                        Y_pred = self._call_model(X_batch, indices, split="test")
                 else:
-                    Y_pred = self.Model(X_batch)
+                    Y_pred = self._call_model(X_batch, indices, split="test")
                 
                 # Store predictions and actual values
                 Y_pred_np = self._tensor_to_numpy(Y_pred)
@@ -2450,7 +2765,16 @@ class Trainer():
         """
         # Use load_data_from_cache which handles separate .npz files
         # Use default seq_len=240 (lookback window) for backward compatibility
-        input_data = util.load_data_from_cache(stocks, time_args, prediction_type=self.prediction_type, use_nlp=self.use_nlp, nlp_method=self.nlp_method, seq_len=self.config.lookback, data_source=self.config.data_source)
+        input_data = util.load_data_from_cache(
+            stocks,
+            time_args,
+            prediction_type=self.prediction_type,
+            use_nlp=self.use_nlp,
+            nlp_method=self.nlp_method,
+            seq_len=self.config.lookback,
+            data_source=self.config.data_source,
+            return_stock_indices=self.requires_stock_indices
+        )
         if input_data is None:
             raise RuntimeError(f"Could not load separate datasets from cache in {util.DATA_DIR}. Data may need to be downloaded first.")
         return input_data
