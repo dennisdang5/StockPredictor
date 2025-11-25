@@ -18,7 +18,7 @@ class LSTMConfig(BaseModelConfig):
         self.num_layers = parameters.get('num_layers', 1)
         self.batch_first = parameters.get('batch_first', True)
         self.dropout = parameters.get('dropout', 0.1)
-
+        self.output_dim = parameters.get('output_dim', 1)
 
 class CNNLSTMConfig(BaseModelConfig):
     """
@@ -40,6 +40,16 @@ class CNNLSTMConfig(BaseModelConfig):
         self.num_layers = parameters.get('num_layers', 1)
         self.batch_first = parameters.get('batch_first', True)
         self.dropout = parameters.get('dropout', 0.1)
+        self.output_dim = parameters.get('output_dim', 1)
+        if parameters.get('lstm_config') is not None:
+            self.lstm_config = LSTMConfig(parameters=parameters.get('lstm_config'))
+        else:
+            self.lstm_config = LSTMConfig(parameters={
+                'input_shape': self.input_shape,
+                'hidden_size': self.hidden_size,
+                'num_layers': self.num_layers,
+                'dropout': self.dropout
+            })
 
 
 class AutoEncoderConfig(BaseModelConfig):
@@ -51,6 +61,7 @@ class AutoEncoderConfig(BaseModelConfig):
     """
     def __init__(self, parameters=None):
         super().__init__(parameters)
+        self.input_shape = parameters.get('input_shape', (31, 3))
 
 
 class CNNAutoEncoderConfig(BaseModelConfig):
@@ -64,6 +75,7 @@ class CNNAutoEncoderConfig(BaseModelConfig):
     def __init__(self, parameters=None):
         super().__init__(parameters)
         self.kernel_size = parameters.get('kernel_size', 3)
+        self.input_shape = parameters.get('input_shape', (31, 3))
 
 
 class AELSTMConfig(BaseModelConfig):
@@ -84,7 +96,22 @@ class AELSTMConfig(BaseModelConfig):
         self.num_layers = parameters.get('num_layers', 1)
         self.batch_first = parameters.get('batch_first', True)
         self.dropout = parameters.get('dropout', 0.1)
-
+        self.output_dim = parameters.get('output_dim', 1)
+        if parameters.get('lstm_config') is not None:
+            self.lstm_config = LSTMConfig(parameters=parameters.get('lstm_config'))
+        else:
+            self.lstm_config = LSTMConfig(parameters={
+                'input_shape': self.input_shape,
+                'hidden_size': self.hidden_size,
+                    'num_layers': self.num_layers,
+                    'dropout': self.dropout
+                })
+        if parameters.get('ae_config') is not None:
+            self.ae_config = AutoEncoderConfig(parameters=parameters.get('ae_config'))
+        else:
+            self.ae_config = AutoEncoderConfig(parameters={
+                'input_shape': self.input_shape,
+                })
 
 class CNNAELSTMConfig(BaseModelConfig):
     """
@@ -105,7 +132,23 @@ class CNNAELSTMConfig(BaseModelConfig):
         self.num_layers = parameters.get('num_layers', 1)
         self.batch_first = parameters.get('batch_first', True)
         self.dropout = parameters.get('dropout', 0.1)
-
+        self.output_dim = parameters.get('output_dim', 1)
+        if parameters.get('cnn_ae_config') is not None:
+            self.cnn_ae_config = CNNAutoEncoderConfig(parameters=parameters.get('cnn_ae_config'))
+        else:
+            self.cnn_ae_config = CNNAutoEncoderConfig(parameters={
+                'input_shape': self.input_shape,
+                'kernel_size': self.kernel_size,
+                })
+        if parameters.get('lstm_config') is not None:
+            self.lstm_config = LSTMConfig(parameters=parameters.get('lstm_config'))
+        else:
+            self.lstm_config = LSTMConfig(parameters={
+                'input_shape': self.input_shape,
+                'hidden_size': self.hidden_size,
+                'num_layers': self.num_layers,
+                'dropout': self.dropout
+                })
 
 class TimesNetConfig(BaseModelConfig):
     """
@@ -200,6 +243,31 @@ class TabPFNConfig(BaseModelConfig):
         self.max_samples = parameters.get('max_samples', 50_000)
         self.random_state = parameters.get('random_state', 42)
         self.model_params = parameters.get('model_params', {})
+
+
+class MLPConfig(BaseModelConfig):
+    """
+    Configuration class for MLPModel.
+    
+    MLP acts as a classifier on outputs from individual models (e.g., portfolio architecture).
+    Input should be feature vectors from individual model outputs, not raw time series data.
+    
+    Args:
+        input_dim (int): Dimension of input data (feature vectors from individual models). Required.
+        hidden_dims (list[int]): List of hidden layer dimensions. Default: [input_dim//2]
+        activation (str): Activation name supported by torch.nn (default: "relu").
+        dropout (float): Dropout rate applied between MLP layers (0.0 to 1.0). Default: 0.1
+        output_dim (int): Output dimension. Default: 1
+    """
+    def __init__(self, parameters=None):
+        super().__init__(parameters)
+        self.input_dim = parameters.get('input_dim')
+        # Default hidden_dims to [input_dim//2] if not provided, but only if input_dim exists
+        default_hidden = [self.input_dim // 2] if self.input_dim else None
+        self.hidden_dims = parameters.get('hidden_dims', default_hidden)
+        self.activation = parameters.get('activation', 'relu')
+        self.dropout = parameters.get('dropout', 0.1)
+        self.output_dim = parameters.get('output_dim', 1)
 
 
 class PortfolioConfig(BaseModelConfig):

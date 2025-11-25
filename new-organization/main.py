@@ -110,7 +110,7 @@ class ModelTrainingConfig:
         model_config,
         stocks: List[str],
         time_args: List[str],
-        batch_size: int = 32,
+        batch_size: Optional[int] = None,
         num_epochs: int = 100,
         period_type: str = "LS",
         lookback: int = 240,
@@ -136,7 +136,7 @@ class ModelTrainingConfig:
             model_config: Model-specific config object (e.g., LSTMConfig instance)
             stocks: List of stock tickers
             time_args: Time range arguments (e.g., ["3y"] or ["1990-01-01", "2015-12-31"])
-            batch_size: Batch size for training
+            batch_size: Batch size for training (optional, defaults to 32). Not used for TabPFN models.
             num_epochs: Number of training epochs
             period_type: Period type ("LS" or "full")
             lookback: Days of historical data used for feature extraction
@@ -178,10 +178,13 @@ class ModelTrainingConfig:
     
     def create_trainer_config(self) -> TrainerConfig:
         """Create a TrainerConfig from this model training config."""
+        # For TabPFN models, batch_size is not used, so set a dummy value if None
+        # For other models, use default of 32 if not specified
+        effective_batch_size = self.batch_size if self.batch_size is not None else 32
         return TrainerConfig(
             stocks=self.stocks,
             time_args=self.time_args,
-            batch_size=self.batch_size,
+            batch_size=effective_batch_size,
             num_epochs=self.num_epochs,
             model_type=self.model_type,
             model_config=self.model_config,
@@ -232,7 +235,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     
     short_history = ["1990-01-01", "1999-01-01"]
     long_history = ["1990-01-01", "2015-12-31"]
-    
+   
     # ---------------------------------------------------------------------
     # 1. Base LSTM (no NLP features)
     # ---------------------------------------------------------------------
@@ -320,56 +323,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         use_nlp=True,
         nlp_method="aggregated"
     ))
-    
-    # ---------------------------------------------------------------------
-    # 4b. Large-tier LSTM reference (disabled by default due to size)
-    # ---------------------------------------------------------------------
-    configs.append(ModelTrainingConfig(
-        name="lstm_large_reference",
-        model_type="LSTM",
-        model_config=LSTMConfig(parameters={
-            'input_shape': (31, 13),
-            'hidden_size': 64,
-            'num_layers': 2,
-            'dropout': 0.2
-        }),
-        stocks=large_stocks,
-        time_args=short_history,
-        batch_size=32,
-        num_epochs=2,
-        period_type="LS",
-        lookback=240,
-        use_nlp=True,
-        nlp_method="aggregated",
-        enabled=False,
-        notes="Full universe (large tier) benchmark — enable when sufficient compute is available."
-    ))
-    
-    # ---------------------------------------------------------------------
-    # 5. TabFPN (TabPFN) + aggregated NLP (placeholder, disabled)
-    # ---------------------------------------------------------------------
-    tabfpn_note = (
-        "Per-stock TabPFN portfolio (client backend). Ensure per-stock rows stay below 50k."
-    )
-    configs.append(ModelTrainingConfig(
-        name="tabfpn_nlp_aggregated",
-        model_type="TabPFN",
-        model_config=TabPFNConfig(parameters={
-            'backend': 'client',
-            'max_samples': 50000,
-            'random_state': 42
-        }),
-        stocks=micro_stocks,
-        time_args=short_history,
-        batch_size=2048,
-        num_epochs=2,  # TabPFN is non-iterative; this placeholder indicates a single fit
-        period_type="LS",
-        lookback=240,
-        use_nlp=True,
-        nlp_method="aggregated",
-        enabled=True,
-        notes=tabfpn_note
-    ))
+ 
+    """
     
     # ---------------------------------------------------------------------
     # 6. TabFPN + individual NLP on smaller dataset (placeholder, disabled)
@@ -378,7 +333,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         "TabPFN portfolio with individual NLP features. Keep per-stock samples <=50k rows."
     )
     configs.append(ModelTrainingConfig(
-        name="tabfpn_nlp_individual_small",
+        name="tabfpn_nlp_portfolio_small",
         model_type="TabPFN",
         model_config=TabPFNConfig(parameters={
             'backend': 'client',
@@ -387,7 +342,6 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         }),
         stocks=micro_stocks,
         time_args=short_history,
-        batch_size=2048,
         num_epochs=2,
         period_type="LS",
         lookback=240,
@@ -414,9 +368,9 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'base_model_type': 'LSTM',
             'base_model_config': shared_portfolio_base,
             'strategy': 'independent',
-            'mlp_hidden_dims': [128, 64],
+            'mlp_hidden_dims': [128],
             'embedding_dim': 32,
-            'use_stock_embeddings': True,
+            'use_stock_embeddings': False,
             'dropout': 0.1,
         }),
         stocks=micro_stocks,
@@ -427,10 +381,10 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         lookback=240,
         use_nlp=True,
         nlp_method="aggregated",
-        enabled=False,
+        enabled=True,
         notes="Builds one LSTM backbone per stock and feeds their outputs into a shared MLP head."
     ))
-
+    
     # ---------------------------------------------------------------------
     # 8. Portfolio architecture (shared backbone + embeddings) - disabled
     # ---------------------------------------------------------------------
@@ -442,8 +396,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'base_model_type': 'LSTM',
             'base_model_config': shared_portfolio_base,
             'strategy': 'shared',
-            'mlp_hidden_dims': [96, 48],
-            'embedding_dim': 24,
+            'mlp_hidden_dims': [128],
+            'embedding_dim': 64,
             'use_stock_embeddings': True,
             'dropout': 0.15,
         }),
@@ -455,9 +409,10 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         lookback=240,
         use_nlp=True,
         nlp_method="aggregated",
-        enabled=False,
+        enabled=True,
         notes="Shared LSTM backbone across stocks with learnable embeddings before the MLP portfolio head."
     ))
+     """
     
     # ---------------------------------------------------------------------
     # 7. TimesNet + aggregated NLP on smaller dataset
@@ -512,7 +467,12 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
     print(f"Model Type: {config.model_type}")
     print(f"Stocks: {config.stocks}")
     print(f"Time Range: {config.time_args}")
-    print(f"Batch Size: {config.batch_size}, Epochs: {config.num_epochs}")
+    # Batch size is not relevant for TabPFN models
+    if config.model_type.upper() == "TABPFN":
+        print(f"Batch Size: N/A (not used for TabPFN), Epochs: {config.num_epochs}")
+    else:
+        batch_size_str = str(config.batch_size) if config.batch_size is not None else "32 (default)"
+        print(f"Batch Size: {batch_size_str}, Epochs: {config.num_epochs}")
     print(f"Period Type: {config.period_type}, Lookback: {config.lookback}")
     print(f"NLP: {config.use_nlp} ({config.nlp_method if config.use_nlp else 'N/A'})")
     print("=" * 80 + "\n")

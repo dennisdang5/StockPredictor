@@ -1734,7 +1734,7 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
     if return_stock_indices:
         stock_indices = np.array(stock_index_list, dtype=np.int32)
         return X, y, dates, revenues, returns, stock_indices
-    
+
     return X, y, dates, revenues, returns
 
     """

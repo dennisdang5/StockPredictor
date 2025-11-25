@@ -59,7 +59,7 @@ class AutoEncoder(BaseModel):
         # nn.MSELoss()
         # optimizer = torch.optim.Adam()
 
-    def forward(self, x):
+    def forward(self, x, params=None):
         # assume x in shape (batch, 31, 3) or (31, 3)
         if x.dim() == 2:
             # Single sample, add batch dimension
@@ -76,3 +76,8 @@ class AutoEncoder(BaseModel):
         if original_shape[0] == 1 and len(original_shape) == 2:
             x = x.squeeze(0)
         return x
+
+    @classmethod
+    def from_config(cls, model_config):
+        """Factory hook so the registry can instantiate the model."""
+        return cls(model_config)

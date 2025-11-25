@@ -1,5 +1,5 @@
 from ..base import BaseModel
-from ..configs import AELSTMConfig
+from ..configs import AELSTMConfig, AutoEncoderConfig, LSTMConfig
 import torch
 import torch.nn as nn
 from .autoencoder import AutoEncoder
@@ -48,10 +48,21 @@ class AELSTM(BaseModel):
             )
         
         self.input_shape = model_config.to_dict().get('input_shape', (31, 3))
-        self.AE = AutoEncoder(model_config=model_config)
-        self.LSTM = LSTMModel(model_config=model_config)
+        # Create AutoEncoderConfig from AELSTMConfig for the AutoEncoder component
+        ae_config_dict = model_config.to_dict()
+        ae_config = AutoEncoderConfig(parameters={'input_shape': ae_config_dict.get('input_shape', (31, 3))})
+        self.AE = AutoEncoder(model_config=ae_config)
+        # Create LSTMConfig from AELSTMConfig for the LSTM component
+        lstm_config = LSTMConfig(parameters={
+            'input_shape': ae_config_dict.get('input_shape', (31, 3)),
+            'hidden_size': ae_config_dict.get('hidden_size', 25),
+            'num_layers': ae_config_dict.get('num_layers', 1),
+            'batch_first': ae_config_dict.get('batch_first', True),
+            'dropout': ae_config_dict.get('dropout', 0.1)
+        })
+        self.LSTM = LSTMModel(model_config=lstm_config)
 
-    def forward(self, x):
+    def forward(self, x, params=None):
         x = self.AE(x)
         x = self.LSTM(x)
         return x

@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from ..base import BaseModel
 from ..configs import PortfolioConfig, BaseModelConfig
@@ -15,13 +16,6 @@ class PortfolioArchitecture(BaseModel):
 
     def __init__(self, model_config: PortfolioConfig):
         super().__init__(model_config)
-        if model_config is None:
-            raise ValueError("model_config is required for PortfolioArchitecture")
-
-        if not isinstance(model_config, PortfolioConfig):
-            raise TypeError(
-                f"PortfolioArchitecture requires PortfolioConfig, got {type(model_config).__name__}"
-            )
 
         if not model_config.stocks:
             raise ValueError("PortfolioConfig.stocks must contain at least one ticker")
@@ -95,8 +89,20 @@ class PortfolioArchitecture(BaseModel):
             self.stock_models[self.stocks[0]] = first_model
             for ticker in self.stocks[1:]:
                 self.stock_models[ticker] = self._instantiate_base_model()
-        else:
+
+        # single model for all stocks
+        elif self.strategy == "shared":
             self.shared_model = first_model
+
+        ##### TODO: Implement industry strategy #####
+        elif self.strategy == "industry":
+            self.industry_models = nn.ModuleDict()
+            self.industry_models[self.industries[0]] = first_model
+            for industry in self.industries[1:]:
+                self.industry_models[industry] = self._instantiate_base_model()
+
+        else:
+            raise ValueError(f"Unsupported strategy '{self.strategy}'. Use 'independent' or 'industry'.")
 
         return output_dim
 
@@ -105,14 +111,13 @@ class PortfolioArchitecture(BaseModel):
         if not input_shape:
             input_shape = getattr(self.prototype_base_config, 'input_shape', (31, 3))
         seq_len, features = input_shape
-        import torch
         dummy = torch.zeros(1, seq_len, features, dtype=torch.float32)
         model.eval()
         with torch.no_grad():
             out = model(dummy)
-        if out.dim() == 1:
-            return 1
-        return out.shape[-1]
+        if len(out) != self.model_config.output_dim:
+            raise ValueError(f"Output dimension mismatch. Expected {self.model_config.output_dim}, got {len(out)}.")
+        return len(out)
 
     def _backbone_parameters(self):
         if self.strategy == "independent":
@@ -161,7 +166,6 @@ class PortfolioArchitecture(BaseModel):
         if params is None or "stock_indices" not in params:
             raise ValueError("PortfolioArchitecture forward requires 'stock_indices' in params.")
         stock_indices = params["stock_indices"]
-        import torch
         if not isinstance(stock_indices, torch.Tensor):
             stock_indices = torch.tensor(stock_indices, device=x.device, dtype=torch.long)
         stock_indices = stock_indices.view(-1).to(dtype=torch.long, device=x.device)
@@ -176,6 +180,8 @@ class PortfolioArchitecture(BaseModel):
             base_out = self._forward_backbone(stock_id, batch_inputs)
             head_in = self._compose_head_input(base_out, stock_id)
             outputs[mask] = self.portfolio_head(head_in)
+
+        
         return outputs
 
     @classmethod

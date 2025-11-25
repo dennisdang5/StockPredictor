@@ -206,6 +206,8 @@ class TrainerConfig:
             period_type="LS",
         lookback=None,
         data_source: DataSource = None,
+        ensemble_method="simple_average",
+        num_ensemble_models=3,
         **model_args
     ):
         """
@@ -240,6 +242,13 @@ class TrainerConfig:
                     Note: The actual seq_len (model input timesteps) is determined by period_type
                     and data, not by lookback directly.
             data_source: DataSource instance to use for fetching stock data (required)
+            ensemble_method: Ensemble method for Portfolio TabPFN shared strategy. Options: "simple_average".
+                            Default: "simple_average". Only used when model_type="Portfolio" with 
+                            base_model_type="TabPFN" and strategy="shared".
+            num_ensemble_models: Number of ensemble models to train on different data subsets. 
+                                Default: 3. Only used when ensemble_method="simple_average" for 
+                                Portfolio TabPFN shared strategy. Each model is trained on a random 
+                                subset of the selected data.
             **model_args: Additional model arguments (e.g., use_nlp, nlp_method, kernel_size)
         """
         if data_source is None:
@@ -268,6 +277,10 @@ class TrainerConfig:
         # Lookback: Days of historical data used for feature extraction
         # If not provided, defaults to 240
         self.lookback = lookback if lookback is not None else 240
+        
+        # Ensemble method for Portfolio TabPFN shared strategy
+        self.ensemble_method = ensemble_method
+        self.num_ensemble_models = num_ensemble_models
         
         # Data source: Required parameter
         self.data_source = data_source
@@ -528,6 +541,15 @@ class Trainer():
         self.model_type_upper = self.model_type.upper()
         self.is_tabpfn = self.model_type_upper == "TABPFN"
         self.requires_stock_indices = self.model_type_upper in ("PORTFOLIO", "TABPFN")
+        
+        # Detect Portfolio + TabPFN + shared strategy
+        self.is_shared_tabpfn_portfolio = False
+        if self.model_type_upper == "PORTFOLIO":
+            if hasattr(self.model_config, 'base_model_type') and hasattr(self.model_config, 'strategy'):
+                base_model_type_upper = str(self.model_config.base_model_type).upper()
+                strategy_lower = str(self.model_config.strategy).lower()
+                if base_model_type_upper == "TABPFN" and strategy_lower == "shared":
+                    self.is_shared_tabpfn_portfolio = True
         self.use_nlp = config.use_nlp
         self.nlp_method = config.nlp_method
         
@@ -644,7 +666,10 @@ class Trainer():
              Rev_test, Returns_test, Sp500_test,
              Strain, Sval, Stest, filtered_stocks) = input_data
         elif len(input_data) == 12:
-            X_train, X_val, X_test, Y_train, Y_val, Y_test, D_train, D_val, D_test, Rev_test, Returns_test, Sp500_test = input_data
+            (X_train, X_val, X_test,
+             Y_train, Y_val, Y_test,
+             D_train, D_val, D_test,
+             Rev_test, Returns_test, Sp500_test) = input_data
             Strain = Sval = Stest = None
         else:
             raise ValueError(f"Unexpected data tuple length {len(input_data)} from util.get_data")
@@ -683,11 +708,54 @@ class Trainer():
                     "TabPFN models require stock index metadata. "
                     "Please regenerate data with return_stock_indices=True."
                 )
-            self._prepare_tabpfn_portfolio_data(
-                X_train, Y_train, self.train_stock_indices_tensor,
-                X_val, Y_val, self.val_stock_indices_tensor,
-                X_test, Y_test, self.test_stock_indices_tensor
-            )
+            # Check if we should use uniform sampling (for shared portfolio or multi-stock TabPFN)
+            use_uniform_sampling = self.is_shared_tabpfn_portfolio or len(self.filtered_stock_list) > 1
+            
+            if use_uniform_sampling:
+                # For shared TabPFN portfolio or multi-stock TabPFN: combine train+val, use date-based sampling
+                if self.is_main:
+                    if self.is_shared_tabpfn_portfolio:
+                        print("[Shared TabPFN Portfolio] Combining train+val datasets for ensemble training")
+                    else:
+                        print(f"[TabPFN] Multi-stock mode ({len(self.filtered_stock_list)} stocks): using uniform date-based sampling")
+                # Combine train and val data
+                X_train_val = np.concatenate([X_train, X_val], axis=0) if isinstance(X_train, np.ndarray) else torch.cat([X_train, X_val], dim=0)
+                Y_train_val = np.concatenate([Y_train, Y_val], axis=0) if isinstance(Y_train, np.ndarray) else torch.cat([Y_train, Y_val], dim=0)
+                Strain_val = np.concatenate([Strain, Sval], axis=0) if isinstance(Strain, np.ndarray) else np.concatenate([Strain, Sval], axis=0)
+                D_train_val = list(D_train) + list(D_val)
+                # Convert to tensors if needed
+                if isinstance(X_train_val, np.ndarray):
+                    X_train_val = torch.from_numpy(X_train_val).float()
+                if isinstance(Y_train_val, np.ndarray):
+                    Y_train_val = torch.from_numpy(Y_train_val).float()
+                Strain_val_tensor = torch.tensor(Strain_val, dtype=torch.long)
+                self._prepare_shared_tabpfn_portfolio_data(
+                    X_train_val, Y_train_val, Strain_val_tensor, D_train_val,
+                    X_test, Y_test, self.test_stock_indices_tensor
+                )
+            else:
+                # Single stock TabPFN: combine train+val but still use per-stock structure
+                if self.is_main:
+                    print(f"[TabPFN] Single stock mode: combining train+val datasets")
+                # Combine train and val data
+                X_train_val = np.concatenate([X_train, X_val], axis=0) if isinstance(X_train, np.ndarray) else torch.cat([X_train, X_val], dim=0)
+                Y_train_val = np.concatenate([Y_train, Y_val], axis=0) if isinstance(Y_train, np.ndarray) else torch.cat([Y_train, Y_val], axis=0)
+                Strain_val = np.concatenate([Strain, Sval], axis=0) if isinstance(Strain, np.ndarray) else np.concatenate([Strain, Sval], axis=0)
+                # Convert to tensors if needed
+                if isinstance(X_train_val, np.ndarray):
+                    X_train_val = torch.from_numpy(X_train_val).float()
+                if isinstance(Y_train_val, np.ndarray):
+                    Y_train_val = torch.from_numpy(Y_train_val).float()
+                Strain_val_tensor = torch.tensor(Strain_val, dtype=torch.long)
+                # Build TabPFN split with combined train+val data
+                self.tabpfn_feature_dim = int(X_train_val.shape[1] * X_train_val.shape[2]) if X_train_val.ndim == 3 else X_train_val.shape[-1]
+                self.tabpfn_data = {
+                    'train': self._build_tabpfn_split(X_train_val, Y_train_val, Strain_val_tensor),
+                    'test': self._build_tabpfn_split(X_test, Y_test, self.test_stock_indices_tensor)
+                }
+                self.tabpfn_models = {}
+                self.tabpfn_results = {}
+                self.tabpfn_trained = False
         self.train_ds = IndexedDataset(X_train, Y_train, D_train)
         val_ds   = IndexedDataset(X_val,   Y_val,   D_val)
         test_ds  = IndexedDataset(X_test,  Y_test,  D_test)
@@ -769,7 +837,7 @@ class Trainer():
             return None
         
         final_model_config = self._create_model_config(input_shape)
-
+        
         # Determine the save path for the model using unique ID system
         existing_model_path = None
         if self.config.saved_model is not None:
@@ -847,53 +915,53 @@ class Trainer():
                         f"Failed to create model '{self.model_type}': {e}\n"
                         f"No models are currently registered. Make sure model modules are imported."
                     )
-            
-            if self.is_dist:
-                self.Model = DDP(self.Model, device_ids=[self.local_rank])
-                if self.is_main:
-                    print(f"[DDP] using {self.world_size} processes across {dist.get_world_size()} GPUs")
-            elif self.device.type == "cuda" and torch.cuda.device_count() > 1:
-                self.Model = nn.DataParallel(self.Model)
-                if self.is_main:
-                    print(f"[DataParallel] using {torch.cuda.device_count()} GPUs")
-            
+        
+        if self.is_dist:
+            self.Model = DDP(self.Model, device_ids=[self.local_rank])
             if self.is_main:
-                model_to_count = self.Model.module if hasattr(self.Model, 'module') else self.Model
-                total_params = sum(param.numel() for param in model_to_count.parameters())
-                print(f"{total_params:,} total parameters")
-                if self.model_type_upper == "TIMESNET":
-                    freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
-                    if freeze_encoder:
-                        timesnet_model = model_to_count.timesnet if hasattr(model_to_count, 'timesnet') else model_to_count
-                        frozen_params = sum(p.numel() for p in model_to_count.parameters() if not p.requires_grad)
-                        trainable_params = sum(p.numel() for p in model_to_count.parameters() if p.requires_grad)
-                        print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
-            
-            if existing_model_path is not None and os.path.exists(existing_model_path):
-                state_dict = torch.load(existing_model_path, map_location="cpu")
-                target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
-                target_module.load_state_dict(state_dict)
-                if self.is_main:
-                    print(f"[load] Restored weights from {existing_model_path}")
-            else:
-                if self.is_main:
-                    if self.config.saved_model is not None:
-                        print(f"[load] No saved model found at {self.config.saved_model}, starting with random weights")
-                    else:
-                        print(f"[load] Starting training with random weights (new model)")
+                print(f"[DDP] using {self.world_size} processes across {dist.get_world_size()} GPUs")
+        elif self.device.type == "cuda" and torch.cuda.device_count() > 1:
+            self.Model = nn.DataParallel(self.Model)
+            if self.is_main:
+                print(f"[DataParallel] using {torch.cuda.device_count()} GPUs")
 
-            self.optimizer = optim.Adam(self.Model.parameters(), lr=5e-5, weight_decay=1e-5)
-            self.loss_fn = nn.MSELoss()
-            self.max_grad_norm = 0.5
-            early_stop_patience = self.config.early_stop_patience
-            early_stop_min_delta = self.config.early_stop_min_delta
-            self.stopper = EarlyStopper(
-                patience=early_stop_patience,
-                min_delta=early_stop_min_delta,
-                is_dist=self.is_dist,
-                rank=self.rank,
-                save_path=self.save_path
-            )
+        if self.is_main:
+            model_to_count = self.Model.module if hasattr(self.Model, 'module') else self.Model
+            total_params = sum(param.numel() for param in model_to_count.parameters())
+            print(f"{total_params:,} total parameters")
+            if self.model_type_upper == "TIMESNET":
+                freeze_encoder = getattr(final_model_config, 'freeze_encoder', False)
+                if freeze_encoder:
+                    timesnet_model = model_to_count.timesnet if hasattr(model_to_count, 'timesnet') else model_to_count
+                    frozen_params = sum(p.numel() for p in model_to_count.parameters() if not p.requires_grad)
+                    trainable_params = sum(p.numel() for p in model_to_count.parameters() if p.requires_grad)
+                    print(f"[TimesNet] Encoder frozen: {frozen_params:,} parameters frozen, {trainable_params:,} parameters trainable")
+        
+        if existing_model_path is not None and os.path.exists(existing_model_path):
+            state_dict = torch.load(existing_model_path, map_location="cpu")
+            target_module = self.Model.module if hasattr(self.Model, "module") else self.Model
+            target_module.load_state_dict(state_dict)
+            if self.is_main:
+                print(f"[load] Restored weights from {existing_model_path}")
+        else:
+            if self.is_main:
+                if self.config.saved_model is not None:
+                    print(f"[load] No saved model found at {self.config.saved_model}, starting with random weights")
+                else:
+                    print(f"[load] Starting training with random weights (new model)")
+
+        self.optimizer = optim.Adam(self.Model.parameters(), lr=5e-5, weight_decay=1e-5)
+        self.loss_fn = nn.MSELoss()
+        self.max_grad_norm = 0.5
+        early_stop_patience = self.config.early_stop_patience
+        early_stop_min_delta = self.config.early_stop_min_delta
+        self.stopper = EarlyStopper(
+            patience=early_stop_patience,
+            min_delta=early_stop_min_delta,
+            is_dist=self.is_dist,
+            rank=self.rank,
+            save_path=self.save_path
+        )
         
         # Storage for evaluation metrics
         self.predicted_returns = []
@@ -1113,6 +1181,188 @@ class Trainer():
         self.tabpfn_results = {}
         self.tabpfn_trained = False
 
+    def _prepare_shared_tabpfn_portfolio_data(
+        self,
+        X_train_val, Y_train_val, Strain_val, D_train_val,
+        X_test, Y_test, Stest
+    ):
+        """
+        Prepare data for shared TabPFN portfolio with date-based uniform sampling.
+        
+        Combines train+val data, groups by date, and uniformly samples stocks per date
+        to stay under max_samples limit while ensuring each stock appears roughly equally.
+        """
+        import copy
+        from collections import defaultdict
+        
+        # Get max_samples from config
+        max_samples = getattr(self.model_config.base_model_config, 'max_samples', 50000)
+        num_stocks = len(self.filtered_stock_list)
+        
+        # Convert dates to numpy array for easier manipulation
+        if isinstance(D_train_val, list):
+            D_train_val = np.array(D_train_val)
+        elif isinstance(D_train_val, torch.Tensor):
+            D_train_val = D_train_val.detach().cpu().numpy()
+        
+        # Convert stock indices to numpy
+        if isinstance(Strain_val, torch.Tensor):
+            Strain_val = Strain_val.detach().cpu().numpy()
+        Strain_val = np.asarray(Strain_val, dtype=int)
+        
+        # Get unique dates
+        unique_dates = np.unique(D_train_val)
+        num_dates = len(unique_dates)
+        
+        # Calculate stocks per date
+        stocks_per_date = max(1, (num_stocks * num_dates) // max_samples)
+        if self.is_main:
+            print(f"[Shared TabPFN Portfolio] Date-based sampling:")
+            print(f"  Total stocks: {num_stocks}, Total dates: {num_dates}")
+            print(f"  Max samples: {max_samples}, Stocks per date: {stocks_per_date}")
+        
+        # Group samples by date
+        date_to_indices = defaultdict(list)
+        for idx, date in enumerate(D_train_val):
+            date_to_indices[date].append(idx)
+        
+        # Track stock appearance counts for balancing
+        stock_appearance_count = {i: 0 for i in range(num_stocks)}
+        
+        # Select samples: for each date, select stocks uniformly
+        selected_indices = []
+        for date in unique_dates:
+            date_indices = date_to_indices[date]
+            # Get stock indices for this date
+            date_stock_indices = Strain_val[date_indices]
+            unique_stocks_in_date = np.unique(date_stock_indices)
+            
+            # Sort stocks by appearance count (ascending) to prioritize underrepresented
+            stocks_sorted = sorted(unique_stocks_in_date, key=lambda s: stock_appearance_count[s])
+            
+            # Select top stocks_per_date stocks
+            selected_stocks = stocks_sorted[:stocks_per_date]
+            
+            # Update appearance counts
+            for stock_idx in selected_stocks:
+                stock_appearance_count[stock_idx] += 1
+            
+            # Get all indices for selected stocks on this date
+            for idx in date_indices:
+                if Strain_val[idx] in selected_stocks:
+                    selected_indices.append(idx)
+        
+        selected_indices = np.array(selected_indices, dtype=int)
+        
+        if self.is_main:
+            total_selected = len(selected_indices)
+            print(f"  Selected {total_selected} samples (target: <= {max_samples})")
+            # Print stock appearance distribution
+            min_app = min(stock_appearance_count.values())
+            max_app = max(stock_appearance_count.values())
+            print(f"  Stock appearances: min={min_app}, max={max_app}, avg={np.mean(list(stock_appearance_count.values())):.1f}")
+        
+        # Extract selected samples
+        X_selected = X_train_val[selected_indices]
+        Y_selected = Y_train_val[selected_indices]
+        Strain_selected = Strain_val[selected_indices]
+        
+        # Flatten features for TabPFN
+        self.tabpfn_feature_dim = int(X_selected.shape[1] * X_selected.shape[2]) if X_selected.ndim == 3 else X_selected.shape[-1]
+        flat_X = self._flatten_tabpfn_tensor(X_selected)
+        encoded_targets, raw_targets = self._encode_tabpfn_targets(Y_selected)
+        
+        # Build TabPFN-compatible format (single combined train+val split)
+        self.tabpfn_data = {
+            'train': {
+                'flat_X': flat_X,
+                'targets_raw': raw_targets,
+                'targets_encoded': encoded_targets,
+                'stock_indices': Strain_selected,
+                'total_samples': len(flat_X),
+                'selected_indices': selected_indices  # Store for reference
+            },
+            'test': self._build_tabpfn_split(X_test, Y_test, Stest)
+        }
+        
+        # Initialize ensemble models list
+        self.tabpfn_ensemble_models = []
+        self.tabpfn_results = {}
+        self.tabpfn_trained = False
+
+    def _train_shared_tabpfn_ensemble(self):
+        """
+        Train ensemble of TabPFN models for shared portfolio strategy.
+        Uses simple averaging ensemble method by training multiple models on different data subsets.
+        """
+        import copy
+        
+        train_data = self.tabpfn_data['train']
+        X = train_data['flat_X']
+        y = y_encoded = train_data['targets_encoded']
+        num_models = self.config.num_ensemble_models
+        
+        if self.is_main:
+            print(f"[Shared TabPFN Ensemble] Training ensemble with {self.config.ensemble_method} method...")
+            print(f"  Training data: {len(X)} samples")
+            print(f"  Number of ensemble models: {num_models}")
+        
+        if self.config.ensemble_method == "simple_average":
+            self.tabpfn_ensemble_models = []
+            n_samples = len(X)
+            
+            # Determine subset size (use 80% of data per model with overlap)
+            subset_size = int(n_samples * 0.8)
+            if subset_size < 100:
+                # If data is too small, use all data for each model
+                subset_size = n_samples
+                if self.is_main:
+                    print(f"  Warning: Data too small, using all {n_samples} samples for each model")
+            
+            # Get random state from config if available
+            random_state = getattr(self.model_config.base_model_config, 'random_state', 42)
+            rng = np.random.default_rng(random_state)
+            
+            # Train multiple models on different random subsets
+            for model_idx in range(num_models):
+                try:
+                    # Create random subset indices
+                    if subset_size >= n_samples:
+                        # Use all data
+                        subset_indices = np.arange(n_samples)
+                    else:
+                        # Random subset with replacement allowed for diversity
+                        subset_indices = rng.choice(n_samples, size=subset_size, replace=False)
+                    
+                    X_subset = X[subset_indices]
+                    y_subset = y[subset_indices]
+                    
+                    # Clone base model config
+                    base_config_clone = copy.deepcopy(self.model_config.base_model_config)
+                    # Use different random_state for each model to ensure diversity
+                    if hasattr(base_config_clone, 'random_state'):
+                        base_config_clone.random_state = random_state + model_idx
+                    
+                    model = TabPFNAdapter(base_config_clone)
+                    model.fit(X_subset, y_subset)
+                    self.tabpfn_ensemble_models.append(model)
+                    
+                    if self.is_main:
+                        print(f"  Model {model_idx + 1}/{num_models}: trained on {len(X_subset)} samples")
+                        
+                except Exception as e:
+                    if self.is_main:
+                        print(f"[Shared TabPFN Ensemble] Warning: failed to fit model {model_idx + 1}: {e}")
+                    # Continue with other models even if one fails
+            
+            if self.is_main:
+                successful_models = len(self.tabpfn_ensemble_models)
+                print(f"[Shared TabPFN Ensemble] Successfully trained {successful_models}/{num_models} models")
+                if successful_models == 0:
+                    raise RuntimeError("Failed to train any ensemble models")
+        else:
+            raise ValueError(f"Unsupported ensemble method: {self.config.ensemble_method}")
+
     def _fit_tabpfn_models(self):
         self.tabpfn_models = {}
         for stock_idx, ticker in enumerate(self.filtered_stock_list):
@@ -1134,6 +1384,45 @@ class Trainer():
     def _decode_tabpfn_predictions(self, labels):
         labels = np.asarray(labels).reshape(-1)
         return np.where(labels > 0, 1.0, -1.0).astype(np.float32)
+
+    def _predict_shared_tabpfn_for_split(self, split_name):
+        """
+        Predict using ensemble models for shared TabPFN portfolio.
+        Averages predictions from all ensemble models.
+        """
+        split = self.tabpfn_data[split_name]
+        total_samples = split['total_samples']
+        
+        if len(self.tabpfn_ensemble_models) == 0:
+            # No models trained, return zeros
+            return np.zeros(total_samples, dtype=np.float32)
+        
+        # Get predictions from all ensemble models
+        all_predictions = []
+        X = split['flat_X']
+        
+        for model_idx, model in enumerate(self.tabpfn_ensemble_models):
+            if model is None or not getattr(model, 'is_fitted', False):
+                continue
+            try:
+                labels = model.predict(X)
+                decoded = self._decode_tabpfn_predictions(labels)
+                all_predictions.append(decoded)
+            except Exception as e:
+                if self.is_main:
+                    print(f"[Shared TabPFN Ensemble] Warning: prediction failed for model {model_idx}: {e}")
+        
+        if len(all_predictions) == 0:
+            # No valid predictions, return zeros
+            return np.zeros(total_samples, dtype=np.float32)
+        
+        # Average predictions (simple averaging ensemble)
+        if self.config.ensemble_method == "simple_average":
+            preds = np.mean(all_predictions, axis=0)
+        else:
+            raise ValueError(f"Unsupported ensemble method: {self.config.ensemble_method}")
+        
+        return preds.astype(np.float32)
 
     def _predict_tabpfn_for_split(self, split_name):
         split = self.tabpfn_data[split_name]
@@ -1160,7 +1449,16 @@ class Trainer():
         if not self.is_main:
             return
         print("\n[TabPFN] Aggregate metrics:")
-        for split in ('train', 'val', 'test'):
+        # Check if uniform sampling was used (shared portfolio or multi-stock TabPFN)
+        uses_uniform_sampling = (
+            self.is_shared_tabpfn_portfolio or 
+            ('train' in self.tabpfn_data and 'per_stock' not in self.tabpfn_data['train'])
+        )
+        # All TabPFN models now combine train+val, so no separate 'val' split
+        splits = ('train', 'test')
+        for split in splits:
+            if split not in self.tabpfn_results:
+                continue
             preds = self.tabpfn_results[split]['preds']
             targets = self.tabpfn_results[split]['targets']
             metrics = _compute_basic_metrics(preds, targets)
@@ -1176,43 +1474,152 @@ class Trainer():
         if not hasattr(self, 'tabpfn_data'):
             raise RuntimeError("TabPFN data has not been prepared.")
 
-        if self.is_main:
-            print(f"[TabPFN] Training {len(self.filtered_stock_list)} per-stock models...")
-        self._fit_tabpfn_models()
+        # Check if uniform sampling was used (shared portfolio or multi-stock TabPFN)
+        # Uniform sampling creates data structure without 'per_stock' key
+        uses_uniform_sampling = (
+            self.is_shared_tabpfn_portfolio or 
+            ('train' in self.tabpfn_data and 'per_stock' not in self.tabpfn_data['train'])
+        )
+        
+        if uses_uniform_sampling:
+            # Shared TabPFN portfolio or multi-stock TabPFN: use ensemble training
+            if self.is_main:
+                if self.is_shared_tabpfn_portfolio:
+                    print(f"[Shared TabPFN Portfolio] Training ensemble models...")
+                else:
+                    print(f"[TabPFN] Training ensemble models on uniformly sampled data...")
+            self._train_shared_tabpfn_ensemble()
+            
+            # Get predictions for train and test (no separate val for uniform sampling)
+            results = {}
+            for split in ('train', 'test'):
+                preds = self._predict_shared_tabpfn_for_split(split)
+                targets = self.tabpfn_data[split]['targets_raw']
+                results[split] = {'preds': preds, 'targets': targets}
+            self.tabpfn_results = results
+        else:
+            # Regular TabPFN with single stock: per-stock models (train+val already combined)
+            if self.is_main:
+                print(f"[TabPFN] Training {len(self.filtered_stock_list)} per-stock models...")
+            self._fit_tabpfn_models()
 
-        results = {}
-        for split in ('train', 'val', 'test'):
-            preds = self._predict_tabpfn_for_split(split)
-            targets = self.tabpfn_data[split]['targets_raw']
-            results[split] = {'preds': preds, 'targets': targets}
-        self.tabpfn_results = results
+            results = {}
+            # All TabPFN models now combine train+val, so only 'train' and 'test' splits
+            for split in ('train', 'test'):
+                preds = self._predict_tabpfn_for_split(split)
+                targets = self.tabpfn_data[split]['targets_raw']
+                results[split] = {'preds': preds, 'targets': targets}
+            self.tabpfn_results = results
+        
         self.tabpfn_trained = True
-
         self._print_tabpfn_metrics()
         self._save_tabpfn_models()
         return True
 
     def _save_tabpfn_models(self):
-        if not getattr(self, 'tabpfn_models', None):
-            return
-        save_path = self.save_path if self.save_path.endswith(".pkl") else f"{self.save_path}.pkl"
-        serializable = {}
-        for stock_idx, model in self.tabpfn_models.items():
-            if model is not None and getattr(model, 'is_fitted', False):
-                serializable[self.filtered_stock_list[stock_idx]] = model.estimator
-        try:
-            with open(save_path, "wb") as handle:
-                pickle.dump({
-                    'backend': self.model_config.backend,
-                    'stocks': self.filtered_stock_list,
-                    'models': serializable,
-                    'feature_dim': self.tabpfn_feature_dim
-                }, handle)
-            if self.is_main:
-                print(f"[TabPFN] Saved fitted models to {save_path}")
-        except Exception as e:
-            if self.is_main:
-                print(f"[TabPFN] Warning: failed to save models to {save_path}: {e}")
+        # Get base path without extension
+        base_path = self.save_path
+        if base_path.endswith(".pkl"):
+            base_path = base_path[:-4]
+        if base_path.endswith(".pth"):
+            base_path = base_path[:-4]
+        
+        # Check if uniform sampling was used (shared portfolio or multi-stock TabPFN)
+        uses_uniform_sampling = (
+            self.is_shared_tabpfn_portfolio or 
+            ('train' in self.tabpfn_data and 'per_stock' not in self.tabpfn_data['train'])
+        )
+        
+        if uses_uniform_sampling:
+            # Save each ensemble model separately
+            if not getattr(self, 'tabpfn_ensemble_models', None) or len(self.tabpfn_ensemble_models) == 0:
+                return
+            
+            saved_paths = []
+            for model_idx, model in enumerate(self.tabpfn_ensemble_models):
+                if model is None or not getattr(model, 'is_fitted', False):
+                    continue
+                
+                # Save each ensemble model to its own file
+                model_path = f"{base_path}_ensemble_{model_idx}.pkl"
+                try:
+                    with open(model_path, "wb") as handle:
+                        pickle.dump({
+                            'backend': self.model_config.base_model_config.backend,
+                            'model_index': model_idx,
+                            'estimator': model.estimator,
+                            'feature_dim': self.tabpfn_feature_dim
+                        }, handle)
+                    saved_paths.append(model_path)
+                except Exception as e:
+                    if self.is_main:
+                        print(f"[Shared TabPFN Ensemble] Warning: failed to save model {model_idx} to {model_path}: {e}")
+            
+            # Save metadata file with information about all ensemble models
+            metadata_path = f"{base_path}_ensemble_metadata.pkl"
+            try:
+                with open(metadata_path, "wb") as handle:
+                    pickle.dump({
+                        'ensemble_method': self.config.ensemble_method,
+                        'num_ensemble_models': len(self.tabpfn_ensemble_models),
+                        'stocks': self.filtered_stock_list,
+                        'model_paths': saved_paths,
+                        'feature_dim': self.tabpfn_feature_dim,
+                        'backend': self.model_config.base_model_config.backend
+                    }, handle)
+                if self.is_main:
+                    print(f"[Shared TabPFN Ensemble] Saved {len(saved_paths)} ensemble models separately")
+                    print(f"  Metadata saved to: {metadata_path}")
+                    for path in saved_paths:
+                        print(f"  Model saved to: {path}")
+            except Exception as e:
+                if self.is_main:
+                    print(f"[Shared TabPFN Ensemble] Warning: failed to save metadata to {metadata_path}: {e}")
+        else:
+            # Save each per-stock model separately
+            if not getattr(self, 'tabpfn_models', None):
+                return
+            
+            saved_paths = {}
+            for stock_idx, model in self.tabpfn_models.items():
+                if model is None or not getattr(model, 'is_fitted', False):
+                    continue
+                
+                ticker = self.filtered_stock_list[stock_idx]
+                # Save each stock model to its own file
+                model_path = f"{base_path}_{ticker}.pkl"
+                try:
+                    with open(model_path, "wb") as handle:
+                        pickle.dump({
+                            'backend': self.model_config.backend,
+                            'stock': ticker,
+                            'stock_index': stock_idx,
+                            'estimator': model.estimator,
+                            'feature_dim': self.tabpfn_feature_dim
+                        }, handle)
+                    saved_paths[ticker] = model_path
+                except Exception as e:
+                    if self.is_main:
+                        print(f"[TabPFN] Warning: failed to save model for {ticker} to {model_path}: {e}")
+            
+            # Save metadata file with information about all stock models
+            metadata_path = f"{base_path}_metadata.pkl"
+            try:
+                with open(metadata_path, "wb") as handle:
+                    pickle.dump({
+                        'stocks': self.filtered_stock_list,
+                        'model_paths': saved_paths,
+                        'feature_dim': self.tabpfn_feature_dim,
+                        'backend': self.model_config.backend
+                    }, handle)
+                if self.is_main:
+                    print(f"[TabPFN] Saved {len(saved_paths)} per-stock models separately")
+                    print(f"  Metadata saved to: {metadata_path}")
+                    for ticker, path in saved_paths.items():
+                        print(f"  {ticker} model saved to: {path}")
+            except Exception as e:
+                if self.is_main:
+                    print(f"[TabPFN] Warning: failed to save metadata to {metadata_path}: {e}")
 
     def _evaluate_tabpfn_predictions(self):
         if not getattr(self, 'tabpfn_trained', False):

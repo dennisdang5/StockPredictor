@@ -97,7 +97,7 @@ class LSTMModel(BaseModel):
         init.xavier_uniform_(self.linear.weight.data)
         self.linear.bias.data.fill_(0)
 
-    def forward(self, x):
+    def forward(self, x, params=None):
         # Normalize input features at each time step
         # This helps stabilize training even if input normalization varies
         x = self.input_norm(x)

@@ -1,5 +1,5 @@
 from ..base import BaseModel
-from ..configs import CNNAELSTMConfig
+from ..configs import CNNAELSTMConfig, CNNAutoEncoderConfig, LSTMConfig
 from .cnn_autoencoder import CNNAutoEncoder
 from .lstm import LSTMModel
 import torch
@@ -49,14 +49,22 @@ class CNNAELSTM(BaseModel):
                 f"got {type(model_config).__name__}. "
                 f"Use CNNAELSTMConfig(input_shape=..., kernel_size=..., etc.) to create the config."
             )
-        
+        self.model_config = model_config
         self.input_shape = model_config.to_dict().get('input_shape', (31, 3))
         self.kernel_size = model_config.to_dict().get('kernel_size', 3)
         
-        self.CNNAE = CNNAutoEncoder(model_config=model_config)
-        self.LSTM = LSTMModel(model_config=model_config)
+        # Create CNNAutoEncoderConfig from CNNAELSTMConfig for the CNNAutoEncoder component
+        cnn_ae_config = model_config.get_cnn_ae_config()
+        lstm_config = model_config.get_lstm_config()
+        self.CNNAE = CNNAutoEncoder(model_config=cnn_ae_config)
+        self.LSTM = LSTMModel(model_config=lstm_config)
 
-    def forward(self, x):
+    def forward(self, x, params=None):
         x = self.CNNAE(x)
         x = self.LSTM(x)
         return x
+
+    @classmethod
+    def from_config(cls, model_config):
+        """Factory hook so the registry can instantiate the model."""
+        return cls(model_config)

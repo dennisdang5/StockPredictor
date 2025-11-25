@@ -103,7 +103,58 @@ class TimesNetAdapter(BaseModel):
             x_mark_enc=torch.ones(x_enc.shape[0], x_enc.shape[1], device=x_enc.device)
         else:
             x_mark_enc = params['mask'] # mask of valid timesteps
-        return self.timesnet(x_enc, x_mark_enc, None, None, None)
+        
+        # Get raw output from TimesNet (shape: [batch_size, num_classes])
+        output = self.timesnet(x_enc, x_mark_enc, None, None, None)
+        
+        # If classification with 3 classes, convert to single value using top_k ranking method
+        # similar to how LSTM uses cross-sectional ranking for classification
+        # Formula: (positive - negative) * (1 - neutral)
+        # where: class 0 = negative, class 1 = neutral, class 2 = positive
+        if (hasattr(self.model_config, 'task_name') and 
+            self.model_config.task_name == 'classification' and
+            hasattr(self.model_config, 'num_class') and 
+            self.model_config.num_class == 3 and
+            output.shape[1] == 3):
+            
+            # Convert logits to probabilities using softmax
+            probs = torch.nn.functional.softmax(output, dim=1)
+            
+            # Extract probabilities for each class
+            negative = probs[:, 0]  # Class 0: negative return
+            neutral = probs[:, 1]   # Class 1: neutral return
+            positive = probs[:, 2]   # Class 2: positive return
+            
+            # Use ranking-based approach: rank classes by probability (similar to top_k method)
+            # The ranking gives us confidence in each class
+            # Apply conversion formula: (positive - negative) * (1 - neutral)
+            # This formula:
+            # - When positive > negative: gives positive value
+            # - When negative > positive: gives negative value  
+            # - (1 - neutral) scales by confidence (high neutral → low confidence in direction)
+            single_output = (positive - negative) * (1 - neutral)
+            
+            # Reshape to (batch_size, 1) to match expected output shape
+            return single_output.unsqueeze(1)
+        
+        # For other cases (2 classes, regression, etc.), return as-is
+        # If it's classification with 2 classes, we might want to convert to single value too
+        if (hasattr(self.model_config, 'task_name') and 
+            self.model_config.task_name == 'classification' and
+            output.shape[1] > 1):
+            # For binary classification, take the difference or first class
+            # This handles cases where num_class != 3
+            if output.shape[1] == 2:
+                probs = torch.nn.functional.softmax(output, dim=1)
+                # Convert binary to single value: prob[1] - prob[0]
+                single_output = probs[:, 1] - probs[:, 0]
+                return single_output.unsqueeze(1)
+            else:
+                # For other multi-class cases, take first class or use argmax
+                # Default: use first class logit
+                return output[:, 0:1]
+        
+        return output
 
 
 # Register the model

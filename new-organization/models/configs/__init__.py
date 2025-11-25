@@ -12,6 +12,7 @@ from .model_configs import (
     CNNAutoEncoderConfig,
     TimesNetConfig,
     TabPFNConfig,
+    MLPConfig,
     PortfolioConfig,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     'CNNAutoEncoderConfig',
     'TimesNetConfig',
     'TabPFNConfig',
+    'MLPConfig',
     'PortfolioConfig',
 ]
