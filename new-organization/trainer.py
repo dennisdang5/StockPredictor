@@ -1060,16 +1060,24 @@ class Trainer():
         
         # Try to reload from checkpoint
         checkpoint_path = self.save_path
+        checkpoint_source = "primary checkpoint"
         if not os.path.exists(checkpoint_path):
-            # Try to find the last periodic save
-            if self.is_main:
-                print(f"[WARNING] No checkpoint found at {checkpoint_path}. Cannot recover from NaN.")
-            return False
+            # Fall back to the last periodic checkpoint if available
+            if self.last_good_checkpoint and os.path.exists(self.last_good_checkpoint):
+                checkpoint_path = self.last_good_checkpoint
+                checkpoint_source = "periodic checkpoint"
+            else:
+                if self.is_main:
+                    warning_msg = f"[WARNING] No checkpoint found at {self.save_path}."
+                    if self.last_good_checkpoint:
+                        warning_msg += f" Last periodic checkpoint {self.last_good_checkpoint} not available."
+                    print(f"{warning_msg} Cannot recover from NaN.")
+                return False
         
         try:
             if self.is_main:
                 print(f"[RECOVERY] Attempt {self.nan_recovery_attempts}/{self.max_recovery_attempts}: "
-                      f"Reloading from checkpoint {checkpoint_path}")
+                      f"Reloading from {checkpoint_source} {checkpoint_path}")
             
             # Load checkpoint
             state_dict = torch.load(checkpoint_path, map_location="cpu")
@@ -2227,13 +2235,20 @@ class Trainer():
             return
         
         try:
+            save_dir = os.path.dirname(self.save_path)
+            base_name = os.path.basename(self.save_path)
+            checkpoint_filename = f"checkpoint_epoch{epoch:04d}_{base_name}"
+            checkpoint_path = os.path.join(save_dir, checkpoint_filename) if save_dir else checkpoint_filename
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            
             # Get the underlying model (unwrap DDP/DataParallel if needed)
             model_to_save = self.Model.module if hasattr(self.Model, "module") else self.Model
-            torch.save(model_to_save.state_dict(), "checkpoint_" + self.save_path )
-            print(f"[periodic save] Model saved at epoch {epoch} to checkpoint_{self.save_path}")
+            torch.save(model_to_save.state_dict(), checkpoint_path)
+            print(f"[periodic save] Model saved at epoch {epoch} to {checkpoint_path}")
             # Reset recovery counter on successful save (model is stable)
             self.nan_recovery_attempts = 0
-            self.last_good_checkpoint = "checkpoint_" + self.save_path
+            self.last_good_checkpoint = checkpoint_path
         except Exception as e:
             print(f"[ERROR] Failed to save model periodically at epoch {epoch}: {e}")
     
@@ -3187,10 +3202,27 @@ class Trainer():
         return input_data
 
     def stop(self):
+        """Release trainer resources (TensorBoard writer, distributed group, GPU memory)."""
         if self.writer is not None:
+            try:
+                self.writer.flush()
+            except Exception:
+                pass
             self.writer.close()
+            self.writer = None
         
-        # Clean up distributed process group
-        if self.is_dist:
-            dist.destroy_process_group()
+        # Clean up distributed process group so future trainers can reinitialize cleanly
+        if self.is_dist and dist.is_available() and dist.is_initialized():
+            try:
+                dist.barrier()
+            except Exception as e:
+                if self.is_main:
+                    print(f"[WARNING] Failed to synchronize before destroying process group: {e}")
+            try:
+                dist.destroy_process_group()
+            except Exception as e:
+                if self.is_main:
+                    print(f"[WARNING] Failed to destroy process group: {e}")
+            finally:
+                self.is_dist = False
 

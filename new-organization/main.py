@@ -236,6 +236,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     short_history = ["1990-01-01", "1999-01-01"]
     long_history = ["1990-01-01", "2015-12-31"]
    
+    """
     # ---------------------------------------------------------------------
     # 1. Base LSTM (no NLP features)
     # ---------------------------------------------------------------------
@@ -257,6 +258,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         use_nlp=False,
         nlp_method=None
     ))
+    """
     
     # ---------------------------------------------------------------------
     # 2. Base LSTM + aggregated NLP
@@ -486,6 +488,8 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
         'error': None,
         'training_time': None
     }
+    trainer = None
+    actual_save_path = None
     
     try:
         # Create trainer config
@@ -533,6 +537,12 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
         
         import traceback
         traceback.print_exc()
+    finally:
+        if trainer is not None:
+            try:
+                trainer.stop()
+            except Exception as cleanup_error:
+                print(f"[WARNING] Failed to clean up trainer resources: {cleanup_error}")
     
     return result
 
