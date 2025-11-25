@@ -8,7 +8,7 @@ __pycache__*
 data/
 **/data/
 *log_jobs*
-*slurm*
+*slurm-*
 
 # OS things #
 ######################
