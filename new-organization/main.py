@@ -21,6 +21,18 @@ from models.configs import (
 from models import get_available_models
 from data_sources import YFinanceDataSource
 
+
+def _is_rank_zero() -> bool:
+    """Return True if this process is rank 0 or running in single-process mode."""
+    rank = os.getenv("RANK")
+    return rank is None or rank == "0"
+
+
+def _rank0_print(*args, **kwargs):
+    """Print only from global rank 0 (or when not running distributed)."""
+    if _is_rank_zero():
+        print(*args, **kwargs)
+
 # Full stock universe (mirrors STOCKS in download_data.py)
 LARGE_STOCKS = [
     # Communication Services
@@ -436,7 +448,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'embed': 'timeF',
             'freq': 'd'
         }),
-        stocks=large_stocks,
+        stocks=base_stocks,
         time_args=long_history,
         batch_size=64,
         num_epochs=1000,
@@ -447,6 +459,36 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
     
     return configs
+
+
+def _override_epochs_if_needed(configs: List[ModelTrainingConfig]) -> None:
+    """Optionally override num_epochs for quick tests via env var."""
+    override_value = os.environ.get("QUICK_TEST_EPOCHS")
+    if not override_value:
+        return
+    try:
+        override_int = int(override_value)
+    except ValueError:
+        _rank0_print(f"[quick-test] Invalid QUICK_TEST_EPOCHS value: {override_value}. Ignoring override.")
+        return
+    _rank0_print(f"\n[quick-test] Overriding num_epochs to {override_int} for selected configs\n")
+    for cfg in configs:
+        cfg.num_epochs = override_int
+
+
+def get_model_config_by_name(name: str) -> ModelTrainingConfig:
+    """Return a specific ModelTrainingConfig by name."""
+    for cfg in create_model_configs():
+        if cfg.name == name:
+            return cfg
+    raise ValueError(f"Config '{name}' not found among defined model configurations.")
+
+
+def run_single_config(name: str, log_dir: str = "training_logs") -> Dict:
+    """Convenience helper to train a single configuration by name."""
+    config = get_model_config_by_name(name)
+    _override_epochs_if_needed([config])
+    return train_model(config, log_dir=log_dir)
 
 
 def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> Dict:
@@ -463,21 +505,21 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
     if not config.enabled:
         raise ValueError(f"Config '{config.name}' is disabled. Enable it before training.")
     
-    print("\n" + "=" * 80)
-    print(f"Training Model: {config.name}")
-    print("=" * 80)
-    print(f"Model Type: {config.model_type}")
-    print(f"Stocks: {config.stocks}")
-    print(f"Time Range: {config.time_args}")
+    _rank0_print("\n" + "=" * 80)
+    _rank0_print(f"Training Model: {config.name}")
+    _rank0_print("=" * 80)
+    _rank0_print(f"Model Type: {config.model_type}")
+    _rank0_print(f"Stocks: {config.stocks}")
+    _rank0_print(f"Time Range: {config.time_args}")
     # Batch size is not relevant for TabPFN models
     if config.model_type.upper() == "TABPFN":
-        print(f"Batch Size: N/A (not used for TabPFN), Epochs: {config.num_epochs}")
+        _rank0_print(f"Batch Size: N/A (not used for TabPFN), Epochs: {config.num_epochs}")
     else:
         batch_size_str = str(config.batch_size) if config.batch_size is not None else "32 (default)"
-        print(f"Batch Size: {batch_size_str}, Epochs: {config.num_epochs}")
-    print(f"Period Type: {config.period_type}, Lookback: {config.lookback}")
-    print(f"NLP: {config.use_nlp} ({config.nlp_method if config.use_nlp else 'N/A'})")
-    print("=" * 80 + "\n")
+        _rank0_print(f"Batch Size: {batch_size_str}, Epochs: {config.num_epochs}")
+    _rank0_print(f"Period Type: {config.period_type}, Lookback: {config.lookback}")
+    _rank0_print(f"NLP: {config.use_nlp} ({config.nlp_method if config.use_nlp else 'N/A'})")
+    _rank0_print("=" * 80 + "\n")
     
     start_time = time.time()
     result = {
@@ -511,7 +553,7 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
         for epoch in range(trainer.num_epochs):
             stop_condition = trainer.train_one_epoch(epoch)
             if stop_condition:
-                print(f"Early stopping triggered at epoch {epoch + 1}")
+                _rank0_print(f"Early stopping triggered at epoch {epoch + 1}")
                 break
         
         # Evaluate
@@ -522,27 +564,28 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
         result['training_time'] = time.time() - start_time
         result['saved_model'] = actual_save_path  # Include actual save path from trainer
         
-        print(f"\n✓ Successfully trained {config.name}")
-        print(f"  Training time: {result['training_time']:.2f} seconds")
-        print(f"  Model saved to: {actual_save_path}")
+        _rank0_print(f"\n✓ Successfully trained {config.name}")
+        _rank0_print(f"  Training time: {result['training_time']:.2f} seconds")
+        _rank0_print(f"  Model saved to: {actual_save_path}")
         
     except Exception as e:
         result['success'] = False
         result['error'] = str(e)
         result['training_time'] = time.time() - start_time
         
-        print(f"\n✗ Failed to train {config.name}")
-        print(f"  Error: {e}")
-        print(f"  Time elapsed: {result['training_time']:.2f} seconds")
+        _rank0_print(f"\n✗ Failed to train {config.name}")
+        _rank0_print(f"  Error: {e}")
+        _rank0_print(f"  Time elapsed: {result['training_time']:.2f} seconds")
         
         import traceback
-        traceback.print_exc()
+        if _is_rank_zero():
+            traceback.print_exc()
     finally:
         if trainer is not None:
             try:
                 trainer.stop()
             except Exception as cleanup_error:
-                print(f"[WARNING] Failed to clean up trainer resources: {cleanup_error}")
+                _rank0_print(f"[WARNING] Failed to clean up trainer resources: {cleanup_error}")
     
     return result
 
@@ -565,29 +608,29 @@ def train_all_models(
     """
     os.makedirs(log_dir, exist_ok=True)
     
-    print(f"\n{'=' * 80}")
-    print(f"Starting Training Session")
-    print(f"{'=' * 80}")
+    _rank0_print(f"\n{'=' * 80}")
+    _rank0_print("Starting Training Session")
+    _rank0_print(f"{'=' * 80}")
     enabled_count = sum(1 for cfg in configs if cfg.enabled)
     skipped_count = len(configs) - enabled_count
-    print(f"Total models defined: {len(configs)}")
-    print(f"Models scheduled to train: {enabled_count}")
+    _rank0_print(f"Total models defined: {len(configs)}")
+    _rank0_print(f"Models scheduled to train: {enabled_count}")
     if skipped_count:
-        print(f"Models skipped (disabled): {skipped_count}")
-    print(f"Log directory: {log_dir}")
-    print(f"Continue on error: {continue_on_error}")
-    print(f"{'=' * 80}\n")
+        _rank0_print(f"Models skipped (disabled): {skipped_count}")
+    _rank0_print(f"Log directory: {log_dir}")
+    _rank0_print(f"Continue on error: {continue_on_error}")
+    _rank0_print(f"{'=' * 80}\n")
     
     results = []
     session_start = time.time()
     
     for i, config in enumerate(configs, 1):
         status_prefix = "[SKIP]" if not config.enabled else "[RUN]"
-        print(f"\n[{i}/{len(configs)}] {status_prefix} {config.name}")
+        _rank0_print(f"\n[{i}/{len(configs)}] {status_prefix} {config.name}")
         
         if not config.enabled:
             reason = config.notes or "Disabled via configuration"
-            print(f"  ↳ Skipping (disabled). Reason: {reason}")
+            _rank0_print(f"  ↳ Skipping (disabled). Reason: {reason}")
             results.append({
                 'name': config.name,
                 'model_type': config.model_type,
@@ -604,14 +647,14 @@ def train_all_models(
             results.append(result)
             
             if not result['success'] and not continue_on_error:
-                print(f"\nStopping training due to error in {config.name}")
+                _rank0_print(f"\nStopping training due to error in {config.name}")
                 break
                 
         except KeyboardInterrupt:
-            print("\n\nTraining interrupted by user")
+            _rank0_print("\n\nTraining interrupted by user")
             break
         except Exception as e:
-            print(f"\nUnexpected error processing {config.name}: {e}")
+            _rank0_print(f"\nUnexpected error processing {config.name}: {e}")
             results.append({
                 'name': config.name,
                 'model_type': config.model_type,
@@ -628,15 +671,15 @@ def train_all_models(
     failed = sum(1 for r in results if r.get('success') is False)
     skipped = sum(1 for r in results if r.get('skipped'))
     
-    print(f"\n{'=' * 80}")
-    print(f"Training Session Complete")
-    print(f"{'=' * 80}")
-    print(f"Total processed: {len(results)}")
-    print(f"Successful: {successful}")
-    print(f"Failed: {failed}")
-    print(f"Skipped: {skipped}")
-    print(f"Total time: {session_time:.2f} seconds ({session_time/60:.2f} minutes)")
-    print(f"{'=' * 80}\n")
+    _rank0_print(f"\n{'=' * 80}")
+    _rank0_print("Training Session Complete")
+    _rank0_print(f"{'=' * 80}")
+    _rank0_print(f"Total processed: {len(results)}")
+    _rank0_print(f"Successful: {successful}")
+    _rank0_print(f"Failed: {failed}")
+    _rank0_print(f"Skipped: {skipped}")
+    _rank0_print(f"Total time: {session_time:.2f} seconds ({session_time/60:.2f} minutes)")
+    _rank0_print(f"{'=' * 80}\n")
     
     # Save results summary
     import json
@@ -651,7 +694,7 @@ def train_all_models(
             'results': results
         }, f, indent=2)
     
-    print(f"Results saved to: {summary_path}")
+    _rank0_print(f"Results saved to: {summary_path}")
     
     return results
 
@@ -664,29 +707,19 @@ if __name__ == "__main__":
     """
     
     # List available models
-    print("Available models:", ", ".join(get_available_models()))
-    print()
+    _rank0_print("Available models:", ", ".join(get_available_models()))
+    _rank0_print()
     
     # Create model configurations
     model_configs = create_model_configs()
-    
-    print(f"Created {len(model_configs)} model configurations:")
+    _rank0_print(f"Created {len(model_configs)} model configurations:")
     for cfg in model_configs:
         status = "enabled" if cfg.enabled else "disabled"
         extra = f" | notes: {cfg.notes}" if cfg.notes else ""
-        print(f"  - {cfg.name} ({cfg.model_type}) [{status}]{extra}")
-    print()
+        _rank0_print(f"  - {cfg.name} ({cfg.model_type}) [{status}]{extra}")
+    _rank0_print()
     
-    # Optionally override number of epochs for quick tests via env var
-    override_epochs = os.environ.get("QUICK_TEST_EPOCHS")
-    if override_epochs:
-        try:
-            override_epochs = int(override_epochs)
-            print(f"\n[quick-test] Overriding num_epochs to {override_epochs} for all configs\n")
-            for cfg in model_configs:
-                cfg.num_epochs = override_epochs
-        except ValueError:
-            print(f"[quick-test] Invalid QUICK_TEST_EPOCHS value: {override_epochs}. Ignoring override.")
+    _override_epochs_if_needed(model_configs)
 
     # Train all models
     results = train_all_models(
@@ -696,15 +729,15 @@ if __name__ == "__main__":
     )
     
     # Print final summary
-    print("\nFinal Results:")
+    _rank0_print("\nFinal Results:")
     for result in results:
         if result.get('skipped'):
-            print(f"  - {result['name']}: skipped ({result.get('reason', 'disabled')})")
+            _rank0_print(f"  - {result['name']}: skipped ({result.get('reason', 'disabled')})")
             continue
         status = "✓" if result.get('success') else "✗"
         time_str = f"{result['training_time']:.2f}s" if result.get('training_time') else "N/A"
-        print(f"  {status} {result['name']}: {time_str}")
+        _rank0_print(f"  {status} {result['name']}: {time_str}")
         if result.get('success') and result.get('saved_model'):
-            print(f"    Saved to: {result['saved_model']}")
+            _rank0_print(f"    Saved to: {result['saved_model']}")
         if not result.get('success'):
-            print(f"    Error: {result.get('error')}")
+            _rank0_print(f"    Error: {result.get('error')}")

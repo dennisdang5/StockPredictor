@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import socket
 import torch
 import torch.optim as optim
 from torch import nn
@@ -44,13 +45,49 @@ from statsmodels.tsa.stattools import adfuller, acf, pacf
 import warnings
 warnings.filterwarnings('ignore')
 
+
+def _is_global_rank_zero() -> bool:
+    """Return True if this process is rank 0 or not running under torch.distributed."""
+    rank = os.getenv("RANK")
+    return rank is None or rank == "0"
+
+
+def _dist_env_snapshot() -> dict:
+    """Capture key distributed environment variables for debugging purposes."""
+    return {
+        "RANK": os.getenv("RANK", "N/A"),
+        "LOCAL_RANK": os.getenv("LOCAL_RANK", "N/A"),
+        "WORLD_SIZE": os.getenv("WORLD_SIZE", "N/A"),
+        "MASTER_ADDR": os.getenv("MASTER_ADDR", "N/A"),
+        "MASTER_PORT": os.getenv("MASTER_PORT", "N/A"),
+    }
+
+
+def _format_env_snapshot() -> str:
+    env = _dist_env_snapshot()
+    return ", ".join(f"{key}={value}" for key, value in env.items())
+
+
+def _log_dist_debug(message: str, include_env: bool = False, force: bool = False) -> None:
+    """
+    Emit a debug log with host/rank context. By default logs only when ranks are defined.
+    Set force=True to always log (e.g., for errors or important milestones).
+    """
+    rank = os.getenv("RANK")
+    if not force and rank is None:
+        return
+    host = socket.gethostname()
+    env_info = f" | env=({_format_env_snapshot()})" if include_env else ""
+    print(f"[dist-debug][host={host}][rank={rank if rank is not None else 'N/A'}] {message}{env_info}", flush=True)
+
 # Import metrics computation helpers from evaluator
 try:
     from evaluation.evaluator import ModelEvaluator
     _EVALUATOR_AVAILABLE = True
 except ImportError:
     _EVALUATOR_AVAILABLE = False
-    print("[WARNING] evaluation.evaluator not available, metrics computation will be limited")
+    if _is_global_rank_zero():
+        print("[WARNING] evaluation.evaluator not available, metrics computation will be limited")
 
 
 def _compute_basic_metrics(predictions: np.ndarray, targets: np.ndarray) -> dict:
@@ -379,19 +416,27 @@ def validate_model_config(model_config, model_type, expected_config_class):
 
 def setup_dist():
     if not torch.cuda.is_available() or os.getenv("RANK") is None:
+        if _is_global_rank_zero():
+            print("[dist-debug] Running in single-process mode (no RANK env detected)", flush=True)
         return None, torch.device("cuda" if torch.cuda.is_available() else "cpu"), False
     
     # CRITICAL: Set device BEFORE initializing process group to avoid device mapping issues
     # This prevents NCCL from guessing which GPU to use, which can cause hangs
     local_rank = int(os.getenv("LOCAL_RANK", 0))
+    _log_dist_debug(f"Preparing to initialize process group on cuda:{local_rank}", include_env=True, force=True)
     torch.cuda.set_device(local_rank)
     
     # Now initialize process group with explicit device_id to ensure correct GPU mapping
-    dist.init_process_group(
-        backend="nccl", 
-        timeout=dt.timedelta(minutes=30),
-        device_id=torch.cuda.current_device()  # Explicitly specify the device
-    )
+    try:
+        dist.init_process_group(
+            backend="nccl", 
+            timeout=dt.timedelta(minutes=30),
+            device_id=torch.cuda.current_device()  # Explicitly specify the device
+        )
+        _log_dist_debug("Process group initialized successfully", include_env=False, force=True)
+    except Exception as exc:
+        _log_dist_debug(f"init_process_group failed: {exc}", include_env=True, force=True)
+        raise
     
     return local_rank, torch.device(f"cuda:{local_rank}"), True
 

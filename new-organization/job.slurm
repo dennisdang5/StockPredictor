@@ -77,7 +77,7 @@ fi
 
 # Master addr/port for rendezvous
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)
-MASTER_PORT=$((10000 + RANDOM % 50000))
+export MASTER_ADDR
 
 # Processes per node = GPUs per node (fallback if env var missing)
 NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-}
@@ -85,12 +85,23 @@ if ! [[ "$NPROC_PER_NODE" =~ ^[0-9]+$ ]]; then
   NPROC_PER_NODE=$(nvidia-smi -L | wc -l)
 fi
 
-echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
+echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
 
-# 3) Run your code under srun so it inherits the GPU allocation/cgroup cleanly.
-srun torchrun \
-  --nnodes="$SLURM_NNODES" \
-  --nproc_per_node="$NPROC_PER_NODE" \
-  --rdzv_backend=c10d \
-  --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
-  main.py
+SCRIPTS=(
+  "main_lstm_base_nlp.py"
+  "main_aelstm_base.py"
+  "main_aelstm_base_nlp.py"
+  "main_timesnet_small_agg.py"
+)
+
+for SCRIPT in "${SCRIPTS[@]}"; do
+  MASTER_PORT=$((10000 + RANDOM % 50000))
+  export MASTER_PORT
+  echo "--- Launching ${SCRIPT} with MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT} ---"
+  srun torchrun \
+    --nnodes="$SLURM_NNODES" \
+    --nproc_per_node="$NPROC_PER_NODE" \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+    "$SCRIPT"
+done
