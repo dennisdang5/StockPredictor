@@ -305,10 +305,10 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
     
     # ---------------------------------------------------------------------
-    # 4. Base AELSTM + aggregated NLP
+    # 4. AELSTM + aggregated NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="aelstm_base_nlp",
+        name="aelstm_nlp",
         model_type="AELSTM",
         model_config=AELSTMConfig(parameters={
             'input_shape': (31, 13),
