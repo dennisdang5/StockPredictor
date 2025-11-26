@@ -28,5 +28,20 @@
       "lookback": 240
     },
     "full_name": "LSTMConfig"
+  },
+  "bbbb7f04e4": {
+    "config_class": "AELSTMConfig",
+    "parameters": {
+      "input_shape": [
+        31,
+        3
+      ],
+      "hidden_size": 25,
+      "num_layers": 1,
+      "dropout": 0.1,
+      "seq_len": 31,
+      "lookback": 240
+    },
+    "full_name": "AELSTMConfig"
   }
 }
