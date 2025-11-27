@@ -262,8 +262,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -285,8 +285,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -307,8 +307,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -329,8 +329,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -354,8 +354,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -379,8 +379,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -404,8 +404,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -438,8 +438,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -474,8 +474,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'c_out': None,
             'freeze_encoder': False,
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=large_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -497,8 +497,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'random_state': 42,
             'model_params': {},
         }),
-        stocks=micro_stocks,
-        time_args=short_history,
+        stocks=base_stocks,
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -515,7 +515,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         name="portfolio_lstm_base",
         model_type="Portfolio",
         model_config=PortfolioConfig(parameters={
-            'stocks': micro_stocks,  # PortfolioConfig needs stocks
+            'stocks': large_stocks,  # PortfolioConfig needs stocks
             'base_model_type': "LSTM",
             'base_model_config': LSTMConfig(parameters={
                 'input_shape': (31, 3),
@@ -531,8 +531,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'use_stock_embeddings': True,
             'freeze_base_models': False,
         }),
-        stocks=micro_stocks,  # These go to ModelTrainingConfig
-        time_args=short_history,
+        stocks=large_stocks,  # These go to ModelTrainingConfig
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
