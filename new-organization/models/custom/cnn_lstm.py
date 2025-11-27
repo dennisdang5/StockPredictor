@@ -126,3 +126,7 @@ class CNNLSTMModel(BaseModel):
     def from_config(cls, model_config):
         """Factory hook so the registry can instantiate the model."""
         return cls(model_config)
+
+# Register the model
+from ..registry import ModelRegistry
+ModelRegistry.register("CNNLSTM", lambda config: CNNLSTMModel(config), CNNLSTMConfig)

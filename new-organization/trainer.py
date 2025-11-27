@@ -991,9 +991,9 @@ class Trainer():
         else:
             if self.is_main:
                 if self.config.saved_model is not None:
-                    print(f"[load] No saved model found at {self.config.saved_model}, starting with random weights")
+                    print(f"[load] No saved model found at {self.config.saved_model}, starting with initialized weights (Xavier/orthogonal)")
                 else:
-                    print(f"[load] Starting training with random weights (new model)")
+                    print(f"[load] Starting training with initialized weights (Xavier/orthogonal) (new model)")
 
         self.optimizer = optim.Adam(self.Model.parameters(), lr=5e-5, weight_decay=1e-5)
         self.loss_fn = nn.MSELoss()

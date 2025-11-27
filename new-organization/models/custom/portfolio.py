@@ -89,20 +89,17 @@ class PortfolioArchitecture(BaseModel):
             self.stock_models[self.stocks[0]] = first_model
             for ticker in self.stocks[1:]:
                 self.stock_models[ticker] = self._instantiate_base_model()
-
-        # single model for all stocks
         elif self.strategy == "shared":
+            # single model for all stocks
             self.shared_model = first_model
-
         ##### TODO: Implement industry strategy #####
         elif self.strategy == "industry":
             self.industry_models = nn.ModuleDict()
             self.industry_models[self.industries[0]] = first_model
             for industry in self.industries[1:]:
                 self.industry_models[industry] = self._instantiate_base_model()
-
         else:
-            raise ValueError(f"Unsupported strategy '{self.strategy}'. Use 'independent' or 'industry'.")
+            raise ValueError(f"Unsupported strategy '{self.strategy}'. Use 'independent' or 'shared'.")
 
         return output_dim
 
@@ -115,9 +112,16 @@ class PortfolioArchitecture(BaseModel):
         model.eval()
         with torch.no_grad():
             out = model(dummy)
-        if len(out) != self.model_config.output_dim:
-            raise ValueError(f"Output dimension mismatch. Expected {self.model_config.output_dim}, got {len(out)}.")
-        return len(out)
+        inferred_dim = len(out)
+        
+        # Only validate if output_dim is specified in config (optional check)
+        if hasattr(self.model_config, 'output_dim') and self.model_config.output_dim is not None:
+            if inferred_dim != self.model_config.output_dim:
+                raise ValueError(
+                    f"Output dimension mismatch. Expected {self.model_config.output_dim}, got {inferred_dim}."
+                )
+        
+        return inferred_dim
 
     def _backbone_parameters(self):
         if self.strategy == "independent":
@@ -142,8 +146,9 @@ class PortfolioArchitecture(BaseModel):
     def _forward_backbone(self, stock_idx: int, inputs):
         if self.strategy == "independent":
             ticker = self.stocks[stock_idx]
-            backbone = self.stock_models.get(ticker)
-            if backbone is None:
+            try:
+                backbone = self.stock_models[ticker]
+            except KeyError:
                 raise KeyError(f"No backbone found for stock '{ticker}' (idx={stock_idx})")
             return backbone(inputs)
         return self.shared_model(inputs)
@@ -181,7 +186,6 @@ class PortfolioArchitecture(BaseModel):
             head_in = self._compose_head_input(base_out, stock_id)
             outputs[mask] = self.portfolio_head(head_in)
 
-        
         return outputs
 
     @classmethod
@@ -190,5 +194,5 @@ class PortfolioArchitecture(BaseModel):
 
 
 # Register model with the global registry
-ModelRegistry.register("PORTFOLIO", lambda config: PortfolioArchitecture(config), PortfolioConfig)
-
+from ..registry import ModelRegistry
+ModelRegistry.register("Portfolio", lambda config: PortfolioArchitecture(config), PortfolioConfig)

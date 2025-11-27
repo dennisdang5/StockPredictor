@@ -54,8 +54,8 @@ class CNNAELSTM(BaseModel):
         self.kernel_size = model_config.to_dict().get('kernel_size', 3)
         
         # Create CNNAutoEncoderConfig from CNNAELSTMConfig for the CNNAutoEncoder component
-        cnn_ae_config = model_config.get_cnn_ae_config()
-        lstm_config = model_config.get_lstm_config()
+        cnn_ae_config = model_config.cnn_ae_config
+        lstm_config = model_config.lstm_config
         self.CNNAE = CNNAutoEncoder(model_config=cnn_ae_config)
         self.LSTM = LSTMModel(model_config=lstm_config)
 
@@ -68,3 +68,7 @@ class CNNAELSTM(BaseModel):
     def from_config(cls, model_config):
         """Factory hook so the registry can instantiate the model."""
         return cls(model_config)
+
+# Register the model
+from ..registry import ModelRegistry
+ModelRegistry.register("CNNAELSTM", lambda config: CNNAELSTM(config), CNNAELSTMConfig)

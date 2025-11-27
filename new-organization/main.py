@@ -14,6 +14,8 @@ from trainer import Trainer, TrainerConfig
 from models.configs import (
     LSTMConfig,
     AELSTMConfig,
+    CNNLSTMConfig, 
+    CNNAELSTMConfig,
     TimesNetConfig,
     TabPFNConfig,
     PortfolioConfig,
@@ -248,9 +250,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     short_history = ["1990-01-01", "1999-01-01"]
     long_history = ["1990-01-01", "2015-12-31"]
    
-    """
     # ---------------------------------------------------------------------
-    # 1. Base LSTM (no NLP features)
+    # 1. Base LSTM
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
         name="lstm_base",
@@ -261,8 +262,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=large_stocks,
-        time_args=long_history,
+        stocks=micro_stocks,
+        time_args=short_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -270,13 +271,13 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         use_nlp=False,
         nlp_method=None
     ))
-    """
     
+
     # ---------------------------------------------------------------------
-    # 2. Base LSTM + aggregated NLP
+    # 2. LSTM NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="lstm_base_nlp",
+        name="lstm_nlp",
         model_type="LSTM",
         model_config=LSTMConfig(parameters={
             'input_shape': (31, 13),  # 3 price + 10 aggregated NLP features
@@ -284,8 +285,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=large_stocks,
-        time_args=long_history,
+        stocks=micro_stocks,
+        time_args=short_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -295,7 +296,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
     
     # ---------------------------------------------------------------------
-    # 3. Base AELSTM (no NLP)
+    # 3. AELSTM Base
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
         name="aelstm_base",
@@ -306,8 +307,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=large_stocks,
-        time_args=long_history,
+        stocks=micro_stocks,
+        time_args=short_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -317,7 +318,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
     
     # ---------------------------------------------------------------------
-    # 4. AELSTM + aggregated NLP
+    # 4. AELSTM NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
         name="aelstm_nlp",
@@ -328,8 +329,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'num_layers': 1,
             'dropout': 0.1
         }),
-        stocks=large_stocks,
-        time_args=long_history,
+        stocks=micro_stocks,
+        time_args=short_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -338,126 +339,208 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         nlp_method="aggregated"
     ))
  
-    """
-    
+        
     # ---------------------------------------------------------------------
-    # 6. TabFPN + individual NLP on smaller dataset (placeholder, disabled)
+    # 5. CNNLSTM Base
     # ---------------------------------------------------------------------
-    small_tabfpn_note = (
-        "TabPFN portfolio with individual NLP features. Keep per-stock samples <=50k rows."
-    )
     configs.append(ModelTrainingConfig(
-        name="tabfpn_nlp_portfolio_small",
-        model_type="TabPFN",
-        model_config=TabPFNConfig(parameters={
-            'backend': 'client',
-            'max_samples': 50000,
-            'random_state': 42
+        name="cnnlstm_base",
+        model_type="CNNLSTM",
+        model_config=CNNLSTMConfig(parameters={
+            'input_shape': (31, 3),
+            'num_filters': 64,
+            'kernel_size': 3,
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
         }),
-        stocks=large_stocks,
-        time_args=long_history,
-        num_epochs=2,
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=1000,
         period_type="LS",
         lookback=240,
-        use_nlp=True,
-        nlp_method="aggregated",
+        use_nlp=False,
+        nlp_method=None,
         enabled=True,
-        notes=small_tabfpn_note
     ))
 
     # ---------------------------------------------------------------------
-    # 7. Portfolio architecture (independent per-stock LSTMs) - disabled
+    # 6. CNNLSTM NLP
     # ---------------------------------------------------------------------
-    shared_portfolio_base = LSTMConfig(parameters={
-        'input_shape': (31, 13),
-        'hidden_size': 48,
-        'num_layers': 1,
-        'dropout': 0.1
-    })
     configs.append(ModelTrainingConfig(
-        name="portfolio_lstm_independent",
-        model_type="Portfolio",
-        model_config=PortfolioConfig(parameters={
-            'stocks': micro_stocks,
-            'base_model_type': 'LSTM',
-            'base_model_config': shared_portfolio_base,
-            'strategy': 'independent',
-            'mlp_hidden_dims': [128],
-            'embedding_dim': 32,
-            'use_stock_embeddings': False,
-            'dropout': 0.1,
+        name="cnnlstm_nlp",
+        model_type="CNNLSTM",
+        model_config=CNNLSTMConfig(parameters={
+            'input_shape': (31, 13),
+            'num_filters': 64,
+            'kernel_size': 3,
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
         }),
         stocks=micro_stocks,
-        time_args=long_history,
+        time_args=short_history,
         batch_size=64,
-        num_epochs=2,
+        num_epochs=1000,
         period_type="LS",
         lookback=240,
-        use_nlp=True,
-        nlp_method="aggregated",
+        use_nlp=False,
+        nlp_method=None,
         enabled=True,
-        notes="Builds one LSTM backbone per stock and feeds their outputs into a shared MLP head."
     ))
     
     # ---------------------------------------------------------------------
-    # 8. Portfolio architecture (shared backbone + embeddings) - disabled
+    # 7. CNNAELSTM Base
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="portfolio_lstm_shared",
-        model_type="Portfolio",
-        model_config=PortfolioConfig(parameters={
-            'stocks': micro_stocks,
-            'base_model_type': 'LSTM',
-            'base_model_config': shared_portfolio_base,
-            'strategy': 'shared',
-            'mlp_hidden_dims': [128],
-            'embedding_dim': 64,
-            'use_stock_embeddings': True,
-            'dropout': 0.15,
+        name="cnnaelstm_base",
+        model_type="CNNAELSTM",
+        model_config=CNNAELSTMConfig(parameters={
+            'input_shape': (31, 3),
+            'num_filters': 64,
+            'kernel_size': 3,
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
         }),
-        stocks=large_stocks,
-        time_args=long_history,
+        stocks=micro_stocks,
+        time_args=short_history,
         batch_size=64,
-        num_epochs=2,
+        num_epochs=1000,
         period_type="LS",
         lookback=240,
-        use_nlp=True,
-        nlp_method="aggregated",
+        use_nlp=False,
+        nlp_method=None,
         enabled=True,
-        notes="Shared LSTM backbone across stocks with learnable embeddings before the MLP portfolio head."
     ))
-     """
+     
     
     # ---------------------------------------------------------------------
-    # 7. TimesNet + aggregated NLP on smaller dataset
+    # 8. CNNAELSTM NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="timesnet_small_agg",
-        model_type="TimesNet",
-        model_config=TimesNetConfig(parameters={
-            'input_shape': (240, 13),  # full window with NLP
-            'task_name': 'classification',
-            'enc_in': 13,
-            'num_class': 3,
-            'd_model': 256,
-            'd_ff': 1024,
-            'e_layers': 2,
-            'top_k': 5,
-            'num_kernels': 6,
-            'dropout': 0.1,
-            'embed': 'timeF',
-            'freq': 'd'
+        name="cnnaelstm_nlp",
+        model_type="CNNAELSTM",
+        model_config=CNNAELSTMConfig(parameters={
+            'input_shape': (31, 13),
+            'cnn_ae_config': {
+                'input_shape': (31, 3),
+                'kernel_size': 3,
+            },
+            'lstm_config': {
+                'input_shape': (31, 3),
+                'hidden_size': 25,
+            },
+            'num_filters': 64,
+            'kernel_size': 3,
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
         }),
-        stocks=base_stocks,
-        time_args=long_history,
+        stocks=micro_stocks,
+        time_args=short_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
         lookback=240,
         use_nlp=True,
-        nlp_method="aggregated"
+        nlp_method="aggregated",
+        enabled=True,
     ))
-    
+
+    # ---------------------------------------------------------------------
+    # 9. TimesNet Base
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="timesnet_base",
+        model_type="TimesNet",
+        model_config=TimesNetConfig(parameters={
+            'input_shape': (31, 3),
+            'task_name': 'classification',
+            'seq_len': None,
+            'enc_in': 3,
+            'num_class': 3,
+            'd_model': 256,
+            'd_ff': 1024,
+            'e_layers': 2,
+            'top_k': 3,
+            'num_kernels': 3,
+            'embed': 'timeF',
+            'freq': 'd',
+            'dropout': 0.1,
+            'pred_len': 0,
+            'label_len': 0,
+            'c_out': None,
+            'freeze_encoder': False,
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None,
+        enabled=True,
+    ))
+
+    # ---------------------------------------------------------------------
+    # 10. TabPFN Base
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="tabpfn_base",
+        model_type="TabPFN",
+        model_config=TabPFNConfig(parameters={
+            'backend': 'client',
+            'max_samples': 50_000,
+            'random_state': 42,
+            'model_params': {},
+        }),
+        stocks=micro_stocks,
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None,
+        enabled=True,
+    ))
+
+    # ---------------------------------------------------------------------
+    # 11. Portfolio LSTM Base
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="portfolio_lstm_base",
+        model_type="Portfolio",
+        model_config=PortfolioConfig(parameters={
+            'stocks': micro_stocks,  # PortfolioConfig needs stocks
+            'base_model_type': "LSTM",
+            'base_model_config': LSTMConfig(parameters={
+                'input_shape': (31, 3),
+                'hidden_size': 25,
+                'num_layers': 1,
+                'dropout': 0.1,
+            }),
+            'strategy': "independent",
+            'mlp_hidden_dims': [64],
+            'activation': "relu",
+            'dropout': 0.1,
+            'embedding_dim': 32,
+            'use_stock_embeddings': True,
+            'freeze_base_models': False,
+        }),
+        stocks=micro_stocks,  # These go to ModelTrainingConfig
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None,
+        enabled=True,
+    ))
     return configs
 
 
@@ -480,6 +563,7 @@ def get_model_config_by_name(name: str) -> ModelTrainingConfig:
     """Return a specific ModelTrainingConfig by name."""
     for cfg in create_model_configs():
         if cfg.name == name:
+            print(cfg.name)
             return cfg
     raise ValueError(f"Config '{name}' not found among defined model configurations.")
 
