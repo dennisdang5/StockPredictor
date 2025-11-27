@@ -133,14 +133,15 @@ class CNNAELSTMConfig(BaseModelConfig):
         self.batch_first = parameters.get('batch_first', True)
         self.dropout = parameters.get('dropout', 0.1)
         self.output_dim = parameters.get('output_dim', 1)
-        if parameters.get('cnn_ae_config') is not None:
+        self.input_shape = parameters.get('input_shape', (31, 3))
+        if parameters.get('cnn_ae_config', None) is not None:
             self.cnn_ae_config = CNNAutoEncoderConfig(parameters=parameters.get('cnn_ae_config'))
         else:
             self.cnn_ae_config = CNNAutoEncoderConfig(parameters={
                 'input_shape': self.input_shape,
                 'kernel_size': self.kernel_size,
                 })
-        if parameters.get('lstm_config') is not None:
+        if parameters.get('lstm_config', None) is not None:
             self.lstm_config = LSTMConfig(parameters=parameters.get('lstm_config'))
         else:
             self.lstm_config = LSTMConfig(parameters={
@@ -292,7 +293,7 @@ class PortfolioConfig(BaseModelConfig):
         self.base_model_type = parameters.get('base_model_type', 'TabPFN')
         self.base_model_config = parameters.get('base_model_config')
         self.strategy = parameters.get('strategy', 'independent').lower()
-        self.mlp_hidden_dims = parameters.get('mlp_hidden_dims', [128, 64])
+        self.mlp_hidden_dims = parameters.get('mlp_hidden_dims', [64])
         self.activation = parameters.get('activation', 'relu')
         self.dropout = parameters.get('dropout', 0.1)
         self.embedding_dim = parameters.get('embedding_dim', 32)

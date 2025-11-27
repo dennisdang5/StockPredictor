@@ -301,18 +301,36 @@ def _get_model_id(model_config):
     # Get config class name
     config_class_name = model_config.__class__.__name__
     
+    # Helper function to recursively convert config objects to dicts
+    def convert_configs(obj):
+        """Recursively convert config objects to dictionaries for JSON serialization."""
+        if hasattr(obj, 'to_dict'):
+            # It's a config object - convert it
+            return convert_configs(obj.to_dict())
+        elif isinstance(obj, dict):
+            # Recursively process dictionary values
+            return {k: convert_configs(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            # Recursively process list/tuple items
+            return [convert_configs(item) for item in obj]
+        else:
+            # Primitive type - return as-is
+            return obj
+    
     # Get all parameters from the config
-    # Sort parameters for consistency
     if hasattr(model_config, 'parameters'):
         params = model_config.parameters
         if isinstance(params, dict):
-            # Sort dictionary items for consistent hashing
+            # Convert any nested config objects in the parameters dict
+            params = convert_configs(params)
             params_str = json.dumps(params, sort_keys=True)
         else:
             params_str = str(params)
     else:
         # Fallback: get all attributes that aren't private
         attrs = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        # Convert any config objects in attributes
+        attrs = convert_configs(attrs)
         params_str = json.dumps(attrs, sort_keys=True, default=str)
     
     # Combine class name and parameters
@@ -321,7 +339,7 @@ def _get_model_id(model_config):
     # Generate a short hash
     hash_obj = hashlib.sha256(combined.encode())
     return hash_obj.hexdigest()[:10]
-
+    
 def _load_model_mapping():
     """
     Load the ID to model config mapping from disk.
