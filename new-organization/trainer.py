@@ -245,6 +245,9 @@ class TrainerConfig:
         data_source: DataSource = None,
         ensemble_method="simple_average",
         num_ensemble_models=3,
+        shared_tabpfn_training_method="naive",
+        cotraining_refit_interval=5,
+        cotraining_start_epoch=1,
         **model_args
     ):
         """
@@ -286,6 +289,16 @@ class TrainerConfig:
                                 Default: 3. Only used when ensemble_method="simple_average" for 
                                 Portfolio TabPFN shared strategy. Each model is trained on a random 
                                 subset of the selected data.
+            shared_tabpfn_training_method: Training method for shared TabPFN portfolios. 
+                                          Options: "naive" or "cotraining". Default: "naive".
+                                          - "naive": Uses ensemble training (bypasses Portfolio model)
+                                          - "cotraining": Uses co-training with iterative TabPFN re-fitting
+                                          Only used when model_type="Portfolio" with base_model_type="TabPFN" 
+                                          and strategy="shared". Ignored by base Trainer, used by PortfolioTrainer.
+            cotraining_refit_interval: Re-fit TabPFN backbone every N epochs during co-training. 
+                                      Default: 5. Only used when shared_tabpfn_training_method="cotraining".
+            cotraining_start_epoch: Start co-training after this epoch (allows MLP to train first). 
+                                   Default: 1. Only used when shared_tabpfn_training_method="cotraining".
             **model_args: Additional model arguments (e.g., use_nlp, nlp_method, kernel_size)
         """
         if data_source is None:
@@ -318,6 +331,17 @@ class TrainerConfig:
         # Ensemble method for Portfolio TabPFN shared strategy
         self.ensemble_method = ensemble_method
         self.num_ensemble_models = num_ensemble_models
+        
+        # Shared TabPFN training method and co-training parameters
+        # (Only used by PortfolioTrainer, ignored by base Trainer)
+        self.shared_tabpfn_training_method = shared_tabpfn_training_method.lower()
+        if self.shared_tabpfn_training_method not in ("naive", "cotraining"):
+            raise ValueError(
+                f"shared_tabpfn_training_method must be 'naive' or 'cotraining', "
+                f"got '{shared_tabpfn_training_method}'"
+            )
+        self.cotraining_refit_interval = cotraining_refit_interval
+        self.cotraining_start_epoch = cotraining_start_epoch
         
         # Data source: Required parameter
         self.data_source = data_source
@@ -753,16 +777,13 @@ class Trainer():
                     "TabPFN models require stock index metadata. "
                     "Please regenerate data with return_stock_indices=True."
                 )
-            # Check if we should use uniform sampling (for shared portfolio or multi-stock TabPFN)
-            use_uniform_sampling = self.is_shared_tabpfn_portfolio or len(self.filtered_stock_list) > 1
+            # Check if we should use weighted sampling (only for shared TabPFN portfolio)
+            use_weighted_sampling = self.is_shared_tabpfn_portfolio
             
-            if use_uniform_sampling:
-                # For shared TabPFN portfolio or multi-stock TabPFN: combine train+val, use date-based sampling
+            if use_weighted_sampling:
+                # For shared TabPFN portfolio: combine train+val, use weighted date-based sampling
                 if self.is_main:
-                    if self.is_shared_tabpfn_portfolio:
-                        print("[Shared TabPFN Portfolio] Combining train+val datasets for ensemble training")
-                    else:
-                        print(f"[TabPFN] Multi-stock mode ({len(self.filtered_stock_list)} stocks): using uniform date-based sampling")
+                    print("[Shared TabPFN Portfolio] Combining train+val datasets for ensemble training with weighted sampling")
                 # Combine train and val data
                 X_train_val = np.concatenate([X_train, X_val], axis=0) if isinstance(X_train, np.ndarray) else torch.cat([X_train, X_val], dim=0)
                 Y_train_val = np.concatenate([Y_train, Y_val], axis=0) if isinstance(Y_train, np.ndarray) else torch.cat([Y_train, Y_val], dim=0)
@@ -779,9 +800,12 @@ class Trainer():
                     X_test, Y_test, self.test_stock_indices_tensor
                 )
             else:
-                # Single stock TabPFN: combine train+val but still use per-stock structure
+                # Single stock or multi-stock TabPFN (non-portfolio): combine train+val but use per-stock structure
                 if self.is_main:
-                    print(f"[TabPFN] Single stock mode: combining train+val datasets")
+                    if len(self.filtered_stock_list) > 1:
+                        print(f"[TabPFN] Multi-stock mode ({len(self.filtered_stock_list)} stocks): combining train+val datasets with per-stock structure")
+                    else:
+                        print(f"[TabPFN] Single stock mode: combining train+val datasets")
                 # Combine train and val data
                 X_train_val = np.concatenate([X_train, X_val], axis=0) if isinstance(X_train, np.ndarray) else torch.cat([X_train, X_val], dim=0)
                 Y_train_val = np.concatenate([Y_train, Y_val], axis=0) if isinstance(Y_train, np.ndarray) else torch.cat([Y_train, Y_val], axis=0)
@@ -1234,16 +1258,112 @@ class Trainer():
         self.tabpfn_results = {}
         self.tabpfn_trained = False
 
+    def _apply_weighted_sampling_for_shared_tabpfn(
+        self, Strain_val, D_train_val, unique_dates, num_stocks, stocks_per_date,
+        datapoints_per_stock, rng, max_samples
+    ):
+        """
+        Apply counter-based weighted random sampling for shared TabPFN portfolios.
+        Ensures balanced representation across dates and stocks.
+        
+        Args:
+            Strain_val: Stock indices array (numpy, shape (N,))
+            D_train_val: Date array (numpy, shape (N,))
+            unique_dates: Sorted unique dates
+            num_stocks: Number of stocks
+            stocks_per_date: Target stocks per date
+            datapoints_per_stock: Target datapoints per stock
+            rng: Random number generator
+            max_samples: Maximum samples to select
+        
+        Returns:
+            selected_indices: numpy array of selected sample indices
+        """
+        from collections import defaultdict
+        
+        # Group samples by date
+        date_to_indices = defaultdict(list)
+        for idx, date in enumerate(D_train_val):
+            date_to_indices[date].append(idx)
+        
+        # Initialize stock counters (how many more times each stock can be used)
+        stock_counter = {i: datapoints_per_stock for i in range(num_stocks)}
+        
+        # Select samples: for each date, weighted random sample from stocks with counter > 0
+        selected_indices = []
+        for date in unique_dates:
+            date_indices = date_to_indices[date]
+            # Get stock indices for this date
+            date_stock_indices = Strain_val[date_indices]
+            unique_stocks_in_date = np.unique(date_stock_indices)
+            
+            # Filter to stocks with counter > 0
+            eligible_stocks = [s for s in unique_stocks_in_date if stock_counter[s] > 0]
+            
+            if len(eligible_stocks) == 0:
+                # No eligible stocks left, skip this date
+                continue
+            
+            # Determine how many stocks to select
+            num_to_select = min(stocks_per_date, len(eligible_stocks))
+            
+            # Weighted random sampling: weights = stock_counter values
+            weights = np.array([stock_counter[s] for s in eligible_stocks], dtype=float)
+            
+            # Sample without replacement: select stocks one by one, removing selected from pool
+            selected_stocks = []
+            remaining_stocks = eligible_stocks.copy()
+            remaining_weights = weights.copy()
+            
+            for _ in range(num_to_select):
+                if len(remaining_stocks) == 0:
+                    break
+                
+                # Normalize remaining weights
+                remaining_probs = remaining_weights / remaining_weights.sum()
+                
+                # Sample one stock
+                selected_idx = rng.choice(len(remaining_stocks), p=remaining_probs)
+                selected_stock = remaining_stocks[selected_idx]
+                selected_stocks.append(selected_stock)
+                
+                # Remove selected stock from pool
+                remaining_stocks.pop(selected_idx)
+                remaining_weights = np.delete(remaining_weights, selected_idx)
+            
+            # Update counters and collect indices
+            for stock_idx in selected_stocks:
+                stock_counter[stock_idx] -= 1
+                # Get all indices for this stock on this date
+                for idx in date_indices:
+                    if Strain_val[idx] == stock_idx:
+                        selected_indices.append(idx)
+        
+        selected_indices = np.array(selected_indices, dtype=int)
+        
+        if self.is_main:
+            total_selected = len(selected_indices)
+            print(f"  Selected {total_selected} samples (target: <= {max_samples})")
+            # Print stock counter distribution
+            counter_values = list(stock_counter.values())
+            min_counter = min(counter_values)
+            max_counter = max(counter_values)
+            avg_counter = np.mean(counter_values)
+            print(f"  Final stock counters: min={min_counter}, max={max_counter}, avg={avg_counter:.1f}")
+            print(f"  Stocks with counter > 0: {sum(1 for v in counter_values if v > 0)}/{num_stocks}")
+        
+        return selected_indices
+    
     def _prepare_shared_tabpfn_portfolio_data(
         self,
         X_train_val, Y_train_val, Strain_val, D_train_val,
         X_test, Y_test, Stest
     ):
         """
-        Prepare data for shared TabPFN portfolio with date-based uniform sampling.
+        Prepare data for shared TabPFN portfolio with counter-based weighted random sampling.
         
-        Combines train+val data, groups by date, and uniformly samples stocks per date
-        to stay under max_samples limit while ensuring each stock appears roughly equally.
+        Uses stock counters to track remaining datapoints per stock and performs weighted
+        random sampling to ensure balanced representation across dates.
         """
         import copy
         from collections import defaultdict
@@ -1267,53 +1387,37 @@ class Trainer():
         unique_dates = np.unique(D_train_val)
         num_dates = len(unique_dates)
         
-        # Calculate stocks per date
-        stocks_per_date = max(1, (num_stocks * num_dates) // max_samples)
+        # Calculate actual total number of datapoints
+        total_datapoints = len(D_train_val)
+        expected_datapoints = num_stocks * num_dates
+        are_equivalent = (total_datapoints == expected_datapoints)
+        
+        # Calculate parameters using actual total datapoints instead of num_stocks * num_dates
+        stocks_per_date = max(1, (total_datapoints) // max_samples)
+        datapoints_per_stock = max_samples // num_stocks
+        
+        # Get random state from config for reproducibility
+        random_state = getattr(self.model_config.base_model_config, 'random_state', 42)
+        rng = np.random.default_rng(random_state)
+        
         if self.is_main:
-            print(f"[Shared TabPFN Portfolio] Date-based sampling:")
+            print(f"[Shared TabPFN Portfolio] Counter-based weighted sampling:")
             print(f"  Total stocks: {num_stocks}, Total dates: {num_dates}")
-            print(f"  Max samples: {max_samples}, Stocks per date: {stocks_per_date}")
+            print(f"  Total datapoints: {total_datapoints}")
+            print(f"  Expected datapoints (num_stocks * num_dates): {expected_datapoints}")
+            if are_equivalent:
+                print(f"  Diagnostic: Total datapoints equals num_stocks * num_dates ✓")
+            else:
+                print(f"  Diagnostic: Total datapoints ({total_datapoints}) != num_stocks * num_dates ({expected_datapoints})")
+            print(f"  Max samples: {max_samples}")
+            print(f"  Stocks per date: {stocks_per_date}")
+            print(f"  Datapoints per stock: {datapoints_per_stock}")
         
-        # Group samples by date
-        date_to_indices = defaultdict(list)
-        for idx, date in enumerate(D_train_val):
-            date_to_indices[date].append(idx)
-        
-        # Track stock appearance counts for balancing
-        stock_appearance_count = {i: 0 for i in range(num_stocks)}
-        
-        # Select samples: for each date, select stocks uniformly
-        selected_indices = []
-        for date in unique_dates:
-            date_indices = date_to_indices[date]
-            # Get stock indices for this date
-            date_stock_indices = Strain_val[date_indices]
-            unique_stocks_in_date = np.unique(date_stock_indices)
-            
-            # Sort stocks by appearance count (ascending) to prioritize underrepresented
-            stocks_sorted = sorted(unique_stocks_in_date, key=lambda s: stock_appearance_count[s])
-            
-            # Select top stocks_per_date stocks
-            selected_stocks = stocks_sorted[:stocks_per_date]
-            
-            # Update appearance counts
-            for stock_idx in selected_stocks:
-                stock_appearance_count[stock_idx] += 1
-            
-            # Get all indices for selected stocks on this date
-            for idx in date_indices:
-                if Strain_val[idx] in selected_stocks:
-                    selected_indices.append(idx)
-        
-        selected_indices = np.array(selected_indices, dtype=int)
-        
-        if self.is_main:
-            total_selected = len(selected_indices)
-            print(f"  Selected {total_selected} samples (target: <= {max_samples})")
-            # Print stock appearance distribution
-            min_app = min(stock_appearance_count.values())
-            max_app = max(stock_appearance_count.values())
-            print(f"  Stock appearances: min={min_app}, max={max_app}, avg={np.mean(list(stock_appearance_count.values())):.1f}")
+        # Use helper method for weighted sampling
+        selected_indices = self._apply_weighted_sampling_for_shared_tabpfn(
+            Strain_val, D_train_val, unique_dates, num_stocks, stocks_per_date,
+            datapoints_per_stock, rng, max_samples
+        )
         
         # Extract selected samples
         X_selected = X_train_val[selected_indices]
@@ -1502,11 +1606,8 @@ class Trainer():
         if not self.is_main:
             return
         print("\n[TabPFN] Aggregate metrics:")
-        # Check if uniform sampling was used (shared portfolio or multi-stock TabPFN)
-        uses_uniform_sampling = (
-            self.is_shared_tabpfn_portfolio or 
-            ('train' in self.tabpfn_data and 'per_stock' not in self.tabpfn_data['train'])
-        )
+        # Check if weighted sampling was used (only shared TabPFN portfolio)
+        uses_weighted_sampling = self.is_shared_tabpfn_portfolio
         # All TabPFN models now combine train+val, so no separate 'val' split
         splits = ('train', 'test')
         for split in splits:
@@ -1527,20 +1628,13 @@ class Trainer():
         if not hasattr(self, 'tabpfn_data'):
             raise RuntimeError("TabPFN data has not been prepared.")
 
-        # Check if uniform sampling was used (shared portfolio or multi-stock TabPFN)
-        # Uniform sampling creates data structure without 'per_stock' key
-        uses_uniform_sampling = (
-            self.is_shared_tabpfn_portfolio or 
-            ('train' in self.tabpfn_data and 'per_stock' not in self.tabpfn_data['train'])
-        )
+        # Check if weighted sampling was used (only shared TabPFN portfolio)
+        uses_weighted_sampling = self.is_shared_tabpfn_portfolio
         
-        if uses_uniform_sampling:
-            # Shared TabPFN portfolio or multi-stock TabPFN: use ensemble training
+        if uses_weighted_sampling:
+            # Shared TabPFN portfolio: use ensemble training with weighted sampling
             if self.is_main:
-                if self.is_shared_tabpfn_portfolio:
-                    print(f"[Shared TabPFN Portfolio] Training ensemble models...")
-                else:
-                    print(f"[TabPFN] Training ensemble models on uniformly sampled data...")
+                print(f"[Shared TabPFN Portfolio] Training ensemble models with weighted sampling...")
             self._train_shared_tabpfn_ensemble()
             
             # Get predictions for train and test (no separate val for uniform sampling)
@@ -1577,13 +1671,10 @@ class Trainer():
         if base_path.endswith(".pth"):
             base_path = base_path[:-4]
         
-        # Check if uniform sampling was used (shared portfolio or multi-stock TabPFN)
-        uses_uniform_sampling = (
-            self.is_shared_tabpfn_portfolio or 
-            ('train' in self.tabpfn_data and 'per_stock' not in self.tabpfn_data['train'])
-        )
+        # Check if weighted sampling was used (only shared TabPFN portfolio)
+        uses_weighted_sampling = self.is_shared_tabpfn_portfolio
         
-        if uses_uniform_sampling:
+        if uses_weighted_sampling:
             # Save each ensemble model separately
             if not getattr(self, 'tabpfn_ensemble_models', None) or len(self.tabpfn_ensemble_models) == 0:
                 return

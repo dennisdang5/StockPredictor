@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 from trainer import Trainer, TrainerConfig
+from trainer_portfolio import PortfolioTrainer
 from models.configs import (
     LSTMConfig,
     AELSTMConfig,
@@ -139,6 +140,9 @@ class ModelTrainingConfig:
         data_source: Optional[YFinanceDataSource] = None,
         enabled: bool = True,
         notes: Optional[str] = None,
+        shared_tabpfn_training_method: str = "naive",
+        cotraining_refit_interval: int = 5,
+        cotraining_start_epoch: int = 1,
         **kwargs
     ):
         """
@@ -166,6 +170,14 @@ class ModelTrainingConfig:
             data_source: Optional DataSource instance (defaults to YFinanceDataSource)
             enabled: Toggle to include/exclude this config when training
             notes: Optional string describing the intent/requirements for this config
+            shared_tabpfn_training_method: Training method for shared TabPFN portfolios.
+                                          Options: "naive" or "cotraining". Default: "naive".
+                                          Only used when model_type="Portfolio" with base_model_type="TabPFN" 
+                                          and strategy="shared". Handled by PortfolioTrainer.
+            cotraining_refit_interval: Re-fit TabPFN backbone every N epochs during co-training.
+                                      Default: 5. Only used when shared_tabpfn_training_method="cotraining".
+            cotraining_start_epoch: Start co-training after this epoch.
+                                   Default: 1. Only used when shared_tabpfn_training_method="cotraining".
             **kwargs: Additional arguments passed to TrainerConfig
         """
         self.name = name
@@ -188,6 +200,9 @@ class ModelTrainingConfig:
         self.data_source = data_source if data_source is not None else YFinanceDataSource()
         self.enabled = enabled
         self.notes = notes
+        self.shared_tabpfn_training_method = shared_tabpfn_training_method
+        self.cotraining_refit_interval = cotraining_refit_interval
+        self.cotraining_start_epoch = cotraining_start_epoch
         self.kwargs = kwargs
     
     def create_trainer_config(self) -> TrainerConfig:
@@ -213,6 +228,9 @@ class ModelTrainingConfig:
             k=self.k,
             cost_bps_per_side=self.cost_bps_per_side,
             data_source=self.data_source,
+            shared_tabpfn_training_method=self.shared_tabpfn_training_method,
+            cotraining_refit_interval=self.cotraining_refit_interval,
+            cotraining_start_epoch=self.cotraining_start_epoch,
             **self.kwargs
         )
 
@@ -486,36 +504,13 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
 
     # ---------------------------------------------------------------------
-    # 10. TabPFN Base
+    # 11. Portfolio LSTM Base independent
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="tabpfn_base",
-        model_type="TabPFN",
-        model_config=TabPFNConfig(parameters={
-            'backend': 'client',
-            'max_samples': 50_000,
-            'random_state': 42,
-            'model_params': {},
-        }),
-        stocks=base_stocks,
-        time_args=long_history,
-        batch_size=64,
-        num_epochs=1000,
-        period_type="LS",
-        lookback=240,
-        use_nlp=False,
-        nlp_method=None,
-        enabled=True,
-    ))
-
-    # ---------------------------------------------------------------------
-    # 11. Portfolio LSTM Base
-    # ---------------------------------------------------------------------
-    configs.append(ModelTrainingConfig(
-        name="portfolio_lstm_base",
+        name="portfolio_lstm_independent_base",
         model_type="Portfolio",
         model_config=PortfolioConfig(parameters={
-            'stocks': large_stocks,  # PortfolioConfig needs stocks
+            'stocks': micro_stocks,  # PortfolioConfig needs stocks
             'base_model_type': "LSTM",
             'base_model_config': LSTMConfig(parameters={
                 'input_shape': (31, 3),
@@ -528,10 +523,46 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'activation': "relu",
             'dropout': 0.1,
             'embedding_dim': 32,
-            'use_stock_embeddings': True,
+            'use_stock_embeddings': False,
             'freeze_base_models': False,
         }),
-        stocks=large_stocks,  # These go to ModelTrainingConfig
+        stocks=micro_stocks,  # These go to ModelTrainingConfig
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None,
+        enabled=True,
+    ))
+
+
+    # ---------------------------------------------------------------------
+    # 12. Portfolio TabPFN individual models
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="portfolio_tabpfn_individual_base",
+        model_type="Portfolio",
+        model_config=PortfolioConfig(parameters={
+            'stocks': large_stocks,  # PortfolioConfig needs stocks
+            'base_model_type': "TabPFN",
+            'base_model_config': TabPFNConfig(parameters={
+                'backend': 'local',
+                'max_samples': 2000,
+                'random_state': 42,
+                'model_params': {},
+                'inference_batch_size': 512,  # Chunk inference to avoid OOM (512 is safer default)
+            }),
+            'strategy': "independent",
+            'mlp_hidden_dims': [64],
+            'activation': "relu",
+            'dropout': 0.1,
+            'embedding_dim': 32,
+            'use_stock_embeddings': False,
+            'freeze_base_models': False,
+        }),
+        stocks=base_stocks,  # These go to ModelTrainingConfig
         time_args=long_history,
         batch_size=64,
         num_epochs=1000,
@@ -541,6 +572,80 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         nlp_method=None,
         enabled=True,
     ))
+
+    # ---------------------------------------------------------------------
+    # 13. Portfolio TabPFN shared models
+    # ---------------------------------------------------------------------
+
+    configs.append(ModelTrainingConfig(
+        name="portfolio_tabpfn_shared_base",
+        model_type="Portfolio",
+        model_config=PortfolioConfig(parameters={
+            'stocks': large_stocks,  # PortfolioConfig needs stocks
+            'base_model_type': "TabPFN",
+            'base_model_config': TabPFNConfig(parameters={
+                'backend': 'local',
+                'max_samples': 2000,
+                'random_state': 42,
+                'model_params': {},
+                'inference_batch_size': 512,  # Chunk inference to avoid OOM (512 is safer default)
+            }),
+            'strategy': "shared",
+            'mlp_hidden_dims': [64],
+            'activation': "relu",
+            'dropout': 0.1,
+            'embedding_dim': 32,
+            'use_stock_embeddings': True,
+            'freeze_base_models': False,
+        }),
+        stocks=base_stocks,  # These go to ModelTrainingConfig
+        time_args=long_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None,
+        shared_tabpfn_training_method="cotraining",  # Options: "naive" or "cotraining"
+        cotraining_refit_interval=5,  # Only used when shared_tabpfn_training_method="cotraining"
+        cotraining_start_epoch=1,  # Only used when shared_tabpfn_training_method="cotraining"
+        enabled=True,
+    ))
+
+    # ---------------------------------------------------------------------
+    # 14. Portfolio LSTM Base shared
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="portfolio_lstm_shared_base",
+        model_type="Portfolio",
+        model_config=PortfolioConfig(parameters={
+            'stocks': large_stocks,  # PortfolioConfig needs stocks
+            'base_model_type': "LSTM",
+            'base_model_config': LSTMConfig(parameters={
+                'input_shape': (31, 3),
+                'hidden_size': 25,
+                'num_layers': 1,
+                'dropout': 0.1,
+            }),
+            'strategy': "shared",
+            'mlp_hidden_dims': [64],
+            'activation': "relu",
+            'dropout': 0.1,
+            'embedding_dim': 32,
+            'use_stock_embeddings': True,
+            'freeze_base_models': False,
+        }),
+        stocks=micro_stocks,  # These go to ModelTrainingConfig
+        time_args=short_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="LS",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None,
+        enabled=True,
+    ))
+
     return configs
 
 
@@ -622,12 +727,16 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
         # If saved_model is None, trainer will use unique ID system to find/create model
         trainer_config = config.create_trainer_config()
         
-        # Create trainer
+        # Create trainer - use PortfolioTrainer for Portfolio models
         # Trainer will automatically:
         # - Check for existing model with matching config
         # - Use existing model if found, or create new one with unique ID
         # - Save to trained_models/models/{model_id}.pth
-        trainer = Trainer(config=trainer_config)
+        model_type_upper = config.model_type.upper()
+        if model_type_upper == "PORTFOLIO":
+            trainer = PortfolioTrainer(config=trainer_config)
+        else:
+            trainer = Trainer(config=trainer_config)
         
         # Get the actual save path from trainer (set by unique ID system)
         actual_save_path = trainer.save_path

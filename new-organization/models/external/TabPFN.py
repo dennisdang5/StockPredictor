@@ -11,8 +11,16 @@ tabular data, then use `forward()`/`predict()` for inference.
 
 from __future__ import annotations
 
+import os
 import numpy as np
 import torch
+
+# MPS workarounds: Disable problematic SDP backends on Apple Silicon
+# These can cause "Invalid buffer size" errors even when memory should be sufficient
+if torch.backends.mps.is_available():
+    os.environ.setdefault("PYTORCH_SDP_DISABLE_FLASH_ATTENTION", "1")
+    os.environ.setdefault("PYTORCH_SDP_DISABLE_MEM_EFFICIENT", "1")
+    # Note: We don't disable FAST_PATH as it's generally safe
 
 from ..base import BaseModel
 from ..configs import TabPFNConfig
@@ -75,10 +83,15 @@ class TabPFNAdapter(BaseModel):
         self.max_samples = model_config.max_samples
         self.random_state = model_config.random_state
         self.model_params = model_config.model_params or {}
+        self.inference_batch_size = model_config.inference_batch_size
 
         backend_ctor = _load_backend(self.backend)
         self.estimator = backend_ctor(random_state=self.random_state, **self.model_params)
         self.is_fitted = False
+        
+        # Debug logging: track forward calls for shape monitoring
+        self._forward_call_count = 0
+        self._debug_logging = True  # Set to False to disable debug prints
 
     # ------------------------------------------------------------------
     # Helper utilities
@@ -149,15 +162,56 @@ class TabPFNAdapter(BaseModel):
         """
         Forward pass used by the Trainer. Raises if the estimator has not been fit.
         Returns probabilities (Nx1 tensor) for binary classification.
+        
+        Automatically chunks large batches to avoid memory issues with TabPFN's
+        quadratic attention complexity.
         """
-        proba = self.predict_proba(x)
-        # Assume binary classification; take probability of the positive class.
-        if proba.ndim == 2 and proba.shape[1] > 1:
-            positive = proba[:, 1]
-        else:
-            positive = proba.reshape(-1)
-        tensor = torch.from_numpy(positive).to(x.device, dtype=x.dtype)
-        return tensor.view(-1, 1)
+        if not self.is_fitted:
+            raise RuntimeError("TabPFNAdapter must be fit before calling forward().")
+        
+        # Get batch size from config
+        chunk_size = self.inference_batch_size
+        
+        # Flatten inputs once
+        X_flat = self._flatten_inputs(x)
+        num_samples = X_flat.shape[0]
+        
+        # Debug logging: print shape info for first few calls or when batch is large
+        if self._debug_logging:
+            self._forward_call_count += 1
+            # Log first 3 calls, then every 100th call, or if batch is suspiciously large
+            should_log = (
+                self._forward_call_count <= 3 or
+                self._forward_call_count % 100 == 0 or
+                num_samples > 1000
+            )
+            if should_log:
+                print(f"[TabPFN] Forward call #{self._forward_call_count}: "
+                      f"X_flat.shape={X_flat.shape}, chunk_size={chunk_size}, "
+                      f"will_chunk={num_samples > chunk_size}")
+        
+        # If batch is small enough, process directly
+        if num_samples <= chunk_size:
+            proba = self.estimator.predict_proba(X_flat)
+            proba = torch.from_numpy(proba).to(x.device, dtype=x.dtype)
+            return proba
+        
+        # Otherwise, chunk the batch
+        all_proba = []
+        num_chunks = (num_samples + chunk_size - 1) // chunk_size
+        if self._debug_logging and should_log:
+            print(f"[TabPFN] Chunking {num_samples} samples into {num_chunks} chunks of ~{chunk_size}")
+        
+        for i in range(0, num_samples, chunk_size):
+            end_idx = min(i + chunk_size, num_samples)
+            X_chunk = X_flat[i:end_idx]
+            proba_chunk = self.estimator.predict_proba(X_chunk)
+            all_proba.append(proba_chunk)
+        
+        # Concatenate results
+        proba = np.concatenate(all_proba, axis=0)
+        proba = torch.from_numpy(proba).to(x.device, dtype=x.dtype)
+        return proba
 
     @classmethod
     def from_config(cls, model_config):

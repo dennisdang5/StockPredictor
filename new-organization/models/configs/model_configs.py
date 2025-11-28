@@ -237,6 +237,9 @@ class TabPFNConfig(BaseModelConfig):
         max_samples (int): Safety limit for the number of tabular rows. Default: 50_000
         random_state (int): Random seed passed to TabPFN estimators. Default: 42
         model_params (dict): Extra keyword arguments forwarded to the underlying estimator.
+        inference_batch_size (int): Batch size for inference (chunking). Default: 512. 
+                                   Lower values use less memory but are slower.
+                                   Recommended: 512-1024 for CPU/MPS, can go higher on GPU.
     """
     def __init__(self, parameters=None):
         super().__init__(parameters)
@@ -244,6 +247,7 @@ class TabPFNConfig(BaseModelConfig):
         self.max_samples = parameters.get('max_samples', 50_000)
         self.random_state = parameters.get('random_state', 42)
         self.model_params = parameters.get('model_params', {})
+        self.inference_batch_size = parameters.get('inference_batch_size', 512)
 
 
 class MLPConfig(BaseModelConfig):

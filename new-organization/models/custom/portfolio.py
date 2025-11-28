@@ -104,6 +104,12 @@ class PortfolioArchitecture(BaseModel):
         return output_dim
 
     def _infer_output_dim(self, model: BaseModel) -> int:
+        # TabPFN models must be fit before inference, but we know they output 1 dim for binary classification
+        from ..external.TabPFN import TabPFNAdapter
+        if isinstance(model, TabPFNAdapter):
+            return 2
+        
+        # For other models, infer by doing a forward pass
         input_shape = getattr(self.model_config, 'input_shape', None)
         if not input_shape:
             input_shape = getattr(self.prototype_base_config, 'input_shape', (31, 3))

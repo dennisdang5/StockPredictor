@@ -26,6 +26,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from trainer import Trainer, TrainerConfig
+from trainer_portfolio import PortfolioTrainer
 from models.configs import LSTMConfig
 import util
 
@@ -338,6 +339,11 @@ def verify_preprocessing(stocks: List[str] = ["AAPL", "MSFT"],
     print("Loading data...")
     print(f"[DEBUG] Starting Trainer initialization at {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 80)
+    # Use PortfolioTrainer for Portfolio models, otherwise use base Trainer
+    model_type_upper = trainer_config.model_type.upper()
+    if model_type_upper == "PORTFOLIO":
+        trainer = PortfolioTrainer(config=trainer_config)
+    else:
     trainer = Trainer(config=trainer_config)
     print(f"[DEBUG] Trainer initialized successfully at {datetime.now().strftime('%H:%M:%S')}")
     

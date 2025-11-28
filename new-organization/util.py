@@ -177,7 +177,7 @@ def _serialize_data_source(data_source: DataSource) -> str:
         # Fallback: use class name
         return f"source:{source_type}"
 
-def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240, data_source_str=None):
+def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240, data_source_str=None, return_stock_indices=False):
     """
     Generate a short hash-based ID for a unique combination of all dataset parameters.
     
@@ -190,6 +190,7 @@ def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", predictio
         period_type: Period type ("LS" or "full")
         seq_len: Sequence length (lookback window size)
         data_source_str: String representation of data source (required)
+        return_stock_indices: Whether stock indices are included in the cache (default: False)
         
     Returns:
         A short 10-character hash string
@@ -200,7 +201,8 @@ def _get_data_id(stocks, args, use_nlp=False, nlp_method="aggregated", predictio
     stocks_str = ",".join(sorted(stocks))  # Sort for consistency
     args_str = ",".join(str(a) for a in args)
     nlp_str = f"nlp_{nlp_method}" if use_nlp else "no_nlp"
-    combined = f"{stocks_str}|{args_str}|{nlp_str}|{prediction_type}|{period_type}|{seq_len}|{data_source_str}"
+    stock_indices_str = "with_stock_indices" if return_stock_indices else "no_stock_indices"
+    combined = f"{stocks_str}|{args_str}|{nlp_str}|{prediction_type}|{period_type}|{seq_len}|{data_source_str}|{stock_indices_str}"
     
     # Generate a short hash
     hash_obj = hashlib.sha256(combined.encode())
@@ -225,9 +227,9 @@ def _load_id_mapping():
             return {}
     return {}
 
-def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240, data_source_str=None):
+def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregated", prediction_type="classification", period_type="LS", seq_len=240, data_source_str=None, return_stock_indices=False):
     """
-    Save the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len, data_source) mapping to disk.
+    Save the ID to (stocks, args, use_nlp, nlp_method, prediction_type, period_type, seq_len, data_source, return_stock_indices) mapping to disk.
     
     Args:
         data_id: Short hash ID
@@ -239,6 +241,7 @@ def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregate
         period_type: Period type ("LS" or "full")
         seq_len: Sequence length (lookback window size)
         data_source_str: String representation of data source (required)
+        return_stock_indices: Whether stock indices are included in the cache (default: False)
     """
     if data_source_str is None:
         raise ValueError("data_source_str is required for _save_id_mapping()")
@@ -256,6 +259,7 @@ def _save_id_mapping(data_id, stocks, args, use_nlp=False, nlp_method="aggregate
             'period_type': period_type,
             'seq_len': seq_len,
             'data_source': data_source_str,
+            'return_stock_indices': return_stock_indices,
             'full_name': "_".join(stocks[:5]) + (f"_{len(stocks)-5}_more" if len(stocks) > 5 else "")
         }
         
@@ -340,6 +344,42 @@ def _get_model_id(model_config):
     hash_obj = hashlib.sha256(combined.encode())
     return hash_obj.hexdigest()[:10]
     
+def _config_to_dict(obj):
+    """
+    Recursively convert a config object (or nested configs) to a JSON-serializable dictionary.
+    
+    Args:
+        obj: Config object, dict, list, or primitive value
+        
+    Returns:
+        JSON-serializable representation
+    """
+    from models.configs.base_config import BaseModelConfig
+    
+    # If it's a config object, convert it
+    if isinstance(obj, BaseModelConfig):
+        result = {
+            '__config_class__': obj.__class__.__name__,
+            '__config_params__': {}
+        }
+        # Recursively convert all attributes
+        for key, value in obj.__dict__.items():
+            if not key.startswith('_'):
+                result['__config_params__'][key] = _config_to_dict(value)
+        return result
+    
+    # If it's a dict, recursively convert values
+    elif isinstance(obj, dict):
+        return {k: _config_to_dict(v) for k, v in obj.items()}
+    
+    # If it's a list, recursively convert items
+    elif isinstance(obj, (list, tuple)):
+        return [_config_to_dict(item) for item in obj]
+    
+    # Primitive types (str, int, float, bool, None) are already JSON-serializable
+    else:
+        return obj
+
 def _load_model_mapping():
     """
     Load the ID to model config mapping from disk.
@@ -352,7 +392,22 @@ def _load_model_mapping():
     if os.path.exists(mapping_path):
         try:
             with open(mapping_path, 'r') as f:
-                return json.load(f)
+                content = f.read()
+                if not content.strip():
+                    return {}
+                return json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"Warning: Could not load model mapping (JSON decode error): {e}")
+            print(f"  Attempting to recover by backing up corrupted file...")
+            # Backup corrupted file
+            backup_path = mapping_path + ".corrupted"
+            try:
+                import shutil
+                shutil.copy2(mapping_path, backup_path)
+                print(f"  Corrupted file backed up to: {backup_path}")
+            except Exception as backup_error:
+                print(f"  Warning: Could not backup corrupted file: {backup_error}")
+            return {}
         except Exception as e:
             print(f"Warning: Could not load model mapping: {e}")
             return {}
@@ -375,13 +430,18 @@ def _save_model_mapping(model_id, model_config):
         # Extract config class name
         config_class_name = model_config.__class__.__name__
         
-        # Extract parameters
+        # Extract parameters and recursively convert nested configs
         if hasattr(model_config, 'parameters'):
             parameters = model_config.parameters
             if not isinstance(parameters, dict):
-                parameters = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+                # Build dict from __dict__ and convert nested configs
+                parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
+            else:
+                # Convert nested configs in parameters dict
+                parameters = _config_to_dict(parameters)
         else:
-            parameters = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+            # Build dict from __dict__ and convert nested configs
+            parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
         
         mapping[model_id] = {
             'config_class': config_class_name,
@@ -389,10 +449,17 @@ def _save_model_mapping(model_id, model_config):
             'full_name': config_class_name
         }
         
-        with open(mapping_path, 'w') as f:
+        # Write to temporary file first, then rename (atomic write)
+        temp_path = mapping_path + ".tmp"
+        with open(temp_path, 'w') as f:
             json.dump(mapping, f, indent=2)
+        # Atomic rename
+        import shutil
+        shutil.move(temp_path, mapping_path)
     except Exception as e:
         print(f"Warning: Could not save model mapping: {e}")
+        import traceback
+        traceback.print_exc()
 
 def find_model_by_config(model_config):
     """
@@ -1093,18 +1160,24 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         max_mean_diff = np.max(mean_diff)
         max_std_diff = np.max(std_diff)
         
+        # Find which feature has the largest difference
+        max_mean_feature_idx = np.argmax(mean_diff)
+        max_std_feature_idx = np.argmax(std_diff)
+        
         print(f"  Train/Val mean difference (max): {max_mean_diff:.6f}")
         print(f"  Train/Val std difference (max): {max_std_diff:.6f}")
         
-        if max_mean_diff > 0.5:  # Threshold for normalized features
+        # Print details about the problematic feature
+        if max_mean_diff > 0.5:
             print(f"  ⚠️  WARNING: Large mean difference between train and val ({max_mean_diff:.6f})")
-        else:
-            print(f"  ✓ Mean distributions are similar")
+            print(f"      Feature {max_mean_feature_idx}: train_mean={train_stats['mean'][max_mean_feature_idx]:.6f}, val_mean={val_stats['mean'][max_mean_feature_idx]:.6f}")
+            print(f"      Feature {max_mean_feature_idx}: train_std={train_stats['std'][max_mean_feature_idx]:.6f}, val_std={val_stats['std'][max_mean_feature_idx]:.6f}")
+            print(f"      Feature {max_mean_feature_idx}: train_range=[{train_stats['min'][max_mean_feature_idx]:.6f}, {train_stats['max'][max_mean_feature_idx]:.6f}]")
+            print(f"      Feature {max_mean_feature_idx}: val_range=[{val_stats['min'][max_mean_feature_idx]:.6f}, {val_stats['max'][max_mean_feature_idx]:.6f}]")
         
         if max_std_diff > 0.5:
             print(f"  ⚠️  WARNING: Large std difference between train and val ({max_std_diff:.6f})")
-        else:
-            print(f"  ✓ Std distributions are similar")
+            print(f"      Feature {max_std_feature_idx}: train_std={train_stats['std'][max_std_feature_idx]:.6f}, val_std={val_stats['std'][max_std_feature_idx]:.6f}")
     
     # Warn if training data is very limited
     if n_train_samples < 100:
@@ -1144,7 +1217,8 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         prediction_type=prediction_type,
         period_type=period_type,
         seq_len=seq_len,
-        data_source_str=data_source_str
+        data_source_str=data_source_str,
+        return_stock_indices=return_stock_indices
     )
     
     # Save datasets separately
@@ -1210,7 +1284,8 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         prediction_type=prediction_type,
         period_type=period_type,
         seq_len=seq_len,
-        data_source_str=data_source_str
+        data_source_str=data_source_str,
+        return_stock_indices=return_stock_indices
     )
     
     data_tuple = (Xtr_f, Xva_f, Xte_f, Ytr_f, Yva_f, Yte_f, Dtrain_f, Dvalidation_f, Dtest_f, Rev_f, Returns_f, Sp500_f)
@@ -1241,6 +1316,7 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
                     - "full": Uses full sequence length window
         seq_len: Sequence length (lookback window size) for period window calculation.
                 Default: 240 (for backward compatibility with existing caches)
+        return_stock_indices: Whether stock indices are required (default: False)
     
     Returns:
         data tuple if cache exists, None otherwise.
@@ -1252,7 +1328,7 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
     filtered_stocks = [stock for stock in stocks if stock not in problematic_stocks]
     
     # Step 3: Try to find cache using the mapping file
-    # We verify all 8 conditions explicitly:
+    # We verify all 9 conditions explicitly:
     # 1. Cleaned stock list matches
     # 2. Time period matches
     # 3. use_nlp matches
@@ -1261,6 +1337,7 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
     # 6. period_type matches
     # 7. seq_len matches
     # 8. data_source matches
+    # 9. return_stock_indices matches
     mapping = _load_id_mapping()
     found_cache = False
     data_id = None
@@ -1277,6 +1354,8 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
         cached_period_type = cached_info.get('period_type', 'LS')
         cached_seq_len = cached_info.get('seq_len', 240)
         cached_data_source = cached_info.get('data_source')
+        cached_return_stock_indices = cached_info.get('return_stock_indices', False)  # Default to False for backward compatibility
+        
         if cached_data_source is None:
             # Old cache format without data_source - skip this cache entry
             continue
@@ -1285,7 +1364,7 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
         cached_args_list = list(cached_args) if cached_args else []
         args_list = list(args) if args else []
         
-        # Verify all 8 conditions:
+        # Verify all 9 conditions:
         # 1. Cleaned stock list matches
         stocks_match = set(filtered_stocks) == cached_stocks
         # 2. Time period matches
@@ -1302,10 +1381,13 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
         seq_len_match = cached_seq_len == seq_len
         # 8. data_source matches
         data_source_match = cached_data_source == data_source_str
+        # 9. return_stock_indices matches
+        return_stock_indices_match = cached_return_stock_indices == return_stock_indices
         
-        # All 8 conditions must be satisfied
+        # All 9 conditions must be satisfied
         if (stocks_match and time_period_match and use_nlp_match and nlp_method_match and 
-            prediction_type_match and period_type_match and seq_len_match and data_source_match):
+            prediction_type_match and period_type_match and seq_len_match and data_source_match and 
+            return_stock_indices_match):
             # Found matching cache - verify files exist using the unique ID
             data_id = cached_id
             
@@ -1321,10 +1403,10 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
                 break
     
     if not found_cache:
-        # No cache found that satisfies all 7 conditions
+        # No cache found that satisfies all 9 conditions
         return None
     
-    # At this point, we have verified all 7 conditions and confirmed files exist
+    # At this point, we have verified all 9 conditions and confirmed files exist
     # data_id is set to the matching unique ID from the mapping file
     # Load data using the unique ID
     print(f"[cache] Loading cached data using unique ID: {data_id}")
@@ -1614,7 +1696,8 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                 # window-based normalization which normalizes each window independently.
                 q1, q2, q3 = np.quantile(vec, [0.25, 0.5, 0.75])
                 iqr = (q3 - q1)
-                if iqr == 0:
+                # Check if IQR is too small (use threshold instead of exact zero to avoid numerical issues)
+                if iqr < 1e-8:
                     dropped_flat_iqr += 1
                     valid = False
                     break
