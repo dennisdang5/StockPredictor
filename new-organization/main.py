@@ -526,8 +526,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'use_stock_embeddings': False,
             'freeze_base_models': False,
         }),
-        stocks=micro_stocks,  # These go to ModelTrainingConfig
-        time_args=short_history,
+        stocks=large_stocks,  # These go to ModelTrainingConfig
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
@@ -549,10 +549,10 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'base_model_type': "TabPFN",
             'base_model_config': TabPFNConfig(parameters={
                 'backend': 'local',
-                'max_samples': 2000,
+                'max_samples': 50000,
                 'random_state': 42,
                 'model_params': {},
-                'inference_batch_size': 512,  # Chunk inference to avoid OOM (512 is safer default)
+                'inference_batch_size': 2048,  # Chunk inference to avoid OOM (512 is safer default)
             }),
             'strategy': "independent",
             'mlp_hidden_dims': [64],
@@ -562,7 +562,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'use_stock_embeddings': False,
             'freeze_base_models': False,
         }),
-        stocks=base_stocks,  # These go to ModelTrainingConfig
+        stocks=large_stocks,  # These go to ModelTrainingConfig
         time_args=long_history,
         batch_size=64,
         num_epochs=1000,
@@ -585,10 +585,10 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'base_model_type': "TabPFN",
             'base_model_config': TabPFNConfig(parameters={
                 'backend': 'local',
-                'max_samples': 2000,
+                'max_samples': 10000,
                 'random_state': 42,
                 'model_params': {},
-                'inference_batch_size': 512,  # Chunk inference to avoid OOM (512 is safer default)
+                'inference_batch_size': 2048,  # Chunk inference to avoid OOM (512 is safer default)
             }),
             'strategy': "shared",
             'mlp_hidden_dims': [64],
@@ -598,7 +598,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'use_stock_embeddings': True,
             'freeze_base_models': False,
         }),
-        stocks=base_stocks,  # These go to ModelTrainingConfig
+        stocks=large_stocks,  # These go to ModelTrainingConfig
         time_args=long_history,
         batch_size=64,
         num_epochs=1000,
@@ -635,8 +635,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'use_stock_embeddings': True,
             'freeze_base_models': False,
         }),
-        stocks=micro_stocks,  # These go to ModelTrainingConfig
-        time_args=short_history,
+        stocks=large_stocks,  # These go to ModelTrainingConfig
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="LS",
