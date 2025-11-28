@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J lstm_train
+#SBATCH -J portfolio_train
 #SBATCH --ntasks=4
 #SBATCH --gpus-per-task=2
 #SBATCH --nodes=4
@@ -15,12 +15,12 @@ set -euo pipefail
 # 1) Keep modules minimal; don't load nvhpc/gcc simultaneously.
 #    If you're using PyTorch wheels/conda, you usually don't need cluster CUDA modules at all.
 module purge
-module load ver/2506
+module load ver/2506  gcc/14.3.0
+module load python/3.11.13
 
 # 2) Initialize conda for non-interactive shells, then activate your env.
 #    (No 'conda init' needed in your dotfiles.)
-source /apps/conda/miniforge3/24.11.3/etc/profile.d/conda.sh
-conda activate /home1/lkyamamo/.conda/envs/csci566-project
+source /scratch1/lkyamamo/stock_prediction/new_train/StockPredictor/.venv/bin/activate
 
 echo "=== Environment sanity checks ==="
 echo "HOST: $(hostname)"
@@ -88,10 +88,11 @@ fi
 echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
 
 SCRIPTS=(
-  "main_lstm_base_nlp.py"
-  "main_aelstm_base.py"
-  "main_aelstm_base_nlp.py"
-  "main_timesnet_small_agg.py"
+  "main_timesnet_small_base.py"
+  "main_portfolio_lstm_independent_base.py"
+  "main_portfolio_lstm_shared_base.py"
+  "main_portfolio_tabpfn_individual_base.py"
+  "main_portfolio_tabpfn_shared_base.py"
 )
 
 for SCRIPT in "${SCRIPTS[@]}"; do
