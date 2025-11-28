@@ -607,8 +607,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         use_nlp=False,
         nlp_method=None,
         shared_tabpfn_training_method="cotraining",  # Options: "naive" or "cotraining"
-        cotraining_refit_interval=5,  # Only used when shared_tabpfn_training_method="cotraining"
-        cotraining_start_epoch=1,  # Only used when shared_tabpfn_training_method="cotraining"
+        cotraining_refit_interval=20,  # Only used when shared_tabpfn_training_method="cotraining"
+        cotraining_start_epoch=10,  # Only used when shared_tabpfn_training_method="cotraining"
         enabled=True,
     ))
 

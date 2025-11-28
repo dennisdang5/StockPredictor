@@ -100,7 +100,7 @@ class TimesNetAdapter(BaseModel):
     def forward(self, x_enc, params=None):
         # no specific mask assume all are valid timesteps
         if params is None:
-            x_mark_enc=torch.ones(x_enc.shape[0], x_enc.shape[1], device=x_enc.device)
+            x_mark_enc=torch.ones(x_enc.shape[0], x_enc.shape[1], device=x_enc.device, dtype=x_enc.dtype)
         else:
             x_mark_enc = params['mask'] # mask of valid timesteps
         
