@@ -190,7 +190,7 @@ class PortfolioArchitecture(BaseModel):
             batch_inputs = x[mask]
             base_out = self._forward_backbone(stock_id, batch_inputs)
             head_in = self._compose_head_input(base_out, stock_id)
-            outputs[mask] = self.portfolio_head(head_in)
+            outputs[mask] = self.portfolio_head(head_in).to(dtype=outputs.dtype)
 
         return outputs
 

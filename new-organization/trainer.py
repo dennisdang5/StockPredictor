@@ -986,9 +986,9 @@ class Trainer():
                     )
         
         if self.is_dist:
-            self.Model = DDP(self.Model, device_ids=[self.local_rank])
+            self.Model = DDP(self.Model, device_ids=[self.local_rank], find_unused_parameters=True)
             if self.is_main:
-                print(f"[DDP] using {self.world_size} processes across {dist.get_world_size()} GPUs")
+                print(f"[DDP] using {self.world_size} processes across {dist.get_world_size()} GPUs (find_unused_parameters=True)")
         elif self.device.type == "cuda" and torch.cuda.device_count() > 1:
             self.Model = nn.DataParallel(self.Model)
             if self.is_main:
