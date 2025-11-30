@@ -514,12 +514,12 @@ class EarlyStopper():
             
             # Check if this rank should stop
             # All ranks must evaluate the same condition to maintain synchronization
-            if validation_loss < self.min_validation_loss:
+            if validation_loss < (self.min_validation_loss - self.min_delta):
                 self.min_validation_loss = validation_loss
                 self.counter = 0
                 if self.is_main:
                     torch.save((model.module if hasattr(model, "module") else model).state_dict(), self.save_path)
-            elif validation_loss > (self.min_validation_loss + self.min_delta):
+            else:
                 self.counter += 1
                 if self.counter >= self.patience:
                     should_stop_tensor = torch.tensor(1, dtype=torch.int, device=device)
@@ -547,11 +547,11 @@ class EarlyStopper():
                 return False
         else:
             # Non-distributed mode - original logic
-            if validation_loss < self.min_validation_loss:
+            if validation_loss < (self.min_validation_loss - self.min_delta):
                 self.min_validation_loss = validation_loss
                 self.counter = 0
                 torch.save(model.state_dict(), self.save_path)
-            elif validation_loss > (self.min_validation_loss + self.min_delta):
+            else:
                 self.counter += 1
                 if self.counter >= self.patience:
                     return True

@@ -9,6 +9,10 @@ data/
 **/data/
 *log_jobs*
 *slurm-*
+*training_logs*
+*trained_models*
+*results*
+*deliverables*
 
 # OS things #
 ######################

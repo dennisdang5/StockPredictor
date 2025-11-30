@@ -510,7 +510,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         name="portfolio_lstm_independent_base",
         model_type="Portfolio",
         model_config=PortfolioConfig(parameters={
-            'stocks': micro_stocks,  # PortfolioConfig needs stocks
+            'stocks': large_stocks,  # PortfolioConfig needs stocks
             'base_model_type': "LSTM",
             'base_model_config': LSTMConfig(parameters={
                 'input_shape': (31, 3),

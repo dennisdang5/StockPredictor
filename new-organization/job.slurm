@@ -90,7 +90,6 @@ echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_
 SCRIPTS=(
   "main_timesnet_small_base.py"
   "main_portfolio_lstm_independent_base.py"
-  "main_portfolio_lstm_shared_base.py"
   "main_portfolio_tabpfn_individual_base.py"
   "main_portfolio_tabpfn_shared_base.py"
 )
