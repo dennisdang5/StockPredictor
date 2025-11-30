@@ -24,6 +24,10 @@ if trained_model_dir not in sys.path:
 
 from evaluation.evaluator import ModelEvaluator
 
+# Define results directory path (deliverables/results/)
+RESULTS_DIR = os.path.join(project_root, "deliverables", "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
 def evaluate_saved_model(model_path: str = "savedmodel_classification.pth", 
                         stocks: list = None,
                         time_args: list = None,
@@ -88,7 +92,7 @@ def evaluate_saved_model(model_path: str = "savedmodel_classification.pth",
         ]  # Default stocks for evaluation
         
     if time_args is None:
-        time_args = ["1989-12-01", "2015-09-30"]  # Default time period
+        time_args = ["1990-01-01", "2015-12-31"]  # Default time period
     
     # Check if model exists (try multiple locations)
     if not os.path.exists(model_path):
@@ -143,7 +147,8 @@ def evaluate_saved_model(model_path: str = "savedmodel_classification.pth",
         )
         
         # Save results to JSON
-        results_file = f"evaluation_results_{os.path.basename(model_path).replace('.pth', '')}.json"
+        results_filename = f"evaluation_results_{os.path.basename(model_path).replace('.pth', '')}.json"
+        results_file = os.path.join(RESULTS_DIR, results_filename)
         evaluator.save_results(results_file)
         
         # Clean up

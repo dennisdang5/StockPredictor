@@ -430,18 +430,10 @@ def _save_model_mapping(model_id, model_config):
         # Extract config class name
         config_class_name = model_config.__class__.__name__
         
-        # Extract parameters and recursively convert nested configs
-        if hasattr(model_config, 'parameters'):
-            parameters = model_config.parameters
-            if not isinstance(parameters, dict):
-                # Build dict from __dict__ and convert nested configs
-                parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
-            else:
-                # Convert nested configs in parameters dict
-                parameters = _config_to_dict(parameters)
-        else:
-            # Build dict from __dict__ and convert nested configs
-            parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        # Always extract ALL attributes from __dict__ to capture nested configs
+        # This ensures we capture lstm_config, ae_config, cnn_ae_config, etc.
+        # that are created by the config class __init__ methods
+        parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
         
         mapping[model_id] = {
             'config_class': config_class_name,
@@ -478,13 +470,19 @@ def find_model_by_config(model_config):
     # Get config class name
     config_class_name = model_config.__class__.__name__
     
-    # Extract parameters from input config
+    # Extract parameters from input config using _config_to_dict() to match saved format
+    # This ensures nested configs are converted to the same __config_class__/__config_params__ format
     if hasattr(model_config, 'parameters'):
         input_params = model_config.parameters
         if not isinstance(input_params, dict):
-            input_params = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+            # Build dict from __dict__ and convert nested configs
+            input_params = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        else:
+            # Convert nested configs in parameters dict
+            input_params = _config_to_dict(input_params)
     else:
-        input_params = {k: v for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        # Build dict from __dict__ and convert nested configs
+        input_params = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
     
     # Normalize parameters for comparison (convert to JSON-serializable format)
     def normalize_value(v):
@@ -492,7 +490,13 @@ def find_model_by_config(model_config):
         if isinstance(v, (list, tuple)):
             return tuple(normalize_value(item) for item in v)
         elif isinstance(v, dict):
-            return {k: normalize_value(val) for k, val in sorted(v.items())}
+            # Handle the special __config_class__/__config_params__ format used by _config_to_dict
+            if '__config_class__' in v and '__config_params__' in v:
+                # This is a nested config - normalize both the class name and params
+                return (v['__config_class__'], normalize_value(v['__config_params__']))
+            else:
+                # Regular dict - recursively normalize values
+                return {k: normalize_value(val) for k, val in sorted(v.items())}
         elif isinstance(v, (int, float, str, bool, type(None))):
             return v
         else:
@@ -1145,6 +1149,7 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         return {
             'mean': np.mean(X_flat, axis=0),
             'std': np.std(X_flat, axis=0),
+            'median': np.median(X_flat, axis=0),
             'min': np.min(X_flat, axis=0),
             'max': np.max(X_flat, axis=0)
         }
@@ -1154,29 +1159,40 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
     test_stats = compute_feature_stats(X_test_samples, 'test')
     
     if train_stats and val_stats:
-        # Check if means are similar (should be if normalized together)
+        # With robust z-score normalization (median/IQR), medians should be ~0 per window
+        # but means and stds can vary between splits due to different distributions.
+        # Check medians (should be close to 0) and compare train/val differences.
+        median_diff = np.abs(train_stats['median'] - val_stats['median'])
         mean_diff = np.abs(train_stats['mean'] - val_stats['mean'])
         std_diff = np.abs(train_stats['std'] - val_stats['std'])
+        max_median_diff = np.max(median_diff)
         max_mean_diff = np.max(mean_diff)
         max_std_diff = np.max(std_diff)
         
         # Find which feature has the largest difference
+        max_median_feature_idx = np.argmax(median_diff)
         max_mean_feature_idx = np.argmax(mean_diff)
         max_std_feature_idx = np.argmax(std_diff)
         
-        print(f"  Train/Val mean difference (max): {max_mean_diff:.6f}")
-        print(f"  Train/Val std difference (max): {max_std_diff:.6f}")
+        print(f"  Train/Val median difference (max): {max_median_diff:.6f} (should be ~0 for robust z-score)")
+        print(f"  Train/Val mean difference (max): {max_mean_diff:.6f} (can vary with robust z-score)")
+        print(f"  Train/Val std difference (max): {max_std_diff:.6f} (can vary with robust z-score)")
         
-        # Print details about the problematic feature
-        if max_mean_diff > 0.5:
-            print(f"  ⚠️  WARNING: Large mean difference between train and val ({max_mean_diff:.6f})")
+        # With robust z-score, medians should be close to 0 (each window normalized independently)
+        if max_median_diff > 0.1:
+            print(f"  ⚠️  WARNING: Large median difference between train and val ({max_median_diff:.6f})")
+            print(f"      Feature {max_median_feature_idx}: train_median={train_stats['median'][max_median_feature_idx]:.6f}, val_median={val_stats['median'][max_median_feature_idx]:.6f}")
+        
+        # Mean/std differences are expected with robust z-score, but flag if extremely large
+        if max_mean_diff > 1.0:
+            print(f"  ⚠️  WARNING: Very large mean difference between train and val ({max_mean_diff:.6f})")
             print(f"      Feature {max_mean_feature_idx}: train_mean={train_stats['mean'][max_mean_feature_idx]:.6f}, val_mean={val_stats['mean'][max_mean_feature_idx]:.6f}")
             print(f"      Feature {max_mean_feature_idx}: train_std={train_stats['std'][max_mean_feature_idx]:.6f}, val_std={val_stats['std'][max_mean_feature_idx]:.6f}")
             print(f"      Feature {max_mean_feature_idx}: train_range=[{train_stats['min'][max_mean_feature_idx]:.6f}, {train_stats['max'][max_mean_feature_idx]:.6f}]")
             print(f"      Feature {max_mean_feature_idx}: val_range=[{val_stats['min'][max_mean_feature_idx]:.6f}, {val_stats['max'][max_mean_feature_idx]:.6f}]")
         
-        if max_std_diff > 0.5:
-            print(f"  ⚠️  WARNING: Large std difference between train and val ({max_std_diff:.6f})")
+        if max_std_diff > 1.0:
+            print(f"  ⚠️  WARNING: Very large std difference between train and val ({max_std_diff:.6f})")
             print(f"      Feature {max_std_feature_idx}: train_std={train_stats['std'][max_std_feature_idx]:.6f}, val_std={val_stats['std'][max_std_feature_idx]:.6f}")
     
     # Warn if training data is very limited
@@ -1641,7 +1657,7 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
             # Calculate revenue/return for valid stocks only
             if pd.notna(cp.iloc[n, t]) and pd.notna(op.iloc[n, t]) and op.iloc[n, t] != 0:
                 rev_t[n, t] = cp.iloc[n, t] - op.iloc[n, t]
-                return_t[n, t] = (cp.iloc[n, t] - op.iloc[n, t]) / op.iloc[n, t]
+                return_t[n, t] = cp.iloc[n, t] - op.iloc[n, t]  # Real price difference, not percent change
                 valid_stocks.append(n)
         
         # Calculate median return at time t
@@ -1696,11 +1712,13 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                 # window-based normalization which normalizes each window independently.
                 q1, q2, q3 = np.quantile(vec, [0.25, 0.5, 0.75])
                 iqr = (q3 - q1)
-                # Check if IQR is too small (use threshold instead of exact zero to avoid numerical issues)
-                if iqr < 1e-8:
+                # Check if IQR is too small or invalid (use threshold to avoid numerical issues and division by near-zero)
+                # Skip normalization if IQR is too small to prevent numerical instability
+                if iqr < 1e-3 or not np.isfinite(iqr) or iqr == 0:
                     dropped_flat_iqr += 1
                     valid = False
                     break
+                # Only normalize if IQR is sufficiently large
                 window[:, i] = (vec - q2) / iqr
             if not valid:
                 continue
