@@ -18,12 +18,13 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, r
 from typing import Dict, List, Tuple, Optional, Union
 import os
 import sys
+import json
 import yfinance as yf
 import hashlib
 from zipfile import ZipFile, ZIP_STORED
 from io import BytesIO
 from scipy import stats as scipy_stats
-from scipy.special import expit
+from scipy.special import expit, k0
 from collections import defaultdict
 
 # Add parent directory to path for imports
@@ -47,6 +48,11 @@ from models.configs import (
     AELSTMConfig,
     CNNAELSTMConfig,
     TimesNetConfig,
+    PortfolioConfig,
+    TabPFNConfig,
+    MLPConfig,
+    AutoEncoderConfig,
+    CNNAutoEncoderConfig,
 )
 import util
 from data_sources import YFinanceDataSource
@@ -66,7 +72,7 @@ class ModelEvaluator:
     
     Paper-Aligned Evaluation (Fischer-Krauss/Ghosh):
     - Portfolio construction: Daily top-k/flop-k ranking and equal-weighted long-short portfolios
-    - Transaction costs: Fixed formula 4 * cost_per_side for equal-weight long-short with full rebalance
+    - Transaction costs: Dynamic calculation based on actual trades (cost_per_side per half-turn, only charged when positions change)
     - Accuracy: Computed on traded set only with DM/PT statistical tests (using paper labels)
     - Target labels: Binary classification based on outperforming cross-sectional median per day
     - Risk metrics: Sharpe, Sortino, VaR/CVaR (1% & 5%), max drawdown, skewness, kurtosis
@@ -155,9 +161,49 @@ class ModelEvaluator:
         self.model_type = model_type
         self.input_shape = input_shape  # Will be set from data if None
         self.model_config = model_config  # Optional model config to match training
+        
+        # Initialize data loading parameters FIRST (before they're used in print statements)
+        # These will be updated from config if mapping file is found
+        self.seq_len = 240  # Default fallback
+        self.period_type = "LS"  # Default fallback
+        
+        # Try to load config from model mapping file
+        model_id = self._extract_model_id(self.model_path)
+        if model_id:
+            mapping_path = self._find_model_mapping_file(self.model_path)
+            if mapping_path:
+                print(f"[Evaluator] Found model mapping file: {mapping_path}")
+                mapping = self._load_model_mapping(mapping_path)
+                if model_id in mapping:
+                    print(f"[Evaluator] Found model ID '{model_id}' in mapping file")
+                    mapping_data = mapping[model_id]
+                    reconstructed_config = self._reconstruct_config_from_mapping(mapping_data)
+                    if reconstructed_config:
+                        print(f"[Evaluator] Successfully reconstructed config from mapping")
+                        print(f"[Evaluator] Reconstructed config type: {reconstructed_config.__class__.__name__}")
+                        self.model_config = reconstructed_config
+                        # Extract data loading parameters from config
+                        self._extract_data_params_from_config(reconstructed_config)
+                        # Determine model_type from config class name
+                        config_class_name = mapping_data.get('config_class', '')
+                        if config_class_name:
+                            # Map config class to model_type (lowercase, remove 'Config' suffix)
+                            self.model_type = config_class_name.replace('Config', '').lower()
+                    else:
+                        print(f"[Evaluator] Warning: Failed to reconstruct config from mapping data, using provided model_type")
+                else:
+                    print(f"[Evaluator] Model ID '{model_id}' not found in mapping file, using provided model_type")
+            else:
+                print(f"[Evaluator] No model mapping file found, using provided model_type")
+        else:
+            print(f"[Evaluator] Model path does not appear to be hash-based, using provided model_type")
+        
         print(f"[Evaluator] Using data directory: {os.path.abspath(util.DATA_DIR)}")
         print(f"[Evaluator] Using model path: {os.path.abspath(self.model_path)}")
         print(f"[Evaluator] Using model type: {self.model_type}")
+        if self.model_config:
+            print(f"[Evaluator] Using config from mapping: {self.model_config.__class__.__name__}")
+        print(f"[Evaluator] Data loading parameters: seq_len={self.seq_len}, period_type={self.period_type}")
         # Setup device
         if device is None:
             if torch.cuda.is_available():
@@ -183,6 +229,189 @@ class ModelEvaluator:
         
         # Metrics storage
         self.results = {}
+        
+    def _extract_model_id(self, model_path: str) -> Optional[str]:
+        """
+        Extract model ID from filename by removing extension.
+        
+        Args:
+            model_path: Path to model file
+            
+        Returns:
+            Model ID string (e.g., "569b254576") or None if not a hash-based filename
+        """
+        filename = os.path.basename(model_path)
+        # Remove extension
+        model_id = filename.replace('.pth', '').replace('.pt', '')
+        # Check if it looks like a hash (10 hex characters)
+        if len(model_id) == 10 and all(c in '0123456789abcdef' for c in model_id.lower()):
+            return model_id
+        return None
+    
+    def _find_model_mapping_file(self, model_path: str) -> Optional[str]:
+        """
+        Find _model_mapping.json file in possible locations.
+        
+        Args:
+            model_path: Path to model file
+            
+        Returns:
+            Path to mapping file if found, None otherwise
+        """
+        model_dir = os.path.dirname(model_path)
+        
+        # Check same directory as model file
+        mapping_path = os.path.join(model_dir, "_model_mapping.json")
+        if os.path.exists(mapping_path):
+            return mapping_path
+        
+        # Check deliverables/models/ directory
+        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        project_root = os.path.dirname(parent_dir)
+        deliverables_models_dir = os.path.join(project_root, "deliverables", "models")
+        mapping_path = os.path.join(deliverables_models_dir, "_model_mapping.json")
+        if os.path.exists(mapping_path):
+            return mapping_path
+        
+        # Check trained_models/ directory (fallback)
+        trained_models_dir = os.path.join(project_root, "trained_models")
+        mapping_path = os.path.join(trained_models_dir, "_model_mapping.json")
+        if os.path.exists(mapping_path):
+            return mapping_path
+        
+        return None
+    
+    def _load_model_mapping(self, mapping_path: str) -> dict:
+        """
+        Load and parse model mapping file.
+        
+        Args:
+            mapping_path: Path to _model_mapping.json file
+            
+        Returns:
+            Dictionary mapping model_id -> config info
+        """
+        try:
+            with open(mapping_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[Evaluator] Warning: Could not load model mapping from {mapping_path}: {e}")
+            return {}
+    
+    def _reconstruct_config_from_mapping(self, mapping_data: dict) -> Optional[object]:
+        """
+        Reconstruct config object from mapping data.
+        
+        Args:
+            mapping_data: Dictionary with 'config_class' and 'parameters' keys
+                          OR '__config_class__' and '__config_params__' keys (from _config_to_dict)
+            
+        Returns:
+            Reconstructed config object or None if reconstruction fails
+        """
+        # Handle both formats: direct mapping format and _config_to_dict format
+        if '__config_class__' in mapping_data and '__config_params__' in mapping_data:
+            # This is the _config_to_dict format
+            config_class_name = mapping_data['__config_class__']
+            parameters = mapping_data['__config_params__']
+        else:
+            # This is the direct mapping format
+            config_class_name = mapping_data.get('config_class')
+            parameters = mapping_data.get('parameters', {})
+        
+        if not config_class_name:
+            return None
+        
+        # Map config class names to actual classes
+        config_class_map = {
+            'LSTMConfig': LSTMConfig,
+            'CNNLSTMConfig': CNNLSTMConfig,
+            'AELSTMConfig': AELSTMConfig,
+            'CNNAELSTMConfig': CNNAELSTMConfig,
+            'TimesNetConfig': TimesNetConfig,
+            'PortfolioConfig': PortfolioConfig,
+            'TabPFNConfig': TabPFNConfig,
+            'MLPConfig': MLPConfig,
+            'AutoEncoderConfig': AutoEncoderConfig,
+            'CNNAutoEncoderConfig': CNNAutoEncoderConfig,
+        }
+        
+        if config_class_name not in config_class_map:
+            print(f"[Evaluator] Warning: Unknown config class '{config_class_name}' in mapping")
+            return None
+        
+        config_class = config_class_map[config_class_name]
+        
+        # FIRST: Extract actual parameters from nested 'parameters' dict if it exists
+        # (Some configs have parameters nested inside a 'parameters' key)
+        # Do this BEFORE reconstructing nested configs so we have all parameters available
+        if 'parameters' in parameters and isinstance(parameters['parameters'], dict):
+            # Merge the nested parameters dict with the outer parameters
+            nested_params = parameters.pop('parameters')
+            # Only add keys that aren't already in the outer dict
+            for k, v in nested_params.items():
+                if k not in parameters:
+                    parameters[k] = v
+        
+        # SECOND: Reconstruct nested configs (e.g., lstm_config, ae_config, cnn_ae_config)
+        # Do this AFTER merging nested parameters so nested configs can access all parameters
+        for key in ['lstm_config', 'ae_config', 'cnn_ae_config']:
+            if key in parameters and isinstance(parameters[key], dict):
+                nested_config_data = parameters[key]
+                # Check for both __config_class__ format (from _config_to_dict) and config_class format
+                if '__config_class__' in nested_config_data or 'config_class' in nested_config_data:
+                    nested_config = self._reconstruct_config_from_mapping(nested_config_data)
+                    if nested_config:
+                        parameters[key] = nested_config
+        
+        # Handle nested configs (e.g., PortfolioConfig with base_model_config)
+        if config_class_name == 'PortfolioConfig' and 'base_model_config' in parameters:
+            base_config_data = parameters['base_model_config']
+            if isinstance(base_config_data, dict):
+                # Check for both formats
+                if '__config_class__' in base_config_data or 'config_class' in base_config_data:
+                    # Reconstruct nested base_model_config
+                    base_config = self._reconstruct_config_from_mapping(base_config_data)
+                    if base_config:
+                        parameters['base_model_config'] = base_config
+        
+        try:
+            print(f"[Evaluator] Reconstructing {config_class_name} with parameters: {list(parameters.keys())}")
+            config = config_class(parameters=parameters)
+            print(f"[Evaluator] Successfully created {config.__class__.__name__} instance")
+            return config
+        except Exception as e:
+            print(f"[Evaluator] Warning: Could not reconstruct config from mapping: {e}")
+            print(f"[Evaluator] Config class: {config_class_name}, Parameters keys: {list(parameters.keys())}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _extract_data_params_from_config(self, config: object):
+        """
+        Extract seq_len and period_type from config for data loading.
+        
+        Args:
+            config: Model config object
+        """
+        # Check for seq_len
+        if hasattr(config, 'seq_len') and config.seq_len is not None:
+            self.seq_len = config.seq_len
+        elif hasattr(config, 'input_shape') and config.input_shape:
+            # seq_len might be in input_shape[0]
+            if isinstance(config.input_shape, (tuple, list)) and len(config.input_shape) > 0:
+                # For period_type="LS", input_shape[0] is ~31, not the full seq_len
+                # But we can try to infer if it's large enough
+                if config.input_shape[0] > 100:  # Likely full sequence length
+                    self.seq_len = config.input_shape[0]
+        
+        # Check for period_type
+        if hasattr(config, 'period_type'):
+            self.period_type = config.period_type
+        
+        # For PortfolioConfig, check base_model_config
+        if hasattr(config, 'base_model_config') and config.base_model_config:
+            self._extract_data_params_from_config(config.base_model_config)
         
     def _load_data(self):
         """Load test data for evaluation."""
@@ -491,49 +720,78 @@ class ModelEvaluator:
         if self.input_shape is None:
             raise ValueError("[Evaluator] input_shape must be determined from data before loading model. Ensure _load_data() is called first.")
         
-        # Map model_type to registry name and config class
-        model_type_mapping = {
-            "lstm": ("LSTM", LSTMConfig),
-            "cnn_lstm": ("CNNLSTM", CNNLSTMConfig),
-            "aelstm": ("AELSTM", AELSTMConfig),
-            "cnnaelstm": ("CNNAELSTM", CNNAELSTMConfig),
-            "timesnet": ("TIMESNET", TimesNetConfig),
-        }
-        
-        # Handle legacy model types that might not be in registry
-        if self.model_type not in model_type_mapping:
-            # Try to use the model_type directly (case-insensitive)
-            registry_name = self.model_type.upper()
-            available_models = get_available_models()
-            if registry_name in available_models:
-                # Use default config parameters - will need to infer from saved model
-                print(f"[Evaluator] Using model type '{registry_name}' from registry")
-                # Create a minimal config - input_shape will be set
-                from models.configs.base_config import BaseModelConfig
-                config = BaseModelConfig(parameters={'input_shape': self.input_shape})
-                self.model = create_model(registry_name, config)
-            else:
-                raise ValueError(
-                    f"[Evaluator] Invalid model type: {self.model_type}. "
-                    f"Available models: {', '.join(available_models)}"
-                )
-        else:
-            registry_name, config_class = model_type_mapping[self.model_type]
+        # If config was loaded from mapping, use it directly
+        if self.model_config is not None:
+            # Update input_shape in config if needed
+            if hasattr(self.model_config, 'input_shape'):
+                # Update input_shape to match actual data
+                if self.model_config.input_shape != self.input_shape:
+                    print(f"[Evaluator] Updating config input_shape from {self.model_config.input_shape} to {self.input_shape}")
+                    if hasattr(self.model_config, 'to_dict'):
+                        config_dict = self.model_config.to_dict()
+                        config_dict['input_shape'] = self.input_shape
+                        # Reconstruct config with updated input_shape
+                        config_class = self.model_config.__class__
+                        self.model_config = config_class(parameters=config_dict)
+                    else:
+                        self.model_config.input_shape = self.input_shape
             
-            # Use provided model_config if available, otherwise create with input_shape
-            if self.model_config is not None:
-                config = self.model_config
-                # Update input_shape if needed
-                if hasattr(config, 'to_dict'):
-                    config_dict = config.to_dict()
-                    config_dict['input_shape'] = self.input_shape
-                    config = config_class(parameters=config_dict)
+            # Map config class name to registry name
+            config_class_name = self.model_config.__class__.__name__
+            registry_mapping = {
+                'LSTMConfig': 'LSTM',
+                'CNNLSTMConfig': 'CNNLSTM',
+                'AELSTMConfig': 'AELSTM',
+                'CNNAELSTMConfig': 'CNNAELSTM',
+                'TimesNetConfig': 'TIMESNET',
+                'PortfolioConfig': 'Portfolio',
+                'TabPFNConfig': 'TabPFN',
+                'MLPConfig': 'MLP',
+            }
+            
+            registry_name = registry_mapping.get(config_class_name)
+            if registry_name is None:
+                # Try uppercase version of class name without 'Config'
+                registry_name = config_class_name.replace('Config', '').upper()
+            
+            print(f"[Evaluator] Using config from mapping: {config_class_name} -> registry: {registry_name}")
+            self.model = create_model(registry_name, self.model_config)
+        else:
+            # Fall back to original behavior using model_type
+            # Map model_type to registry name and config class
+            model_type_mapping = {
+                "lstm": ("LSTM", LSTMConfig),
+                "cnnlstm": ("CNNLSTM", CNNLSTMConfig),
+                "aelstm": ("AELSTM", AELSTMConfig),
+                "cnnaelstm": ("CNNAELSTM", CNNAELSTMConfig),
+                "timesnet": ("TIMESNET", TimesNetConfig),
+            }
+            
+            # Handle legacy model types that might not be in registry
+            if self.model_type not in model_type_mapping:
+                # Try to use the model_type directly (case-insensitive)
+                registry_name = self.model_type.upper()
+                available_models = get_available_models()
+                if registry_name in available_models:
+                    # Use default config parameters - will need to infer from saved model
+                    print(f"[Evaluator] Using model type '{registry_name}' from registry")
+                    # Create a minimal config - input_shape will be set
+                    from models.configs.base_config import BaseModelConfig
+                    config = BaseModelConfig(parameters={'input_shape': self.input_shape})
+                    self.model = create_model(registry_name, config)
+                else:
+                    raise ValueError(
+                        f"[Evaluator] Invalid model type: {self.model_type}. "
+                        f"Available models: {', '.join(available_models)}"
+                    )
             else:
+                registry_name, config_class = model_type_mapping[self.model_type]
+                
                 # Create config with input_shape and defaults
                 config = config_class(parameters={'input_shape': self.input_shape})
-            
-            # Create model using registry
-            self.model = create_model(registry_name, config)
+                
+                # Create model using registry
+                self.model = create_model(registry_name, config)
         
         self.model = self.model.to(self.device)
         
@@ -656,7 +914,7 @@ class ModelEvaluator:
         1. Rank all stocks by predicted probability (raw_predictions)
         2. Select top-k (long) and flop-k (short)
         3. Equal-weight positions
-        4. Apply transaction costs
+        4. Apply transaction costs ONLY when positions change (trades occur)
         
         Args:
             raw_predictions: Raw model outputs (for ranking)
@@ -676,7 +934,10 @@ class ModelEvaluator:
         df["row_id"] = np.arange(len(df))
 
         cost_per_side = cost_bps_per_side / 10000.0  # Convert bps to decimal
-        fixed_daily_cost = 4.0 * cost_per_side  # 4 half-turns for full rebalance
+
+        # Calculate maximum number of stocks across all dates
+        # This ensures position arrays are always the same size
+        max_stocks = df.groupby("date").size().max()
 
         portfolio_returns = []
         traded_mask = np.zeros(len(df), dtype=bool)
@@ -688,10 +949,19 @@ class ModelEvaluator:
         net_returns = []
         daily_costs = []
         traded_days = []
+        
+        # Track previous positions: 0 = no position, +1 = long, -1 = short
+        # Initialize as None (will be set on first day)
+        # Position arrays are always size max_stocks to handle varying stock counts per date
+        prev_positions = None
 
         for dt, group in df.groupby("date", sort=True):
             unique_dates.append(dt)
             n_rows = len(group)
+            
+            # Reset index to get position within this date group (0 to n_rows-1)
+            # This ensures consistent stock identification across days
+            group = group.reset_index(drop=True)
 
             if n_rows < 2 * k:
                 portfolio_returns.append(0.0)
@@ -714,39 +984,93 @@ class ModelEvaluator:
                     "cost": 0.0,
                     "traded": False
                 })
+                # Reset positions when we can't trade
+                prev_positions = None
                 continue
 
             top = group.nlargest(k, "pred")
             flop = group.nsmallest(k, "pred")
 
-            long_return = float(top["ret"].mean()) if not top.empty else 0.0
-            short_return = float(-flop["ret"].mean()) if not flop.empty else 0.0
+            print("top pred:")
+            print(top["pred"])
+            print("flop pred:")
+            print(flop["pred"])
+            
+            # Get current day's positions using indices within this date group
+            # These indices (0 to n_rows-1) represent the same stocks across all dates
+            current_long_indices = set(top.index.tolist())  # Position within date group
+            current_short_indices = set(flop.index.tolist())  # Position within date group
+            
+            # Initialize current positions array with fixed size (max_stocks)
+            # Maintain previous positions for stocks not present today
+            if prev_positions is None:
+                # First day: initialize all positions to zero
+                current_positions = np.zeros(max_stocks, dtype=int)
+            else:
+                # Maintain previous positions (stocks not present today keep their positions)
+                current_positions = prev_positions.copy()
+                # Reset positions for stocks that ARE present today (will be set below)
+                current_positions[:n_rows] = 0
+            
+            # Set positions for stocks present today (only for indices 0 to n_rows-1)
+            current_positions[list(current_long_indices)] = 1   # Long positions
+            current_positions[list(current_short_indices)] = -1  # Short positions
+            
+            # Calculate returns first (needed for cost calculation)
+            long_return = float(top["ret"].sum()) if not top.empty else 0.0
+            short_return = -1.0 * float(flop["ret"].sum()) if not flop.empty else 0.0
             gross_return = long_return + short_return
-            net_return = gross_return - fixed_daily_cost
 
-            portfolio_returns.append(net_return)
-            long_leg_returns.append(long_return)
-            short_leg_returns.append(short_return)
-            gross_returns.append(gross_return)
-            net_returns.append(net_return)
-            daily_costs.append(fixed_daily_cost)
+            print(flop["ret"])
+
+            plong_return = long_return / 100
+            pshort_return = short_return / 100
+            pgross_return = gross_return / 100
+            
+            # Calculate transaction costs based on gross return
+            # First day: assume positions already held, so no cost
+            # Subsequent days: cost is 0.2% of gross return
+            if prev_positions is None:
+                pdaily_cost = 0.0
+            else:
+                pdaily_cost = 0.002 * abs(pgross_return)
+            
+            num_trades = 2*k
+            pnet_return = pgross_return - pdaily_cost
+
+            
+
+            portfolio_returns.append(pnet_return)
+            long_leg_returns.append(plong_return)
+            short_leg_returns.append(pshort_return)
+            gross_returns.append(pgross_return)
+            net_returns.append(pnet_return)
+            daily_costs.append(pdaily_cost)
             traded_days.append(True)
-            traded_mask[top["row_id"].to_numpy()] = True
-            traded_mask[flop["row_id"].to_numpy()] = True
+            
+            # Mark traded stocks in the global traded_mask using original row_id
+            global_long_indices = top["row_id"].to_numpy()
+            global_short_indices = flop["row_id"].to_numpy()
+            traded_mask[global_long_indices] = True
+            traded_mask[global_short_indices] = True
 
             daily_info.append({
                 "date": dt,
                 "n_stocks": n_rows,
-                "top_k": top["row_id"].astype(int).tolist(),
-                "flop_k": flop["row_id"].astype(int).tolist(),
+                "top_k": list(current_long_indices),
+                "flop_k": list(current_short_indices),
                 "long_return": long_return,
                 "short_return": short_return,
-                "portfolio_return": net_return,
-                "portfolio_return_after_cost": net_return,
-                "portfolio_return_before_cost": gross_return,
-                "cost": fixed_daily_cost,
-                "traded": True
+                "portfolio_return": pnet_return,
+                "portfolio_return_after_cost": pnet_return,
+                "portfolio_return_before_cost": pgross_return,
+                "cost": pdaily_cost,
+                "traded": True,
+                "total_trades": num_trades
             })
+            
+            # Update previous positions for next iteration
+            prev_positions = current_positions.copy()
 
         portfolio_returns = np.asarray(portfolio_returns, dtype=float)
         long_leg_returns = np.asarray(long_leg_returns, dtype=float)
@@ -1363,6 +1687,7 @@ class ModelEvaluator:
         
         Creates n_portfolios random portfolios by randomly selecting k stocks for long
         and k stocks for short each day, then averages their returns and computes distribution stats.
+        Transaction costs are applied only when positions change (trades occur).
         
         Args:
             returns: Actual returns (Close - Open) / Open for each stock
@@ -1380,25 +1705,74 @@ class ModelEvaluator:
         # Group by date
         date_groups, unique_dates = self._group_indices_by_date(dates)
         cost_per_side = cost_bps_per_side / 10000.0
-        fixed_daily_cost = 4.0 * cost_per_side
 
         all_portfolio_returns = []
-        for date in unique_dates:
-            idxs = date_groups[date]
+        # Track previous positions for each portfolio
+        # prev_long[i] and prev_short[i] are sets of stock indices for portfolio i
+        prev_long = [set() for _ in range(n_portfolios)]
+        prev_short = [set() for _ in range(n_portfolios)]
+        
+        for date_idx, date in enumerate(unique_dates):
+            idxs = np.array(date_groups[date])
             if len(idxs) < 2 * k:
                 all_portfolio_returns.append(np.zeros(n_portfolios))
+                # Reset positions when we can't trade
+                prev_long = [set() for _ in range(n_portfolios)]
+                prev_short = [set() for _ in range(n_portfolios)]
                 continue
 
             r = returns[idxs]
             m = len(r)
 
+            # Randomly select positions for each portfolio
             rand_order = np.argsort(np.random.rand(n_portfolios, m), axis=1)
             picks = rand_order[:, :2 * k]
+            
+            # Separate long and short picks
+            long_picks = picks[:, :k]  # Shape: (n_portfolios, k)
+            short_picks = picks[:, k:]  # Shape: (n_portfolios, k)
+            
+            # Get returns for selected stocks
             picked_returns = np.take(r, picks)
-
-            long_mean = picked_returns[:, :k].mean(axis=1)
-            short_mean = -picked_returns[:, k:].mean(axis=1)
-            portfolio = long_mean + short_mean - fixed_daily_cost
+            long_returns = picked_returns[:, :k]
+            short_returns = picked_returns[:, k:]
+            
+            long_mean = long_returns.mean(axis=1)
+            short_mean = -short_returns.mean(axis=1)
+            gross_return = long_mean + short_mean
+            
+            # Calculate transaction costs for each portfolio based on position changes
+            daily_costs = np.zeros(n_portfolios)
+            for p in range(n_portfolios):
+                # Get current positions (using original indices from idxs)
+                current_long = set(idxs[long_picks[p]])
+                current_short = set(idxs[short_picks[p]])
+                
+                # Calculate position changes
+                long_entering = current_long - prev_long[p]
+                long_exiting = prev_long[p] - current_long
+                short_entering = current_short - prev_short[p]
+                short_exiting = prev_short[p] - current_short
+                
+                # Count trades
+                num_long_trades = len(long_entering) + len(long_exiting)
+                num_short_trades = len(short_entering) + len(short_exiting)
+                total_trades = num_long_trades + num_short_trades
+                
+                # Calculate cost
+                if len(prev_long[p]) == 0 and len(prev_short[p]) == 0:
+                    # First day: open all positions
+                    daily_costs[p] = 2 * k * cost_per_side
+                else:
+                    # Subsequent days: only pay for trades that occur
+                    daily_costs[p] = total_trades * cost_per_side
+                
+                # Update previous positions
+                prev_long[p] = current_long
+                prev_short[p] = current_short
+            
+            # Net return after costs
+            portfolio = gross_return - daily_costs
             all_portfolio_returns.append(portfolio)
 
         if all_portfolio_returns:
@@ -1433,14 +1807,14 @@ class ModelEvaluator:
         
         This method implements the exact evaluation protocol from the papers:
         1. Portfolio construction: top-k/flop-k ranking
-        2. Transaction costs: 5 bps per half-turn (fixed formula: 4 * cost_per_side)
+        2. Transaction costs: Dynamic calculation (cost_per_side per half-turn, only charged when positions change)
         3. Accuracy on traded set with DM/PT tests (using paper labels)
         4. Comprehensive risk metrics
         5. Random benchmark: random k-long/k-short portfolios
         
         Args:
             k: Number of stocks in long/short legs (default: 10)
-            cost_bps_per_side: Transaction cost in basis points per side (default: 5.0)
+            cost_bps_per_side: Transaction cost in basis points per half-turn (default: 5.0)
             batch_size: Batch size for prediction
             
         Returns:
@@ -1497,7 +1871,8 @@ class ModelEvaluator:
         gross_returns = portfolio_info.get('gross_returns')
         daily_costs = portfolio_info.get('daily_costs')
         if daily_costs is None:
-            daily_costs = np.full_like(portfolio_returns, fill_value=(4.0 * cost_bps_per_side / 10000.0))
+            # This should not happen - construct_portfolio_returns always returns daily_costs
+            raise ValueError("daily_costs not found in portfolio_info. This indicates an issue with portfolio construction.")
         if gross_returns is None:
             gross_returns = portfolio_returns + daily_costs
         traded_days_mask = portfolio_info.get('traded_days_mask')
@@ -2107,7 +2482,7 @@ class ModelEvaluator:
             batch_size: Batch size for prediction
             create_plots: Whether to create and log visualizations
             k: Number of stocks in long/short legs (for paper-aligned evaluation)
-            cost_bps_per_side: Transaction cost in basis points per side (for paper-aligned evaluation)
+            cost_bps_per_side: Transaction cost in basis points per half-turn (for paper-aligned evaluation)
             use_paper_aligned: If True, use paper-aligned evaluation (Fischer-Krauss/Ghosh methodology)
             
         Returns:

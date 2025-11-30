@@ -7,6 +7,7 @@ from torch import nn
 import torch.utils.data as data
 import copy
 import pickle
+import math
 try:
     from nlp_features import get_nlp_feature_dim
 except ImportError:
@@ -515,11 +516,14 @@ class EarlyStopper():
             # Check if this rank should stop
             # All ranks must evaluate the same condition to maintain synchronization
             if validation_loss < (self.min_validation_loss - self.min_delta):
+                # Significant improvement
+                print(f"[early stopping] saving model with loss: {validation_loss}")
                 self.min_validation_loss = validation_loss
                 self.counter = 0
                 if self.is_main:
                     torch.save((model.module if hasattr(model, "module") else model).state_dict(), self.save_path)
             else:
+                # No significant improvement
                 self.counter += 1
                 if self.counter >= self.patience:
                     should_stop_tensor = torch.tensor(1, dtype=torch.int, device=device)
@@ -548,10 +552,12 @@ class EarlyStopper():
         else:
             # Non-distributed mode - original logic
             if validation_loss < (self.min_validation_loss - self.min_delta):
+                # Significant improvement
                 self.min_validation_loss = validation_loss
                 self.counter = 0
                 torch.save(model.state_dict(), self.save_path)
             else:
+                # No significant improvement
                 self.counter += 1
                 if self.counter >= self.patience:
                     return True
@@ -1107,6 +1113,44 @@ class Trainer():
         
         return final_config
     
+    def _synchronize_skip_decision(self, should_skip):
+        """
+        Synchronize batch skip/break decisions across all ranks in distributed training.
+        
+        Args:
+            should_skip: Boolean indicating if this rank wants to skip the batch
+            
+        Returns:
+            Boolean: True if any rank wants to skip (all ranks will skip together)
+        """
+        if not self.is_dist:
+            return should_skip
+        
+        # Create tensor to communicate decision
+        skip_tensor = torch.tensor(1 if should_skip else 0, device=self.device, dtype=torch.int)
+        # Use MAX to ensure if any rank wants to skip, all ranks skip
+        dist.all_reduce(skip_tensor, op=dist.ReduceOp.MAX)
+        return skip_tensor.item() == 1
+    
+    def _synchronize_stop_decision(self, should_stop):
+        """
+        Synchronize training stop decisions across all ranks in distributed training.
+        
+        Args:
+            should_stop: Boolean indicating if this rank wants to stop training
+            
+        Returns:
+            Boolean: True if any rank wants to stop (all ranks will stop together)
+        """
+        if not self.is_dist:
+            return should_stop
+        
+        # Create tensor to communicate decision
+        stop_tensor = torch.tensor(1 if should_stop else 0, device=self.device, dtype=torch.int)
+        # Use MAX to ensure if any rank wants to stop, all ranks stop
+        dist.all_reduce(stop_tensor, op=dist.ReduceOp.MAX)
+        return stop_tensor.item() == 1
+    
     def _has_nan_weights(self):
         """Check if any model parameters contain NaN or Inf values."""
         model = self.Model.module if hasattr(self.Model, "module") else self.Model
@@ -1114,6 +1158,20 @@ class Trainer():
             if torch.isnan(param.data).any() or torch.isinf(param.data).any():
                 return True
         return False
+    
+    def _synchronized_has_nan_weights(self):
+        """
+        Check if any model parameters contain NaN or Inf values, synchronized across ranks.
+        Returns True if ANY rank has NaN weights.
+        """
+        has_nan = self._has_nan_weights()
+        if not self.is_dist:
+            return has_nan
+        
+        # Synchronize across all ranks
+        nan_tensor = torch.tensor(1 if has_nan else 0, device=self.device, dtype=torch.int)
+        dist.all_reduce(nan_tensor, op=dist.ReduceOp.MAX)
+        return nan_tensor.item() == 1
     
     def _recover_from_nan(self):
         """
@@ -1934,13 +1992,16 @@ class Trainer():
             X_batch = X_batch.to(self.device, non_blocking=self.pin_memory)
             Y_batch = Y_batch.to(self.device, non_blocking=self.pin_memory)
             
-            # Check for NaN/Inf in input data
-            if torch.isnan(X_batch).any() or torch.isinf(X_batch).any():
+            # Check for NaN/Inf in input data (synchronized across ranks)
+            has_nan_x = torch.isnan(X_batch).any() or torch.isinf(X_batch).any()
+            has_nan_y = torch.isnan(Y_batch).any() or torch.isinf(Y_batch).any()
+            
+            if self._synchronize_skip_decision(has_nan_x):
                 train_nan_x_batch += 1
                 if self.is_main:
                     print(f"[WARNING] NaN/Inf found in X_batch at batch {pbar.n}")
                 continue
-            if torch.isnan(Y_batch).any() or torch.isinf(Y_batch).any():
+            if self._synchronize_skip_decision(has_nan_y):
                 train_nan_y_batch += 1
                 if self.is_main:
                     print(f"[WARNING] NaN/Inf found in Y_batch at batch {pbar.n}")
@@ -1953,15 +2014,25 @@ class Trainer():
             if self.use_amp:
                 with torch.amp.autocast(device_type=self.device.type):
                     Y_pred = self._call_model(X_batch, indices, split="train")
-                    # Check for NaN/Inf in model output
-                    if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
+                    # Check for NaN/Inf in model output (synchronized across ranks)
+                    has_nan_output = torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any()
+                    if self._synchronize_skip_decision(has_nan_output):
                         train_nan_model_output += 1
-                        # Check if weights are corrupted
-                        if self._has_nan_weights():
+                        # Check if weights are corrupted (synchronized)
+                        if self._synchronized_has_nan_weights():
                             if self.is_main:
                                 print(f"[ERROR] NaN in model output and weights detected at batch {pbar.n}!")
-                            # Attempt recovery
-                            if self._recover_from_nan():
+                            # Attempt recovery (only rank 0 does the actual recovery, but decision is synchronized)
+                            recovery_success = False
+                            if self.is_main:
+                                recovery_success = self._recover_from_nan()
+                            # Synchronize recovery decision
+                            if self.is_dist:
+                                recovery_tensor = torch.tensor(1 if recovery_success else 0, device=self.device, dtype=torch.int)
+                                dist.broadcast(recovery_tensor, src=0)
+                                recovery_success = recovery_tensor.item() == 1
+                            
+                            if recovery_success:
                                 if self.is_main:
                                     print(f"[RECOVERY] Continuing training after recovery...")
                                 self.optimizer.zero_grad(set_to_none=True)
@@ -1971,15 +2042,17 @@ class Trainer():
                                     print(f"[ERROR] Cannot recover from NaN. Stopping training.")
                                 avg_train = float('nan')
                                 avg_val = float('nan')
-                                break
+                                if self._synchronize_stop_decision(True):
+                                    break
                         else:
                             # Output is NaN but weights are OK - might be a numerical issue with this specific batch
                             if self.is_main:
                                 print(f"[WARNING] NaN/Inf in model output at batch {pbar.n} (weights OK, skipping batch)")
                             continue
                     loss = self.loss_fn(Y_pred, Y_batch)
-                # Check for NaN/Inf in loss
-                if torch.isnan(loss) or torch.isinf(loss):
+                # Check for NaN/Inf in loss (synchronized across ranks)
+                has_nan_loss = torch.isnan(loss) or torch.isinf(loss)
+                if self._synchronize_skip_decision(has_nan_loss):
                     train_nan_loss += 1
                     if self.is_main:
                         print(f"[WARNING] NaN/Inf loss at batch {pbar.n}, skipping")
@@ -1994,13 +2067,22 @@ class Trainer():
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 
-                # Check for NaN in model weights after optimizer step
-                if self._has_nan_weights():
+                # Check for NaN in model weights after optimizer step (synchronized)
+                if self._synchronized_has_nan_weights():
                     train_nan_model_output += 1
                     if self.is_main:
                         print(f"[ERROR] NaN detected in model weights after batch {pbar.n}!")
-                    # Attempt recovery
-                    if self._recover_from_nan():
+                    # Attempt recovery (only rank 0 does the actual recovery, but decision is synchronized)
+                    recovery_success = False
+                    if self.is_main:
+                        recovery_success = self._recover_from_nan()
+                    # Synchronize recovery decision
+                    if self.is_dist:
+                        recovery_tensor = torch.tensor(1 if recovery_success else 0, device=self.device, dtype=torch.int)
+                        dist.broadcast(recovery_tensor, src=0)
+                        recovery_success = recovery_tensor.item() == 1
+                    
+                    if recovery_success:
                         if self.is_main:
                             print(f"[RECOVERY] Continuing training after recovery...")
                         # Skip this batch and continue
@@ -2013,18 +2095,29 @@ class Trainer():
                         # Mark epoch as failed
                         avg_train = float('nan')
                         avg_val = float('nan')
-                        break
+                        if self._synchronize_stop_decision(True):
+                            break
             else:
                 Y_pred = self._call_model(X_batch, indices, split="train")
-                # Check for NaN/Inf in model output
-                if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
+                # Check for NaN/Inf in model output (synchronized across ranks)
+                has_nan_output = torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any()
+                if self._synchronize_skip_decision(has_nan_output):
                     train_nan_model_output += 1
-                    # Check if weights are corrupted
-                    if self._has_nan_weights():
+                    # Check if weights are corrupted (synchronized)
+                    if self._synchronized_has_nan_weights():
                         if self.is_main:
                             print(f"[ERROR] NaN in model output and weights detected at batch {pbar.n}!")
-                        # Attempt recovery
-                        if self._recover_from_nan():
+                        # Attempt recovery (only rank 0 does the actual recovery, but decision is synchronized)
+                        recovery_success = False
+                        if self.is_main:
+                            recovery_success = self._recover_from_nan()
+                        # Synchronize recovery decision
+                        if self.is_dist:
+                            recovery_tensor = torch.tensor(1 if recovery_success else 0, device=self.device, dtype=torch.int)
+                            dist.broadcast(recovery_tensor, src=0)
+                            recovery_success = recovery_tensor.item() == 1
+                        
+                        if recovery_success:
                             if self.is_main:
                                 print(f"[RECOVERY] Continuing training after recovery...")
                             self.optimizer.zero_grad(set_to_none=True)
@@ -2034,15 +2127,17 @@ class Trainer():
                                 print(f"[ERROR] Cannot recover from NaN. Stopping training.")
                             avg_train = float('nan')
                             avg_val = float('nan')
-                            break
+                            if self._synchronize_stop_decision(True):
+                                break
                     else:
                         # Output is NaN but weights are OK - might be a numerical issue with this specific batch
                         if self.is_main:
                             print(f"[WARNING] NaN/Inf in model output at batch {pbar.n} (weights OK, skipping batch)")
                         continue
                 loss = self.loss_fn(Y_pred, Y_batch)
-                # Check for NaN/Inf in loss
-                if torch.isnan(loss) or torch.isinf(loss):
+                # Check for NaN/Inf in loss (synchronized across ranks)
+                has_nan_loss = torch.isnan(loss) or torch.isinf(loss)
+                if self._synchronize_skip_decision(has_nan_loss):
                     train_nan_loss += 1
                     if self.is_main:
                         print(f"[WARNING] NaN/Inf loss at batch {pbar.n}, skipping")
@@ -2055,13 +2150,22 @@ class Trainer():
                     grad_norms.append(grad_norm.item())
                 self.optimizer.step()
                 
-                # Check for NaN in model weights after optimizer step
-                if self._has_nan_weights():
+                # Check for NaN in model weights after optimizer step (synchronized)
+                if self._synchronized_has_nan_weights():
                     train_nan_model_output += 1
                     if self.is_main:
                         print(f"[ERROR] NaN detected in model weights after batch {pbar.n}!")
-                    # Attempt recovery
-                    if self._recover_from_nan():
+                    # Attempt recovery (only rank 0 does the actual recovery, but decision is synchronized)
+                    recovery_success = False
+                    if self.is_main:
+                        recovery_success = self._recover_from_nan()
+                    # Synchronize recovery decision
+                    if self.is_dist:
+                        recovery_tensor = torch.tensor(1 if recovery_success else 0, device=self.device, dtype=torch.int)
+                        dist.broadcast(recovery_tensor, src=0)
+                        recovery_success = recovery_tensor.item() == 1
+                    
+                    if recovery_success:
                         if self.is_main:
                             print(f"[RECOVERY] Continuing training after recovery...")
                         # Skip this batch and continue
@@ -2074,7 +2178,8 @@ class Trainer():
                         # Mark epoch as failed
                         avg_train = float('nan')
                         avg_val = float('nan')
-                        break
+                        if self._synchronize_stop_decision(True):
+                            break
 
 
             train_loss += loss.item()

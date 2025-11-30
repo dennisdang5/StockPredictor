@@ -12,6 +12,11 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
+# Define results directory (deliverables is at project root level, one level up from new-organization)
+ACTUAL_PROJECT_ROOT="$(dirname "$PROJECT_ROOT")"
+RESULTS_DIR="$ACTUAL_PROJECT_ROOT/deliverables/results"
+mkdir -p "$RESULTS_DIR"
+
 # Default values
 MODEL_NAME="${1:-savedmodel_classification_cnn_lstm.pth}"
 MODEL_TYPE="${2:-cnn_lstm}"
@@ -32,7 +37,7 @@ python evaluation/evaluate_model.py "$MODEL_NAME" "$MODEL_TYPE" "$TIME_ARGS"
 if [ $? -eq 0 ]; then
     # Extract model name without extension for results file naming
     MODEL_BASE=$(basename "$MODEL_NAME" .pth)
-    RESULTS_FILE="evaluation_results_${MODEL_BASE}.json"
+    RESULTS_FILE="$RESULTS_DIR/evaluation_results_${MODEL_BASE}.json"
     
     # Run evaluation analysis if results file exists
     if [ -f "$RESULTS_FILE" ]; then
@@ -41,11 +46,11 @@ if [ $? -eq 0 ]; then
         echo "Running Evaluation Analysis"
         echo "=========================================="
         
-        ANALYSIS_OUTPUT="results/${MODEL_TYPE}/evaluation_analysis_report_${MODEL_BASE}.json"
-        PORTFOLIO_CSV="results/${MODEL_TYPE}/portfolio_table_${MODEL_BASE}.csv"
+        ANALYSIS_OUTPUT="$RESULTS_DIR/${MODEL_TYPE}/evaluation_analysis_report_${MODEL_BASE}.json"
+        PORTFOLIO_CSV="$RESULTS_DIR/${MODEL_TYPE}/portfolio_table_${MODEL_BASE}.csv"
         
         # Create results directory if it doesn't exist
-        mkdir -p "results/${MODEL_TYPE}"
+        mkdir -p "$RESULTS_DIR/${MODEL_TYPE}"
         
         python evaluation/evaluation_analysis.py \
             --input "$RESULTS_FILE" \

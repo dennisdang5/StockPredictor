@@ -3,63 +3,27 @@
 Evaluation analysis script.
 
 This script operationalises the high-level checklist in
-`evaluation_analysis_pseudocode.txt`. It reads an evaluation results JSON
-produced by `test_suite/evaluate_model.py`, computes a battery of diagnostic
-statistics, and writes a consolidated JSON report.
+`evaluation_analysis_pseudocode.txt`. It reads evaluation results JSON files
+produced by the evaluation pipeline, computes a battery of diagnostic
+statistics, and writes consolidated JSON reports.
+
+The script processes all evaluation_results_*.json files in a specified
+directory (configured via hardcoded variables in the main() function).
+For each input file, it generates a corresponding analysis report.
 
 Many of the requested diagnostics need richer inputs (e.g. full cross-sectional
 scores, market regime data). Where those inputs are not available in the
 evaluation results file, the script records a structured "not_available"
 placeholder so the consumer can decide how to extend the pipeline.
 
-Usage:
-    python evaluation_analysis.py \
-        --input /path/to/evaluation_results_savedmodel_classification.json \
-        --output /path/to/evaluation_analysis_report.json
-
-Arguments:
-    --input (required)
-        Path to evaluation_results_*.json file.
-
-    --output (required)
-        Destination path for the consolidated analysis JSON.
-
-    --cross-sectional (optional)
-        CSV/Parquet with per-ticker predictions. Expected columns:
-        date, ticker, score, ret, sector (if sector diagnostics desired).
-
-    --market-data (optional)
-        CSV/Parquet with columns such as date, spx_return, spx_abs_return,
-        vix_change, dispersion.
-
-    --portfolio-table-csv (optional)
-        Path to write a tidy CSV of before/after-cost portfolio metrics.
-
-    --bootstrap-samples (optional, default=2000)
-        Number of bootstrap resamples for BCa confidence intervals.
-
-    --bootstrap-seed (optional, default=42)
-        Random seed for bootstrap resampling.
-
-    --bootstrap-alpha (optional, default=0.05)
-        Significance level for BCa confidence intervals.
-
-    --rolling-window (optional, default=60)
-        Window size (in trading days) for rolling diagnostics.
-
-    --min-rolling-observations (optional, default=30)
-        Minimum observations required before emitting rolling statistics.
-
-    --change-point-z-threshold (optional, default=2.0)
-        Z-score threshold for marking change-points in rolling averages.
-
-    --change-point-min-gap (optional, default=20)
-        Minimum index gap between successive change-point flags.
+Configuration:
+    All configuration is set via hardcoded variables at the top of the main()
+    function. Modify these variables to change input directory, output location,
+    and analysis parameters.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 from dataclasses import dataclass
@@ -785,7 +749,13 @@ class EvaluationAnalysis:
             return None
 
         skew = skew if skew is not None else 0.0
-        kurtosis = kurtosis if kurtosis is not None else 3.0
+        # Convert excess kurtosis to true kurtosis (scipy.stats.kurtosis returns excess kurtosis)
+        # Excess kurtosis = kurtosis - 3, so true kurtosis = excess kurtosis + 3
+        if kurtosis is not None:
+            true_kurtosis = kurtosis + 3.0
+        else:
+            true_kurtosis = 3.0  # Normal distribution has true kurtosis = 3
+        
         norm = NormalDist()
 
         # Expected maximum Sharpe ratio under Gaussian assumption
@@ -795,11 +765,14 @@ class EvaluationAnalysis:
             sr_star = norm.inv_cdf(1.0 - 1.0 / num_trials) / math.sqrt(n_obs - 1)
 
         numerator = (sharpe - sr_star) * math.sqrt(n_obs - 1)
-        denominator = math.sqrt(
+        denom_inside = (
             1.0
             - skew * sharpe
-            + ((kurtosis - 1.0) / 4.0) * (sharpe ** 2)
+            + ((true_kurtosis - 1.0) / 4.0) * (sharpe ** 2)
         )
+        if denom_inside <= 0:
+            return None  # Cannot take square root of negative number or zero
+        denominator = math.sqrt(denom_inside)
         if denominator == 0:
             return None
         return float(numerator / denominator)
@@ -1360,124 +1333,104 @@ class EvaluationAnalysis:
         }
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Analyse evaluation outputs using the diagnostics outlined in "
-            "evaluation_analysis_pseudocode.txt."
-        )
-    )
-    parser.add_argument(
-        "--input",
-        required=True,
-        type=Path,
-        help="Path to evaluation_results_*.json file.",
-    )
-    parser.add_argument(
-        "--output",
-        required=True,
-        type=Path,
-        help="Destination path for the consolidated analysis JSON.",
-    )
-    parser.add_argument(
-        "--cross-sectional",
-        type=Path,
-        default=None,
-        help=(
-            "Optional CSV/Parquet with per-ticker predictions. Expected columns: "
-            "date, ticker, score, ret, sector (if sector diagnostics desired)."
-        ),
-    )
-    parser.add_argument(
-        "--market-data",
-        type=Path,
-        default=None,
-        help=(
-            "Optional CSV/Parquet with columns such as date, spx_return, "
-            "spx_abs_return, vix_change, dispersion."
-        ),
-    )
-    parser.add_argument(
-        "--portfolio-table-csv",
-        type=Path,
-        default=None,
-        help="Optional path to write a tidy CSV of before/after-cost portfolio metrics.",
-    )
-    parser.add_argument(
-        "--bootstrap-samples",
-        type=int,
-        default=2000,
-        help="Number of bootstrap resamples for BCa confidence intervals.",
-    )
-    parser.add_argument(
-        "--bootstrap-seed",
-        type=int,
-        default=42,
-        help="Random seed for bootstrap resampling.",
-    )
-    parser.add_argument(
-        "--bootstrap-alpha",
-        type=float,
-        default=0.05,
-        help="Significance level for BCa confidence intervals.",
-    )
-    parser.add_argument(
-        "--rolling-window",
-        type=int,
-        default=60,
-        help="Window size (in trading days) for rolling diagnostics.",
-    )
-    parser.add_argument(
-        "--min-rolling-observations",
-        type=int,
-        default=30,
-        help="Minimum observations required before emitting rolling statistics.",
-    )
-    parser.add_argument(
-        "--change-point-z-threshold",
-        type=float,
-        default=2.0,
-        help="Z-score threshold for marking change-points in rolling averages.",
-    )
-    parser.add_argument(
-        "--change-point-min-gap",
-        type=int,
-        default=20,
-        help="Minimum index gap between successive change-point flags.",
-    )
-    return parser.parse_args(argv)
+def _get_output_filename(input_path: Path) -> str:
+    """Convert evaluation_results_*.json to analysis_*.json"""
+    name = input_path.stem  # Remove .json extension
+    if name.startswith("evaluation_results_"):
+        return f"analysis_{name[len('evaluation_results_'):]}.json"
+    return f"analysis_{name}.json"
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    args = parse_args(argv)
+def main() -> None:
+    # Configuration
+    # Resolve project root relative to this script's location
+    script_dir = Path(__file__).parent  # new-organization/evaluation/
+    parent_dir = script_dir.parent  # new-organization/
+    project_root = parent_dir.parent  # project root (StockPredictor/)
+    INPUT_DIR = project_root / "deliverables" / "results"  # Absolute path to deliverables/results
+    OUTPUT_DIR_NAME = "analysis"  # Subdirectory name for output files
+    CROSS_SECTIONAL_PATH = None  # Optional: Path to cross-sectional CSV/Parquet
+    MARKET_DATA_PATH = None  # Optional: Path to market data CSV/Parquet
+    # CSV generation is enabled by default - set to False to disable
+    GENERATE_PORTFOLIO_CSV = True
+    BOOTSTRAP_SAMPLES = 2000
+    BOOTSTRAP_SEED = 42
+    BOOTSTRAP_ALPHA = 0.05
+    ROLLING_WINDOW = 60
+    MIN_ROLLING_OBSERVATIONS = 30
+    CHANGE_POINT_Z_THRESHOLD = 2.0
+    CHANGE_POINT_MIN_GAP = 20
 
+    # Create AnalysisConfig from hardcoded values
     config = AnalysisConfig(
-        bootstrap_samples=args.bootstrap_samples,
-        bootstrap_seed=args.bootstrap_seed,
-        bootstrap_alpha=args.bootstrap_alpha,
-        rolling_window=args.rolling_window,
-        min_rolling_observations=args.min_rolling_observations,
-        change_point_z_threshold=args.change_point_z_threshold,
-        change_point_min_gap=args.change_point_min_gap,
+        bootstrap_samples=BOOTSTRAP_SAMPLES,
+        bootstrap_seed=BOOTSTRAP_SEED,
+        bootstrap_alpha=BOOTSTRAP_ALPHA,
+        rolling_window=ROLLING_WINDOW,
+        min_rolling_observations=MIN_ROLLING_OBSERVATIONS,
+        change_point_z_threshold=CHANGE_POINT_Z_THRESHOLD,
+        change_point_min_gap=CHANGE_POINT_MIN_GAP,
     )
 
-    analysis = EvaluationAnalysis(
-        evaluation_path=args.input,
-        config=config,
-        cross_sectional_path=args.cross_sectional,
-        market_data_path=args.market_data,
-    )
-    report = analysis.run()
+    # Find all evaluation_results_*.json files in INPUT_DIR
+    input_files = sorted(INPUT_DIR.glob("evaluation_results_*.json"))
+    
+    if not input_files:
+        print(f"[evaluation-analysis] No evaluation_results_*.json files found in {INPUT_DIR}")
+        return
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
+    # Create output directory
+    output_dir = INPUT_DIR / OUTPUT_DIR_NAME
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[evaluation-analysis] Processing {len(input_files)} file(s) from {INPUT_DIR}")
+    print(f"[evaluation-analysis] Output directory: {output_dir}")
 
-    print(f"[evaluation-analysis] Report written to {args.output}")
-
-    if args.portfolio_table_csv is not None:
-        analysis.export_portfolio_table(args.portfolio_table_csv)
-        print(f"[evaluation-analysis] Portfolio table CSV written to {args.portfolio_table_csv}")
+    # Process each file
+    successful = 0
+    failed = 0
+    
+    for input_file in input_files:
+        try:
+            print(f"\n[evaluation-analysis] Processing: {input_file.name}")
+            
+            # Generate output filename
+            output_filename = _get_output_filename(input_file)
+            output_path = output_dir / output_filename
+            
+            # Create analysis instance
+            analysis = EvaluationAnalysis(
+                evaluation_path=input_file,
+                config=config,
+                cross_sectional_path=CROSS_SECTIONAL_PATH,
+                market_data_path=MARKET_DATA_PATH,
+            )
+            
+            # Run analysis
+            report = analysis.run()
+            
+            # Write report
+            with output_path.open("w", encoding="utf-8") as handle:
+                json.dump(report, handle, indent=2)
+            
+            print(f"[evaluation-analysis] Report written to {output_path}")
+            
+            # Export portfolio table CSV (enabled by default)
+            if GENERATE_PORTFOLIO_CSV:
+                portfolio_csv_path = output_dir / f"portfolio_table_{input_file.stem}.csv"
+                analysis.export_portfolio_table(portfolio_csv_path)
+                print(f"[evaluation-analysis] Portfolio table CSV written to {portfolio_csv_path}")
+            
+            successful += 1
+            
+        except Exception as e:
+            print(f"[evaluation-analysis] ERROR processing {input_file.name}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+            continue
+    
+    # Summary
+    print(f"\n[evaluation-analysis] Processing complete: {successful} successful, {failed} failed")
 
 
 if __name__ == "__main__":
