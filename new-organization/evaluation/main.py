@@ -18,7 +18,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 # Now import from parent directory's main module (after path is set up)
-from main import ModelTrainingConfig, CNNLSTMConfig, CNNAELSTMConfig, AELSTMConfig
+from main import ModelTrainingConfig, CAELSTMConfig, AELSTMConfig, TimesNetConfig
 
 from evaluation.evaluator import ModelEvaluator
 from evaluation.configs.evaluation_config import EvaluationConfig
@@ -614,9 +614,28 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
     
     # Models directory (deliverables/models/)
     models_dir = os.path.join(project_root, "deliverables", "models")
-    """
-    # Model 1: AELSTM Base (bbbb7f04e4.pth)
-    aelstm_path = os.path.join(models_dir, "bbbb7f04e4.pth")
+
+    
+    # Model 3: LSTM Base (lstm_base.pth)
+    lstmpath = os.path.join(models_dir, "lstm_base.pth")
+    if os.path.exists(lstmpath):
+        configs.append(EvaluationConfig(
+            model_path=lstmpath,
+            model_type="lstm",
+            stocks=large_stocks,
+            time_args=long_history,
+            batch_size=64,
+            k=10,
+            cost_bps_per_side=5.0,
+            use_nlp=False,
+            nlp_method=None,
+            create_plots=True,
+            log_dir="deliverables/evaluation"
+        ))
+
+    
+    # Model 1: AELSTM Base (aelstm_base.pth)
+    aelstm_path = os.path.join(models_dir, "aelstm_base.pth")
     if os.path.exists(aelstm_path):
         configs.append(EvaluationConfig(
             model_path=aelstm_path,
@@ -632,12 +651,12 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
             log_dir="deliverables/evaluation"
         ))
     
-    # Model 2: CNNLSTM Base (569b254576.pth)
-    cnnlstm_path = os.path.join(models_dir, "569b254576.pth")
-    if os.path.exists(cnnlstm_path):
+    # Model 2: CAELSTM Base (caelstm_base.pth)
+    caelstm_path = os.path.join(models_dir, "caelstm_base.pth")
+    if os.path.exists(caelstm_path):
         configs.append(EvaluationConfig(
-            model_path=cnnlstm_path,
-            model_type="cnnlstm",
+            model_path=caelstm_path,
+            model_type="caelstm",
             stocks=large_stocks,
             time_args=long_history,
             batch_size=64,
@@ -645,16 +664,71 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
             cost_bps_per_side=5.0,
             use_nlp=False,
             nlp_method=None,
+            create_plots=True,
+            log_dir="deliverables/evaluation"
+        ))
+
+    # Model 3: CAELSTM NLP (caelstm_nlp.pth)
+    caelstm_nlp_path = os.path.join(models_dir, "caelstm_nlp.pth")
+    if os.path.exists(caelstm_nlp_path):
+        configs.append(EvaluationConfig(
+            model_path=caelstm_nlp_path,
+            model_type="caelstm",
+            stocks=large_stocks,
+            time_args=long_history,
+            batch_size=64,
+            k=10,
+            cost_bps_per_side=5.0,
+            use_nlp=True,
+            nlp_method="aggregated",
             create_plots=True,
             log_dir="deliverables/evaluation"
         ))
     
-    # Model 3: CNNAELSTM Base (da48b78fc2.pth)
-    cnnaelstm_path = os.path.join(models_dir, "da48b78fc2.pth")
-    if os.path.exists(cnnaelstm_path):
+    # Model 2: AELSTM nlp (aelstm_nlp.pth)
+    aelstm_nlp_path = os.path.join(models_dir, "aelstm_nlp.pth")
+    if os.path.exists(aelstm_nlp_path):
         configs.append(EvaluationConfig(
-            model_path=cnnaelstm_path,
-            model_type="cnnaelstm",
+            model_path=aelstm_nlp_path,
+            model_type="aelstm",
+            stocks=large_stocks,
+            time_args=long_history,
+            batch_size=64,
+            k=10,
+            cost_bps_per_side=5.0,
+            use_nlp=True,
+            nlp_method="aggregated",
+            create_plots=True,
+            log_dir="deliverables/evaluation"
+        ))
+    
+    # Model 4: LSTM NLP (lstm_nlp.pth)
+    lstm_nlp_path = os.path.join(models_dir, "lstm_nlp.pth")
+    if os.path.exists(lstm_nlp_path):
+        configs.append(EvaluationConfig(
+            model_path=lstm_nlp_path,
+            model_type="lstm",
+            stocks=large_stocks,
+            time_args=long_history,
+            batch_size=64,
+            k=10,
+            cost_bps_per_side=5.0,
+            use_nlp=True,
+            nlp_method=None,
+            create_plots=True,
+            log_dir="deliverables/evaluation",
+            input_shape=(31,13)
+        ))
+    
+    
+    # ---------------------------------------------------------------------
+    # 9. TimesNet Base
+    # ---------------------------------------------------------------------
+    timesnet_path = os.path.join(models_dir, "timesnet_base.pth")
+    if os.path.exists(timesnet_path):
+        configs.append(EvaluationConfig(
+            model_path=timesnet_path,
+            model_type="timesnet",
             stocks=large_stocks,
             time_args=long_history,
             batch_size=64,
@@ -663,15 +737,58 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
             use_nlp=False,
             nlp_method=None,
             create_plots=True,
-            log_dir="deliverables/evaluation"
+            log_dir="deliverables/evaluation",
+            input_shape=(31,3)
         ))
-        """
 
-    # Model 3: LSTM Base (savedmodel_classification.pth)
-    lstmpath = os.path.join(models_dir, "savedmodel_classification.pth")
-    if os.path.exists(lstmpath):
+    # ---------------------------------------------------------------------
+    # 10. Portfolio Shared LSTM Base
+    # ---------------------------------------------------------------------
+    portfolio_shared_lstm_path = os.path.join(models_dir, "portfolio_shared_lstm_base.pth")
+    if os.path.exists(portfolio_shared_lstm_path):
         configs.append(EvaluationConfig(
-            model_path=lstmpath,
+            model_path=portfolio_shared_lstm_path,
+            model_type="portfolio_shared_lstm",
+            stocks=large_stocks,
+            time_args=long_history,
+            batch_size=64,
+            k=10,
+            cost_bps_per_side=5.0,
+            use_nlp=False,
+            nlp_method=None,
+            create_plots=True,
+            log_dir="deliverables/evaluation",
+            input_shape=(31,3)
+        ))
+
+    # ---------------------------------------------------------------------
+    # 11. Portfolio Independent LSTM Base
+    # ---------------------------------------------------------------------
+    portfolio_independent_lstm_path = os.path.join(models_dir, "portfolio_independent_lstm_base.pth")
+    if os.path.exists(portfolio_independent_lstm_path):
+        configs.append(EvaluationConfig(
+            model_path=portfolio_independent_lstm_path,
+            model_type="portfolio_independent_lstm",
+            stocks=large_stocks,
+            time_args=long_history,
+            batch_size=64,
+            k=10,
+            cost_bps_per_side=5.0,
+            use_nlp=False,
+            nlp_method=None,
+            create_plots=True,
+            log_dir="deliverables/evaluation",
+            input_shape=(31,3)
+        ))
+
+    """
+    # ---------------------------------------------------------------------
+    # 12. LSTM Full Base
+    # ---------------------------------------------------------------------
+    lstm_full_base_path = os.path.join(models_dir, "lstm_full_base.pth")
+    if os.path.exists(lstm_full_base_path):
+        configs.append(EvaluationConfig(
+            model_path=lstm_full_base_path,
             model_type="lstm",
             stocks=large_stocks,
             time_args=long_history,
@@ -681,9 +798,31 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
             use_nlp=False,
             nlp_method=None,
             create_plots=True,
-            log_dir="deliverables/evaluation"
+            log_dir="deliverables/evaluation",
+            input_shape=(31,3)
         ))
-    
+
+    # ---------------------------------------------------------------------
+    # 13. LSTM Full NLP (aggregated)
+    # ---------------------------------------------------------------------
+    lstm_full_nlp_path = os.path.join(models_dir, "lstm_full_nlp.pth")
+    if os.path.exists(lstm_full_nlp_path):
+        configs.append(EvaluationConfig(
+            model_path=lstm_full_nlp_path,
+            model_type="lstm",
+            stocks=large_stocks,
+            time_args=long_history,
+            batch_size=64,
+            k=10,
+            cost_bps_per_side=5.0,
+            use_nlp=True,
+            nlp_method="aggregated",
+            create_plots=True,
+            log_dir="deliverables/evaluation",
+            input_shape=(31,13)
+        ))
+    """
+
     return configs
 
 
@@ -698,15 +837,16 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
 #     LSTMConfig(parameters={'input_shape': (31, 13), 'hidden_size': 25, ...}),
 # ]
 configs = []
+
+
 # ---------------------------------------------------------------------
-# 5. CNNLSTM Base
+# 5. CAELSTM Base
 # ---------------------------------------------------------------------
 configs.append(ModelTrainingConfig(
-    name="cnnlstm_base",
-    model_type="CNNLSTM",
-    model_config=CNNLSTMConfig(parameters={
+    name="caelstm_base",
+    model_type="CAELSTM",
+    model_config=CAELSTMConfig(parameters={
         'input_shape': (31, 3),
-        'num_filters': 64,
         'kernel_size': 3,
         'hidden_size': 25,
         'num_layers': 1,
@@ -722,31 +862,6 @@ configs.append(ModelTrainingConfig(
     nlp_method=None,
     enabled=True,
 )) # Set to list of model configs, or None to use legacy mode
-
-# ---------------------------------------------------------------------
-# 7. CNNAELSTM Base
-# ---------------------------------------------------------------------
-configs.append(ModelTrainingConfig(
-    name="cnnaelstm_base",
-    model_type="CNNAELSTM",
-    model_config=CNNAELSTMConfig(parameters={
-        'input_shape': (31, 3),
-        'num_filters': 64,
-        'kernel_size': 3,
-        'hidden_size': 25,
-        'num_layers': 1,
-        'dropout': 0.1
-    }),
-    stocks=large_stocks,
-    time_args=long_history,
-    batch_size=64,
-    num_epochs=1000,
-    period_type="LS",
-    lookback=240,
-    use_nlp=False,
-    nlp_method=None,
-    enabled=True,
-))
 
 # ---------------------------------------------------------------------
 # 3. AELSTM Base
@@ -770,6 +885,45 @@ configs.append(ModelTrainingConfig(
     nlp_method=None
 ))
 
+
+
+# ---------------------------------------------------------------------
+# 9. TimesNet Base
+# ---------------------------------------------------------------------
+configs.append(ModelTrainingConfig(
+    name="timesnet_base",
+    model_type="TimesNet",
+    model_config=TimesNetConfig(parameters={
+        'input_shape': (31, 3),
+        'task_name': 'classification',
+        'seq_len': None,
+        'enc_in': 3,
+        'num_class': 3,
+        'd_model': 256,
+        'd_ff': 1024,
+        'e_layers': 2,
+        'top_k': 3,
+        'num_kernels': 3,
+        'embed': 'timeF',
+        'freq': 'd',
+        'dropout': 0.1,
+        'pred_len': 0,
+        'label_len': 0,
+        'c_out': None,
+        'freeze_encoder': False,
+    }),
+    stocks=large_stocks,
+    time_args=long_history,
+    batch_size=64,
+    num_epochs=1000,
+    period_type="LS",
+    lookback=240,
+    use_nlp=False,
+    nlp_method=None,
+    enabled=True,
+))
+
+
 # Set to None to use legacy evaluation mode (default)
 # Set to a list of model configs to use mapping file mode
 MODEL_CONFIGS_TO_EVALUATE = None  # Use legacy mode by default
@@ -783,7 +937,7 @@ CREATE_PLOTS = True
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_K = 10
 DEFAULT_COST_BPS_PER_SIDE = 5.0
-DEFAULT_USE_NLP = True
+DEFAULT_USE_NLP = False
 DEFAULT_NLP_METHOD = "aggregated"
 
 # Single model evaluation mode (set to None to use get_evaluation_configs() instead)

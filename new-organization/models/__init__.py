@@ -17,9 +17,8 @@ from .base import BaseModel
 from .configs import (
     BaseModelConfig,
     LSTMConfig,
-    CNNLSTMConfig,
+    CAELSTMConfig,
     AELSTMConfig,
-    CNNAELSTMConfig,
     TimesNetConfig,
     TabPFNConfig,
     PortfolioConfig,
@@ -42,9 +41,8 @@ __all__ = [
     'BaseModelConfig',
     # Configs
     'LSTMConfig',
-    'CNNLSTMConfig',
+    'CAELSTMConfig',
     'AELSTMConfig',
-    'CNNAELSTMConfig',
     'TimesNetConfig',
     'TabPFNConfig',
     'PortfolioConfig',

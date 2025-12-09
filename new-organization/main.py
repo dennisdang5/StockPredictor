@@ -15,8 +15,7 @@ from trainer_portfolio import PortfolioTrainer
 from models.configs import (
     LSTMConfig,
     AELSTMConfig,
-    CNNLSTMConfig, 
-    CNNAELSTMConfig,
+    CAELSTMConfig, 
     TimesNetConfig,
     TabPFNConfig,
     PortfolioConfig,
@@ -150,7 +149,7 @@ class ModelTrainingConfig:
         
         Args:
             name: Unique name for this model configuration (used for saving/logging)
-            model_type: Type of model ("LSTM", "CNNLSTM", "AELSTM", "CNNAELSTM", "TimesNet")
+            model_type: Type of model ("LSTM", "CAELSTM", "AELSTM", "TimesNet")
             model_config: Model-specific config object (e.g., LSTMConfig instance)
             stocks: List of stock tickers
             time_args: Time range arguments (e.g., ["3y"] or ["1990-01-01", "2015-12-31"])
@@ -310,7 +309,8 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         period_type="LS",
         lookback=240,
         use_nlp=True,
-        nlp_method="aggregated"
+        nlp_method="aggregated",
+        saved_model="trained_models/models/067f8c9b9c.pth"
     ))
     
     # ---------------------------------------------------------------------
@@ -359,14 +359,13 @@ def create_model_configs() -> List[ModelTrainingConfig]:
  
         
     # ---------------------------------------------------------------------
-    # 5. CNNLSTM Base
+    # 5. CAELSTM Base
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="cnnlstm_base",
-        model_type="CNNLSTM",
-        model_config=CNNLSTMConfig(parameters={
+        name="caelstm_base",
+        model_type="CAELSTM",
+        model_config=CAELSTMConfig(parameters={
             'input_shape': (31, 3),
-            'num_filters': 64,
             'kernel_size': 3,
             'hidden_size': 25,
             'num_layers': 1,
@@ -384,14 +383,13 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
 
     # ---------------------------------------------------------------------
-    # 6. CNNLSTM NLP
+    # 6. CAELSTM NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
-        name="cnnlstm_nlp",
-        model_type="CNNLSTM",
-        model_config=CNNLSTMConfig(parameters={
+        name="caelstm_nlp",
+        model_type="CAELSTM",
+        model_config=CAELSTMConfig(parameters={
             'input_shape': (31, 13),
-            'num_filters': 64,
             'kernel_size': 3,
             'hidden_size': 25,
             'num_layers': 1,
@@ -405,65 +403,6 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         lookback=240,
         use_nlp=False,
         nlp_method=None,
-        enabled=True,
-    ))
-    
-    # ---------------------------------------------------------------------
-    # 7. CNNAELSTM Base
-    # ---------------------------------------------------------------------
-    configs.append(ModelTrainingConfig(
-        name="cnnaelstm_base",
-        model_type="CNNAELSTM",
-        model_config=CNNAELSTMConfig(parameters={
-            'input_shape': (31, 3),
-            'num_filters': 64,
-            'kernel_size': 3,
-            'hidden_size': 25,
-            'num_layers': 1,
-            'dropout': 0.1
-        }),
-        stocks=large_stocks,
-        time_args=long_history,
-        batch_size=64,
-        num_epochs=1000, 
-        period_type="LS",
-        lookback=240,
-        use_nlp=False,
-        nlp_method=None,
-        enabled=True,
-    ))
-     
-    
-    # ---------------------------------------------------------------------
-    # 8. CNNAELSTM NLP
-    # ---------------------------------------------------------------------
-    configs.append(ModelTrainingConfig(
-        name="cnnaelstm_nlp",
-        model_type="CNNAELSTM",
-        model_config=CNNAELSTMConfig(parameters={
-            'input_shape': (31, 13),
-            'cnn_ae_config': {
-                'input_shape': (31, 3),
-                'kernel_size': 3,
-            },
-            'lstm_config': {
-                'input_shape': (31, 3),
-                'hidden_size': 25,
-            },
-            'num_filters': 64,
-            'kernel_size': 3,
-            'hidden_size': 25,
-            'num_layers': 1,
-            'dropout': 0.1
-        }),
-        stocks=large_stocks,
-        time_args=long_history,
-        batch_size=64,
-        num_epochs=1000,
-        period_type="LS",
-        lookback=240,
-        use_nlp=True,
-        nlp_method="aggregated",
         enabled=True,
     ))
 
@@ -510,7 +449,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         name="portfolio_lstm_independent_base",
         model_type="Portfolio",
         model_config=PortfolioConfig(parameters={
-            'stocks': micro_stocks,  # PortfolioConfig needs stocks
+            'stocks': large_stocks,  # PortfolioConfig needs stocks
             'base_model_type': "LSTM",
             'base_model_config': LSTMConfig(parameters={
                 'input_shape': (31, 3),
@@ -644,6 +583,50 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         use_nlp=False,
         nlp_method=None,
         enabled=True,
+    ))
+
+    # ---------------------------------------------------------------------
+    # 15. Base LSTM full window
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="lstm_full_base",
+        model_type="LSTM",
+        model_config=LSTMConfig(parameters={
+            'input_shape': (31, 3),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=large_stocks,
+        time_args=long_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="full",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None
+    ))
+
+    # ---------------------------------------------------------------------
+    # 16. Base LSTM full window with NLP
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="lstm_full_nlp",
+        model_type="LSTM",
+        model_config=LSTMConfig(parameters={
+            'input_shape': (31, 13),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=large_stocks,
+        time_args=long_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="full",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated"
     ))
 
     return configs

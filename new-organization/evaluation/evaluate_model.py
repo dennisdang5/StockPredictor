@@ -175,8 +175,8 @@ def main():
     print("STOCK PREDICTION MODEL EVALUATION")
     print("=" * 60)
 
-    model_name = "savedmodel_classification_cnn_lstm.pth"
-    model_type = "cnn_lstm"
+    model_name = "savedmodel_classification_cae_lstm.pth"
+    model_type = "cae_lstm"
     time_args = ["1990-01-01", "2015-12-31"]
 
     if len(sys.argv) > 1:

@@ -16,7 +16,7 @@ if current_dir not in sys.path:
 # Explicit imports from current directory
 from trainer import Trainer, TrainerConfig
 from trainer_portfolio import PortfolioTrainer
-from models.configs import LSTMConfig, TimesNetConfig, CNNLSTMConfig
+from models.configs import LSTMConfig, TimesNetConfig, CAELSTMConfig
 from evaluation.configs.evaluation_config import EvaluationConfig
 from evaluation.evaluator import ModelEvaluator
 
@@ -92,7 +92,7 @@ def train_model(stocks=None, time_args=None):
     print("=" * 80)
     
     # Define model type first to use in save path
-    model_type = "CNNLSTM"
+    model_type = "CAELSTM"
     
     print(f"Stocks: {stocks}")
     print(f"Time period: {time_args[0]} to {time_args[1]}")
@@ -120,7 +120,7 @@ def train_model(stocks=None, time_args=None):
         'num_class': 3,
     })
 
-    model_config = CNNLSTMConfig(parameters={
+    model_config = CAELSTMConfig(parameters={
         'input_shape': (31, 13),
         'hidden_size': 25,
         'num_layers': 2,

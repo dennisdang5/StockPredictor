@@ -430,10 +430,20 @@ def _save_model_mapping(model_id, model_config):
         # Extract config class name
         config_class_name = model_config.__class__.__name__
         
-        # Always extract ALL attributes from __dict__ to capture nested configs
-        # This ensures we capture lstm_config, ae_config, cnn_ae_config, etc.
-        # that are created by the config class __init__ methods
-        parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
+        # Extract parameters from input config using _config_to_dict() to match saved format
+        # This ensures nested configs are converted to the same __config_class__/__config_params__ format
+        # Use the same logic as find_model_by_config() to ensure consistency
+        if hasattr(model_config, 'parameters'):
+            parameters = model_config.parameters
+            if not isinstance(parameters, dict):
+                # Build dict from __dict__ and convert nested configs
+                parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
+            else:
+                # Convert nested configs in parameters dict
+                parameters = _config_to_dict(parameters)
+        else:
+            # Build dict from __dict__ and convert nested configs
+            parameters = {k: _config_to_dict(v) for k, v in model_config.__dict__.items() if not k.startswith('_')}
         
         mapping[model_id] = {
             'config_class': config_class_name,

@@ -16,7 +16,7 @@ def test_imports():
     try:
         print("  [1/6] Testing models package...")
         from models import get_available_models, create_model
-        from models.configs import LSTMConfig, CNNLSTMConfig, AELSTMConfig
+        from models.configs import LSTMConfig, CAELSTMConfig, AELSTMConfig
         print("      ✓ Models package imported successfully")
         
         print("  [2/6] Testing trainer...")
@@ -82,7 +82,7 @@ def test_config_creation():
     print("=" * 60)
     
     try:
-        from models.configs import LSTMConfig, CNNLSTMConfig, AELSTMConfig
+        from models.configs import LSTMConfig, CAELSTMConfig, AELSTMConfig
         
         print("  [1/3] Creating LSTMConfig...")
         lstm_config = LSTMConfig(parameters={
@@ -93,15 +93,15 @@ def test_config_creation():
         })
         print(f"      ✓ LSTMConfig created: hidden_size={lstm_config.hidden_size}")
         
-        print("  [2/3] Creating CNNLSTMConfig...")
-        cnn_lstm_config = CNNLSTMConfig(parameters={
+        print("  [2/3] Creating CAELSTMConfig...")
+        cae_lstm_config = CAELSTMConfig(parameters={
             'input_shape': (31, 13),  # 3 base + 10 NLP features (aggregated method)
             'kernel_size': 3,
             'hidden_size': 64,
             'num_layers': 2,
             'dropout': 0.2
         })
-        print(f"      ✓ CNNLSTMConfig created: kernel_size={cnn_lstm_config.kernel_size}")
+        print(f"      ✓ CAELSTMConfig created: kernel_size={cae_lstm_config.kernel_size}")
         
         print("  [3/3] Creating AELSTMConfig...")
         ae_lstm_config = AELSTMConfig(parameters={

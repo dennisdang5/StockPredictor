@@ -13,7 +13,7 @@ class EvaluationConfig:
     
     Attributes:
         model_path: Path to the saved model file
-        model_type: Type of model (e.g., "LSTM", "CNNLSTM")
+        model_type: Type of model (e.g., "LSTM", "CAELSTM")
         stocks: List of stock symbols to evaluate on
         time_args: Time arguments for data loading (e.g., ["1990-01-01", "2015-12-31"])
         log_dir: Directory for TensorBoard logs

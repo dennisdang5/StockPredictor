@@ -59,7 +59,20 @@ class AutoEncoder(BaseModel):
         # nn.MSELoss()
         # optimizer = torch.optim.Adam()
 
-    def forward(self, x, params=None):
+    def forward(self, x, params=None, return_encoded=False):
+        """
+        Forward pass through autoencoder.
+        
+        Args:
+            x: Input tensor of shape (batch, seq_len, num_features) or (seq_len, num_features)
+            params: Optional parameters (unused)
+            return_encoded: If True, return encoder output (compressed representation) instead of decoder output.
+                          Default: False (returns decoder output for reconstruction)
+        
+        Returns:
+            If return_encoded=False: Decoder output (batch, seq_len, num_features) - same shape as input
+            If return_encoded=True: Encoder output reshaped to (batch, seq_len, 2*num_features)
+        """
         # assume x in shape (batch, 31, 3) or (31, 3)
         if x.dim() == 2:
             # Single sample, add batch dimension
@@ -68,8 +81,22 @@ class AutoEncoder(BaseModel):
         x = torch.flatten(x, start_dim=1)  # Flatten spatial dimensions, keep batch
         # Normalize input
         x = self.input_norm(x)
-        encoded = self.encoder(x)
+        encoded = self.encoder(x)  # Shape: (batch, 2*dof) where dof = seq_len * num_features
+        
+        # Always decode (even if returning encoded) so hooks can capture decoder output for loss
         decoded = self.decoder(encoded)
+        
+        if return_encoded:
+            # Return encoder output reshaped to (batch, seq_len, 2*num_features)
+            # This is the compressed representation that should go to LSTM
+            # Note: Decoder was still executed above so hooks can capture it for reconstruction loss
+            encoded_reshaped = torch.unflatten(encoded, dim=1, sizes=(self.input_shape[0], 2*self.input_shape[1]))
+            # Remove batch dimension if it was added
+            if original_shape[0] == 1 and len(original_shape) == 2:
+                encoded_reshaped = encoded_reshaped.squeeze(0)
+            return encoded_reshaped
+        
+        # Return decoder output (for reconstruction loss or when not using return_encoded)
         # Unflatten back to original spatial shape
         x = torch.unflatten(decoded, dim=1, sizes=(self.input_shape[0], self.input_shape[1]))
         # Remove batch dimension if it was added

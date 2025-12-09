@@ -22,7 +22,7 @@ if parent_dir not in sys.path:
 
 from trainer import Trainer, TrainerConfig
 from trainer_portfolio import PortfolioTrainer
-from models.configs import LSTMConfig, CNNLSTMConfig
+from models.configs import LSTMConfig, CAELSTMConfig
 import util
 import os
 
@@ -145,8 +145,8 @@ def test_random_labels(stocks: List[str] = ["AAPL", "MSFT"],
             'num_layers': 2,
             'dropout': 0.1
         })
-    elif model_type == "CNNLSTM":
-        model_config = CNNLSTMConfig(parameters={
+    elif model_type == "CAELSTM":
+        model_config = CAELSTMConfig(parameters={
             'input_shape': (31, 13),
             'hidden_size': 64,
             'num_layers': 2,
@@ -243,7 +243,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-epochs", type=int, default=10,
                        help="Number of training epochs")
     parser.add_argument("--model-type", type=str, default="LSTM",
-                       choices=["LSTM", "CNNLSTM"],
+                       choices=["LSTM", "CAELSTM"],
                        help="Model type to test")
     parser.add_argument("--period-type", type=str, default="LS",
                        choices=["LS", "full"],

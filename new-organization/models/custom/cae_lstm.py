@@ -1,15 +1,15 @@
 from ..base import BaseModel
-from ..configs import CNNLSTMConfig, LSTMConfig
+from ..configs import CAELSTMConfig, LSTMConfig
 from .lstm import LSTMModel
 import torch
 import torch.nn as nn
 
-class CNNLSTMModel(BaseModel):
+class CAELSTMModel(BaseModel):
     """
-    CNN-LSTM Model for time series prediction using short/long convolution method.
+    CAE-LSTM Model for time series prediction using short/long convolution method.
     
-    Architecture: Processes first 11 and last 20 timesteps separately with CNN,
-    then concatenates and passes through LSTM for final prediction.
+    Architecture: Processes first 20 and last 11 timesteps separately with CAE (Convolutional AutoEncoder),
+    then concatenates encoder outputs and passes through LSTM for final prediction.
     
     Args:
         model_config: Configuration object containing model parameters.
@@ -21,7 +21,7 @@ class CNNLSTMModel(BaseModel):
                               Default: (31, 3)
         - kernel_size (int): Size of CNN convolution kernel (must be odd for padding).
                             Controls receptive field of convolution.
-                            Applied to both short (first 11) and long (last 20) sequences.
+                            Applied to both short (first 20) and long (last 11) sequences.
                             Default: 3
         - hidden_size (int): Hidden dimension of LSTM layers. Default: 25
         - num_layers (int): Number of stacked LSTM layers. Default: 1
@@ -29,16 +29,16 @@ class CNNLSTMModel(BaseModel):
         - dropout (float): Dropout rate (0.0 to 1.0). Default: 0.1
     """
     def __init__(self, model_config) -> None:
-        super(CNNLSTMModel, self).__init__(model_config)
+        super(CAELSTMModel, self).__init__(model_config)
         if model_config is None:
-            raise ValueError("model_config is required for CNNLSTMModel")
+            raise ValueError("model_config is required for CAELSTMModel")
         
-        # Type checking: ensure model_config is CNNLSTMConfig or compatible
-        if not isinstance(model_config, CNNLSTMConfig):
+        # Type checking: ensure model_config is CAELSTMConfig or compatible
+        if not isinstance(model_config, CAELSTMConfig):
             raise TypeError(
-                f"CNNLSTMModel requires CNNLSTMConfig instance, "
+                f"CAELSTMModel requires CAELSTMConfig instance, "
                 f"got {type(model_config).__name__}. "
-                f"Use CNNLSTMConfig(input_shape=..., kernel_size=..., etc.) to create the config."
+                f"Use CAELSTMConfig(input_shape=..., kernel_size=..., etc.) to create the config."
             )
         
         self.model_config = model_config
@@ -50,7 +50,7 @@ class CNNLSTMModel(BaseModel):
         # Input normalization
         self.input_norm = nn.LayerNorm(self.num_features)
         
-        # Short sequence CNN (first 11 timesteps)
+        # Short sequence CAE (first 20 timesteps)
         # Encoder: input features -> 2*input_shape[1] channels
         self.short_enc_conv = nn.Conv1d(self.num_features, 2*self.input_shape[1], self.kernel_size, padding=self.kernel_size//2)
         self.short_enc_norm = nn.LayerNorm(2*self.input_shape[1])
@@ -58,7 +58,7 @@ class CNNLSTMModel(BaseModel):
         self.short_dec_conv = nn.Conv1d(2*self.input_shape[1], self.num_features, self.kernel_size, padding=self.kernel_size//2)
         self.short_dec_norm = nn.LayerNorm(self.num_features)
         
-        # Long sequence CNN (last 20 timesteps)
+        # Long sequence CAE (last 11 timesteps)
         # Encoder: input features -> 2*input_shape[1] channels
         self.long_enc_conv = nn.Conv1d(self.num_features, 2*self.input_shape[1], self.kernel_size, padding=self.kernel_size//2)
         self.long_enc_norm = nn.LayerNorm(2*self.input_shape[1])
@@ -66,15 +66,9 @@ class CNNLSTMModel(BaseModel):
         self.long_dec_conv = nn.Conv1d(2*self.input_shape[1], self.num_features, self.kernel_size, padding=self.kernel_size//2)
         self.long_dec_norm = nn.LayerNorm(self.num_features)
         
-        # Create LSTM config and model
-        lstm_config = LSTMConfig(parameters={
-            'input_shape': self.input_shape,
-            'hidden_size': model_config.to_dict().get('hidden_size', 25),
-            'num_layers': model_config.to_dict().get('num_layers', 1),
-            'batch_first': model_config.to_dict().get('batch_first', True),
-            'dropout': model_config.to_dict().get('dropout', 0.1)
-        })
-        self.LSTM = LSTMModel(model_config=lstm_config)
+        # Use lstm_config from model_config - it's already calculated with correct input_shape
+        # The config automatically calculates lstm_input_shape from encoder output shape
+        self.LSTM = LSTMModel(model_config=model_config.lstm_config)
 
     def forward(self, x, params=None):
         # assume x in shape (batch, 31, num_features) = (batch, time_steps, features)
@@ -82,41 +76,42 @@ class CNNLSTMModel(BaseModel):
         # Normalize input
         x = self.input_norm(x)
         
-        # Process short sequence (first 11 timesteps)
+        # Process short sequence (first 20 timesteps)
         # Conv1d expects [batch, channels, length], so transpose from [batch, time, features] to [batch, features, time]
-        short_enc = self.short_enc_conv(x[:, :11, :].transpose(1, 2))  # [batch, num_features, 11] -> [batch, channels, 11]
+        short_enc = self.short_enc_conv(x[:, :20, :].transpose(1, 2))  # [batch, num_features, 20] -> [batch, 2*num_features, 20]
         # Transpose to [batch, time, channels] for normalization
-        short_enc = short_enc.transpose(1, 2)  # [batch, channels, 11] -> [batch, 11, channels]
+        short_enc = short_enc.transpose(1, 2)  # [batch, 2*num_features, 20] -> [batch, 20, 2*num_features]
         # Normalize after short encoder
-        short_enc = self.short_enc_norm(short_enc)
-        # Transpose back to [batch, channels, time] for decoder
-        short_enc = short_enc.transpose(1, 2)  # [batch, 11, channels] -> [batch, channels, 11]
+        short_enc = self.short_enc_norm(short_enc)  # [batch, 20, 2*num_features]
         
-        # Process long sequence (last 20 timesteps)
-        long_enc = self.long_enc_conv(x[:, 11:, :].transpose(1, 2))   # [batch, num_features, 20] -> [batch, channels, 20]
+        # Process long sequence (last 11 timesteps)
+        long_enc = self.long_enc_conv(x[:, 20:, :].transpose(1, 2))   # [batch, num_features, 11] -> [batch, 2*num_features, 11]
         # Transpose to [batch, time, channels] for normalization
-        long_enc = long_enc.transpose(1, 2)  # [batch, channels, 20] -> [batch, 20, channels]
+        long_enc = long_enc.transpose(1, 2)  # [batch, 2*num_features, 11] -> [batch, 11, 2*num_features]
         # Normalize after long encoder
-        long_enc = self.long_enc_norm(long_enc)
-        # Transpose back to [batch, channels, time] for decoder
-        long_enc = long_enc.transpose(1, 2)  # [batch, 20, channels] -> [batch, channels, 20]
+        long_enc = self.long_enc_norm(long_enc)  # [batch, 11, 2*num_features]
         
-        # Decode short sequence
-        short_dec = self.short_dec_conv(short_enc)  # [batch, channels, 11] -> [batch, num_features, 11]
+        # Concatenate encoder outputs for LSTM: [batch, seq_len, 2*num_features]
+        x = torch.cat((short_enc, long_enc), dim=1)  # [batch, 31, 2*num_features]
+        
+        # Store encoder outputs for potential decoder/reconstruction (if needed for loss)
+        # Transpose back to [batch, channels, time] for decoder operations
+        short_enc_for_decoder = short_enc.transpose(1, 2)  # [batch, 2*num_features, 20]
+        long_enc_for_decoder = long_enc.transpose(1, 2)  # [batch, 2*num_features, 11]
+        
+        # Decode short sequence (for reconstruction loss if needed)
+        short_dec = self.short_dec_conv(short_enc_for_decoder)  # [batch, channels, 20] -> [batch, num_features, 20]
         # Transpose to [batch, time, channels] for normalization
-        short_dec = short_dec.transpose(1, 2)  # [batch, num_features, 11] -> [batch, 11, num_features]
+        short_dec = short_dec.transpose(1, 2)  # [batch, num_features, 20] -> [batch, 20, num_features]
         # Normalize after short decoder
         short_dec = self.short_dec_norm(short_dec)
         
-        # Decode long sequence
-        long_dec = self.long_dec_conv(long_enc)    # [batch, channels, 20] -> [batch, num_features, 20]
+        # Decode long sequence (for reconstruction loss if needed)
+        long_dec = self.long_dec_conv(long_enc_for_decoder)    # [batch, channels, 11] -> [batch, num_features, 11]
         # Transpose to [batch, time, channels] for normalization
-        long_dec = long_dec.transpose(1, 2)  # [batch, num_features, 20] -> [batch, 20, num_features] 
+        long_dec = long_dec.transpose(1, 2)  # [batch, num_features, 11] -> [batch, 11, num_features] 
         # Normalize after long decoder
         long_dec = self.long_dec_norm(long_dec)
-        
-        # Concatenate short and long sequences
-        x = torch.cat((short_dec, long_dec), dim=1)  # [batch, 31, num_features]
         
         # Pass through LSTM
         x = self.LSTM(x)
@@ -129,4 +124,4 @@ class CNNLSTMModel(BaseModel):
 
 # Register the model
 from ..registry import ModelRegistry
-ModelRegistry.register("CNNLSTM", lambda config: CNNLSTMModel(config), CNNLSTMConfig)
+ModelRegistry.register("CAELSTM", lambda config: CAELSTMModel(config), CAELSTMConfig)
