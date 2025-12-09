@@ -1854,7 +1854,9 @@ class ModelEvaluator:
     def evaluate_paper_aligned_metrics(self,
                                        k: int = 10,
                                        cost_bps_per_side: float = 5.0,
-                                       batch_size: int = 32) -> Dict[str, Dict[str, float]]:
+                                       batch_size: int = 32,
+                                       raw_predictions: Optional[np.ndarray] = None,
+                                       paper_targets: Optional[np.ndarray] = None) -> Dict[str, Dict[str, float]]:
         """
         Evaluate model using Fischer-Krauss/Ghosh methodology (paper-aligned).
         
@@ -1868,15 +1870,18 @@ class ModelEvaluator:
         Args:
             k: Number of stocks in long/short legs (default: 10)
             cost_bps_per_side: Transaction cost in basis points per half-turn (default: 5.0)
-            batch_size: Batch size for prediction
+            batch_size: Batch size for prediction (only used if raw_predictions is None)
+            raw_predictions: Optional pre-computed raw predictions (if None, will call predict())
+            paper_targets: Optional pre-computed paper targets (if None, will call predict())
             
         Returns:
             Dictionary of paper-aligned metrics
         """
         print("[Evaluator] Running paper-aligned evaluation (Fischer-Krauss/Ghosh methodology)...")
         
-        # Get raw predictions (for ranking)
-        raw_predictions, paper_targets = self.predict(batch_size=batch_size, return_raw=True)
+        # Get raw predictions (for ranking) - reuse if provided, otherwise compute
+        if raw_predictions is None or paper_targets is None:
+            raw_predictions, paper_targets = self.predict(batch_size=batch_size, return_raw=True)
         
         # Use pre-computed returns from util
         returns = self.test_returns
@@ -2799,19 +2804,20 @@ class ModelEvaluator:
         metrics = {}
         
         if use_paper_aligned:
-            # Paper-aligned evaluation (primary)
+            # Get predictions once at the beginning (reused for both paper-aligned metrics and diagnostics)
             print("\n" + "="*60)
             print("PAPER-ALIGNED EVALUATION (Fischer-Krauss/Ghosh)")
             print("="*60)
+            raw_predictions, targets = self.predict(batch_size=batch_size, return_raw=True)
+            
+            # Paper-aligned evaluation (primary) - reuse predictions
             paper_metrics = self.evaluate_paper_aligned_metrics(
-                k=k, cost_bps_per_side=cost_bps_per_side, batch_size=batch_size
+                k=k, cost_bps_per_side=cost_bps_per_side, batch_size=batch_size,
+                raw_predictions=raw_predictions, paper_targets=targets
             )
             metrics['paper_aligned'] = paper_metrics
             
-            # Get predictions for additional diagnostics
-            raw_predictions, targets = self.predict(batch_size=batch_size, return_raw=True)
-            
-            # Additional diagnostics (separated from paper metrics)
+            # Additional diagnostics (separated from paper metrics) - reuse same predictions
             print("\n" + "="*60)
             print("ADDITIONAL DIAGNOSTICS (Not in papers)")
             print("="*60)

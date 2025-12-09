@@ -91,7 +91,7 @@ TIME_ARGS = ["1990-01-01", "2015-12-31"]
 SEQ_LEN = 240
 
 # Period type: "LS" (long-short periods) or "full" (full sequence)
-PERIOD_TYPE = "LS"
+PERIOD_TYPE = "full"
 
 # Prediction type: "classification" or "regression"
 PREDICTION_TYPE = "classification"
@@ -99,6 +99,11 @@ PREDICTION_TYPE = "classification"
 # NLP options
 USE_NLP = False  # Set to True to include NLP features
 NLP_METHOD = "aggregated"  # "aggregated" (NYT headlines) or "individual" (yfinance per stock)
+
+# Stock indices option
+# Set to True if you plan to use TabPFN or Portfolio models (they require stock indices)
+# Set to False for regular LSTM/AELSTM/CAELSTM/TimesNet models
+RETURN_STOCK_INDICES = False  # Set to True to include stock index metadata
 
 # Cache options
 FORCE = True  # Set to True to force re-download even if cache exists
@@ -112,7 +117,8 @@ def download_and_cache(
     nlp_method="aggregated",
     period_type="LS",
     force=False,
-    prediction_type="classification"
+    prediction_type="classification",
+    return_stock_indices=False
 ):
     """
     Download and cache stock data.
@@ -121,11 +127,13 @@ def download_and_cache(
         stocks: List of stock tickers
         time_args: Time range arguments (e.g., ["1990-01-01", "2015-12-31"] or ["3y"])
         seq_len: Sequence length (lookback window size). Default: 240
-        use_nlp: Whether to include NLP features. Default: False
+        use_nlp: Whether to include NLP features. Default: True
         nlp_method: NLP method - "aggregated" (NYT) or "individual" (yfinance). Default: "aggregated"
         period_type: Period type - "LS" or "full". Default: "LS"
         force: Force re-download even if cache exists. Default: False
         prediction_type: Prediction type - "classification" or "regression". Default: "classification"
+        return_stock_indices: Whether to include stock index metadata. Required for TabPFN and Portfolio models.
+                             Default: False
     
     Returns:
         True if successful, False otherwise
@@ -141,6 +149,7 @@ def download_and_cache(
     if use_nlp:
         print(f"NLP method: {nlp_method}")
     print(f"Prediction type: {prediction_type}")
+    print(f"Return stock indices: {return_stock_indices}")
     print(f"Force re-download: {force}")
     print(f"Cache directory: {DATA_DIR}")
     print("=" * 80)
@@ -161,15 +170,20 @@ def download_and_cache(
             prediction_type=prediction_type,
             use_nlp=use_nlp,
             nlp_method=nlp_method,
-            period_type=period_type
+            period_type=period_type,
+            return_stock_indices=return_stock_indices
         )
         
         if data is None:
             print("ERROR: Failed to download data")
             return False
         
-        # Unpack data tuple
-        Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest, Rev_test, Returns_test, Sp500_test = data
+        # Unpack data tuple (12 elements normally, 16 if return_stock_indices=True)
+        if return_stock_indices:
+            Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest, Rev_test, Returns_test, Sp500_test, Strain, Sval, Stest, filtered_stocks = data
+            print(f"Stock indices included: {len(Strain)} train, {len(Sval)} val, {len(Stest)} test")
+        else:
+            Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest, Rev_test, Returns_test, Sp500_test = data
         
         print()
         print("=" * 80)
@@ -214,7 +228,8 @@ def main():
         nlp_method=NLP_METHOD if USE_NLP else "aggregated",
         period_type=PERIOD_TYPE,
         force=FORCE,
-        prediction_type=PREDICTION_TYPE
+        prediction_type=PREDICTION_TYPE,
+        return_stock_indices=RETURN_STOCK_INDICES
     )
     
     return 0 if success else 1
