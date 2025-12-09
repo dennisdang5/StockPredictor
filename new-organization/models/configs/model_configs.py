@@ -20,17 +20,30 @@ class LSTMConfig(BaseModelConfig):
         self.dropout = parameters.get('dropout', 0.1)
         self.output_dim = parameters.get('output_dim', 1)
 
-class CNNLSTMConfig(BaseModelConfig):
+class CAELSTMConfig(BaseModelConfig):
     """
-    Configuration class for CNNLSTMModel.
+    Configuration class for CAELSTMModel.
     
     Args:
         input_shape (tuple): Shape of input data (timesteps, features). Default: (31, 13) for NLP aggregated, (31, 3) without NLP
-        kernel_size (int): Size of CNN convolution kernel. Default: 3
-        hidden_size (int): Hidden dimension for CNN and LSTM. Default: 25
+        kernel_size (int): Size of CAE convolution kernel. Default: 3
+        hidden_size (int): Hidden dimension for CAE and LSTM. Default: 25
         num_layers (int): Number of stacked LSTM layers. Default: 1
         batch_first (bool): Whether batch is first dimension. Default: True
         dropout (float): Dropout rate (0.0 to 1.0). Default: 0.1
+    
+    Shape Flow:
+        - CAE input: (batch, seq_len, num_features) = (batch, 31, num_features)
+        - CAE encoder output: (batch, seq_len, 2*num_features) = (batch, 31, 2*num_features) [compressed representation]
+        - CAE decoder output: (batch, seq_len, num_features) = (batch, 31, num_features) [for reconstruction loss]
+        - LSTM input: (batch, seq_len, 2*num_features) = (batch, 31, 2*num_features) [uses encoder output]
+        - LSTM uses input_shape[1] = 2*num_features as the feature dimension
+    
+    Note:
+        - The LSTM receives the encoder output (compressed representation), not the decoder output.
+        - LSTM input_shape is AUTOMATICALLY CALCULATED as (seq_len, 2*num_features) from the encoder output shape.
+        - If lstm_config is provided, its input_shape will be overridden with the calculated value.
+        - The calculated lstm_input_shape is stored as self.lstm_input_shape for reference.
     """
     def __init__(self, parameters=None):
         super().__init__(parameters)
@@ -41,15 +54,40 @@ class CNNLSTMConfig(BaseModelConfig):
         self.batch_first = parameters.get('batch_first', True)
         self.dropout = parameters.get('dropout', 0.1)
         self.output_dim = parameters.get('output_dim', 1)
+        
+        # CNN encoder output shape is (seq_len, 2*num_features)
+        # LSTM input_shape must match encoder output shape (not decoder output)
+        seq_len, num_features = self.input_shape
+        self.lstm_input_shape = (seq_len, 2 * num_features)  # Encoder compresses to 2x features
+        
+        # Create LSTM config - always calculate input_shape from encoder output
         if parameters.get('lstm_config') is not None:
-            self.lstm_config = LSTMConfig(parameters=parameters.get('lstm_config'))
+            # Use provided lstm_config but override input_shape to match encoder output
+            lstm_config_param = parameters.get('lstm_config')
+            if isinstance(lstm_config_param, dict):
+                lstm_params = lstm_config_param.copy()
+            else:
+                # It's an LSTMConfig object, convert to dict
+                lstm_params = lstm_config_param.to_dict()
+            lstm_params['input_shape'] = self.lstm_input_shape  # Override with calculated shape
+            self.lstm_config = LSTMConfig(parameters=lstm_params)
         else:
+            # Create LSTM config with calculated input_shape
             self.lstm_config = LSTMConfig(parameters={
-                'input_shape': self.input_shape,
+                'input_shape': self.lstm_input_shape,  # Automatically calculated from encoder
                 'hidden_size': self.hidden_size,
                 'num_layers': self.num_layers,
                 'dropout': self.dropout
             })
+        
+        self.loss_config = {
+            'loss_name': 'caelstm_loss',
+            'loss_kwargs': {
+                'prediction_weight': 1.0,
+                'reconstruction_weight': 0.3
+            },
+            'intermediate_layers': ['short_dec_norm', 'long_dec_norm']
+        }
 
 
 class AutoEncoderConfig(BaseModelConfig):
@@ -58,6 +96,28 @@ class AutoEncoderConfig(BaseModelConfig):
     
     Args:
         input_shape (tuple): Shape of input data (timesteps, features). Default: (31, 3)
+        loss_config (dict, optional): Loss function configuration. Example:
+            loss_config = {
+                'loss_name': 'autoencoder_loss',
+                'loss_kwargs': {
+                    'prediction_weight': 1.0,
+                    'reconstruction_weight': 0.5
+                },
+                'intermediate_layers': ['encoder', 'decoder']
+            }
+    
+    Example with AutoEncoderLoss:
+        ae_config = AutoEncoderConfig(parameters={
+            'input_shape': (31, 3),
+            'loss_config': {
+                'loss_name': 'autoencoder_loss',
+                'loss_kwargs': {
+                    'prediction_weight': 1.0,
+                    'reconstruction_weight': 0.5
+                },
+                'intermediate_layers': ['encoder', 'decoder']
+            }
+        })
     """
     def __init__(self, parameters=None):
         super().__init__(parameters)
@@ -76,6 +136,14 @@ class CNNAutoEncoderConfig(BaseModelConfig):
         super().__init__(parameters)
         self.kernel_size = parameters.get('kernel_size', 3)
         self.input_shape = parameters.get('input_shape', (31, 3))
+        self.loss_config = {
+                'loss_name': 'ae_loss',
+                'loss_kwargs': {
+                    'prediction_weight': 1.0,
+                    'cae_reconstruction_weight': 0.3
+                },
+                'intermediate_layers': ['CAE.short_dec_norm', 'CAE.long_dec_norm']
+            }
 
 
 class AELSTMConfig(BaseModelConfig):
@@ -88,6 +156,42 @@ class AELSTMConfig(BaseModelConfig):
         num_layers (int): Number of stacked LSTM layers. Default: 1
         batch_first (bool): Whether batch is first dimension. Default: True
         dropout (float): Dropout rate (0.0 to 1.0). Default: 0.1
+        loss_config (dict, optional): Loss function configuration. Example:
+            loss_config = {
+                'loss_name': 'aelstm_loss',
+                'loss_kwargs': {
+                    'prediction_weight': 1.0,
+                    'ae_reconstruction_weight': 0.3
+                },
+                'intermediate_layers': ['AE.encoder', 'AE.decoder']
+            }
+    
+    Shape Flow:
+        - AutoEncoder input: (batch, seq_len, num_features) = (batch, 31, num_features)
+        - AutoEncoder encoder output: (batch, seq_len, 2*num_features) = (batch, 31, 2*num_features) [compressed representation]
+        - AutoEncoder decoder output: (batch, seq_len, num_features) = (batch, 31, num_features) [for reconstruction loss]
+        - LSTM input: (batch, seq_len, 2*num_features) = (batch, 31, 2*num_features) [uses encoder output]
+        - LSTM uses input_shape[1] = 2*num_features as the feature dimension
+    
+    Note: 
+        - The LSTM receives the encoder output (compressed representation), not the decoder output.
+        - LSTM input_shape is AUTOMATICALLY CALCULATED as (seq_len, 2*num_features) from the encoder output shape.
+        - If lstm_config is provided, its input_shape will be overridden with the calculated value.
+        - The calculated lstm_input_shape is stored as self.lstm_input_shape for reference.
+    
+    Example with AELSTMLoss:
+        aelstm_config = AELSTMConfig(parameters={
+            'input_shape': (31, 13),
+            'hidden_size': 64,
+            'loss_config': {
+                'loss_name': 'aelstm_loss',
+                'loss_kwargs': {
+                    'prediction_weight': 1.0,
+                    'ae_reconstruction_weight': 0.3
+                },
+                'intermediate_layers': ['AE.encoder', 'AE.decoder']
+            }
+        })
     """
     def __init__(self, parameters=None):
         super().__init__(parameters)
@@ -97,59 +201,48 @@ class AELSTMConfig(BaseModelConfig):
         self.batch_first = parameters.get('batch_first', True)
         self.dropout = parameters.get('dropout', 0.1)
         self.output_dim = parameters.get('output_dim', 1)
-        if parameters.get('lstm_config') is not None:
-            self.lstm_config = LSTMConfig(parameters=parameters.get('lstm_config'))
-        else:
-            self.lstm_config = LSTMConfig(parameters={
-                'input_shape': self.input_shape,
-                'hidden_size': self.hidden_size,
-                    'num_layers': self.num_layers,
-                    'dropout': self.dropout
-                })
+        
+        # Create AutoEncoder config first
         if parameters.get('ae_config') is not None:
             self.ae_config = AutoEncoderConfig(parameters=parameters.get('ae_config'))
         else:
             self.ae_config = AutoEncoderConfig(parameters={
                 'input_shape': self.input_shape,
                 })
-
-class CNNAELSTMConfig(BaseModelConfig):
-    """
-    Configuration class for CNNAELSTM.
-    
-    Args:
-        input_shape (tuple): Shape of input data (timesteps, features). Default: (31, 3)
-        kernel_size (int): Size of CNN convolution kernel. Default: 3
-        hidden_size (int): Hidden dimension of LSTM layers. Default: 25
-        num_layers (int): Number of stacked LSTM layers. Default: 1
-        batch_first (bool): Whether batch is first dimension. Default: True
-        dropout (float): Dropout rate (0.0 to 1.0). Default: 0.1
-    """
-    def __init__(self, parameters=None):
-        super().__init__(parameters)
-        self.kernel_size = parameters.get('kernel_size', 3)
-        self.hidden_size = parameters.get('hidden_size', 25)
-        self.num_layers = parameters.get('num_layers', 1)
-        self.batch_first = parameters.get('batch_first', True)
-        self.dropout = parameters.get('dropout', 0.1)
-        self.output_dim = parameters.get('output_dim', 1)
-        self.input_shape = parameters.get('input_shape', (31, 3))
-        if parameters.get('cnn_ae_config', None) is not None:
-            self.cnn_ae_config = CNNAutoEncoderConfig(parameters=parameters.get('cnn_ae_config'))
+        
+        # AutoEncoder encoder output shape is (seq_len, 2*num_features)
+        # LSTM input_shape must match encoder output shape (not decoder output)
+        seq_len, num_features = self.ae_config.input_shape
+        self.lstm_input_shape = (seq_len, 2 * num_features)  # Encoder compresses to 2x features
+        
+        # Create LSTM config - always calculate input_shape from encoder output
+        if parameters.get('lstm_config') is not None:
+            # Use provided lstm_config but override input_shape to match encoder output
+            lstm_config_param = parameters.get('lstm_config')
+            if isinstance(lstm_config_param, dict):
+                lstm_params = lstm_config_param.copy()
+            else:
+                # It's an LSTMConfig object, convert to dict
+                lstm_params = lstm_config_param.to_dict()
+            lstm_params['input_shape'] = self.lstm_input_shape  # Override with calculated shape
+            self.lstm_config = LSTMConfig(parameters=lstm_params)
         else:
-            self.cnn_ae_config = CNNAutoEncoderConfig(parameters={
-                'input_shape': self.input_shape,
-                'kernel_size': self.kernel_size,
-                })
-        if parameters.get('lstm_config', None) is not None:
-            self.lstm_config = LSTMConfig(parameters=parameters.get('lstm_config'))
-        else:
+            # Create LSTM config with calculated input_shape
             self.lstm_config = LSTMConfig(parameters={
-                'input_shape': self.input_shape,
+                'input_shape': self.lstm_input_shape,  # Automatically calculated from encoder
                 'hidden_size': self.hidden_size,
                 'num_layers': self.num_layers,
                 'dropout': self.dropout
                 })
+        
+        self.loss_config = {
+                'loss_name': 'aelstm_loss',
+                'loss_kwargs': {
+                    'prediction_weight': 1.0,
+                    'ae_reconstruction_weight': 0.3
+                },
+                'intermediate_layers': ['AE.encoder', 'AE.decoder']
+            }
 
 class TimesNetConfig(BaseModelConfig):
     """
@@ -207,24 +300,24 @@ class TimesNetConfig(BaseModelConfig):
     """
     def __init__(self, parameters=None):
         super().__init__(parameters)
-        self.input_shape = parameters.get('input_shape', (31, 13))  # Default includes NLP features (3 base + 10 NLP)
+        self.input_shape = parameters.get('input_shape', (31, 3))  # Default includes NLP features (3 base + 10 NLP)
         self.task_name = parameters.get('task_name', 'classification')
         # seq_len will be set from TrainerConfig.seq_len during model initialization
         # But can also be set from input_shape[0] if not provided
         self.seq_len = parameters.get('seq_len', None)  # Can be None, will be set from input_shape if needed
-        self.enc_in = parameters.get('enc_in', 13)  # Default includes NLP features (3 base + 10 NLP)
-        self.num_class = parameters.get('num_class', 2)
+        self.enc_in = parameters.get('enc_in', 3)  # Default includes NLP features (3 base + 10 NLP)
+        self.num_class = parameters.get('num_class', 3)
         self.d_model = parameters.get('d_model', 256)
         self.d_ff = parameters.get('d_ff', 1024)
         self.e_layers = parameters.get('e_layers', 2)
-        self.top_k = parameters.get('top_k', 5)
-        self.num_kernels = parameters.get('num_kernels', 6)
+        self.top_k = parameters.get('top_k', 3)
+        self.num_kernels = parameters.get('num_kernels', 3)
         self.embed = parameters.get('embed', 'timeF')
         self.freq = parameters.get('freq', 'd')
         self.dropout = parameters.get('dropout', 0.1)
         self.pred_len = parameters.get('pred_len', 0)
         self.label_len = parameters.get('label_len', 0)
-        self.c_out = parameters.get('c_out', 3)
+        self.c_out = parameters.get('c_out', None)
         self.freeze_encoder = parameters.get('freeze_encoder', False)
 
 

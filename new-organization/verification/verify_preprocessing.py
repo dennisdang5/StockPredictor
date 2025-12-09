@@ -364,7 +364,7 @@ if __name__ == "__main__":
     parser.add_argument("--time-args", nargs="+", default=["2000-01-01", "2010-12-31"],
                        help="Time range arguments")
     parser.add_argument("--model-type", type=str, default="LSTM",
-                       choices=["LSTM", "CNNLSTM"],
+                       choices=["LSTM", "CAELSTM"],
                        help="Model type to use")
     parser.add_argument("--period-type", type=str, default="LS",
                        choices=["LS", "full"],

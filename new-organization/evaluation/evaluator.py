@@ -44,9 +44,8 @@ if trained_model_dir not in sys.path:
 from models import create_model, get_available_models
 from models.configs import (
     LSTMConfig,
-    CNNLSTMConfig,
+    CAELSTMConfig,
     AELSTMConfig,
-    CNNAELSTMConfig,
     TimesNetConfig,
     PortfolioConfig,
     TabPFNConfig,
@@ -110,7 +109,7 @@ class ModelEvaluator:
             device: Device to run evaluation on (auto-detect if None)
             use_nlp: Whether to use NLP features (default: False)
             nlp_method: NLP method to use - "aggregated" or "individual" (default: "aggregated")
-            model_type: Model type to use - "lstm", "cnn_lstm", "cnn_autoencoder", "aelstm", "cnnaelstm" (default: "lstm")
+            model_type: Model type to use - "lstm", "cae_lstm", "cnn_autoencoder", "aelstm" (default: "lstm")
             input_shape: Input shape tuple (lookback_window, num_features). If None, will be determined from data.
         """
         
@@ -325,9 +324,8 @@ class ModelEvaluator:
         # Map config class names to actual classes
         config_class_map = {
             'LSTMConfig': LSTMConfig,
-            'CNNLSTMConfig': CNNLSTMConfig,
+            'CAELSTMConfig': CAELSTMConfig,
             'AELSTMConfig': AELSTMConfig,
-            'CNNAELSTMConfig': CNNAELSTMConfig,
             'TimesNetConfig': TimesNetConfig,
             'PortfolioConfig': PortfolioConfig,
             'TabPFNConfig': TabPFNConfig,
@@ -740,9 +738,8 @@ class ModelEvaluator:
             config_class_name = self.model_config.__class__.__name__
             registry_mapping = {
                 'LSTMConfig': 'LSTM',
-                'CNNLSTMConfig': 'CNNLSTM',
+                'CAELSTMConfig': 'CAELSTM',
                 'AELSTMConfig': 'AELSTM',
-                'CNNAELSTMConfig': 'CNNAELSTM',
                 'TimesNetConfig': 'TIMESNET',
                 'PortfolioConfig': 'Portfolio',
                 'TabPFNConfig': 'TabPFN',
@@ -761,9 +758,8 @@ class ModelEvaluator:
             # Map model_type to registry name and config class
             model_type_mapping = {
                 "lstm": ("LSTM", LSTMConfig),
-                "cnnlstm": ("CNNLSTM", CNNLSTMConfig),
+                "caelstm": ("CAELSTM", CAELSTMConfig),
                 "aelstm": ("AELSTM", AELSTMConfig),
-                "cnnaelstm": ("CNNAELSTM", CNNAELSTMConfig),
                 "timesnet": ("TIMESNET", TimesNetConfig),
             }
             
@@ -786,7 +782,7 @@ class ModelEvaluator:
                     )
             else:
                 registry_name, config_class = model_type_mapping[self.model_type]
-                
+
                 # Create config with input_shape and defaults
                 config = config_class(parameters={'input_shape': self.input_shape})
                 
@@ -939,10 +935,17 @@ class ModelEvaluator:
         # This ensures position arrays are always the same size
         max_stocks = df.groupby("date").size().max()
 
-        portfolio_returns = []
+        pportfolio_returns = []
         traded_mask = np.zeros(len(df), dtype=bool)
         daily_info = []
         unique_dates = []
+        # Percent returns (with p prefix)
+        plong_leg_returns = []
+        pshort_leg_returns = []
+        pgross_returns = []
+        pnet_returns = []
+        pdaily_costs = []
+        # Real returns (no prefix)
         long_leg_returns = []
         short_leg_returns = []
         gross_returns = []
@@ -954,6 +957,8 @@ class ModelEvaluator:
         # Initialize as None (will be set on first day)
         # Position arrays are always size max_stocks to handle varying stock counts per date
         prev_positions = None
+        #starting initial investment value of 1
+        total_value = 1
 
         for dt, group in df.groupby("date", sort=True):
             unique_dates.append(dt)
@@ -964,7 +969,12 @@ class ModelEvaluator:
             group = group.reset_index(drop=True)
 
             if n_rows < 2 * k:
-                portfolio_returns.append(0.0)
+                pportfolio_returns.append(0.0)
+                plong_leg_returns.append(0.0)
+                pshort_leg_returns.append(0.0)
+                pgross_returns.append(0.0)
+                pnet_returns.append(0.0)
+                pdaily_costs.append(0.0)
                 long_leg_returns.append(0.0)
                 short_leg_returns.append(0.0)
                 gross_returns.append(0.0)
@@ -977,12 +987,18 @@ class ModelEvaluator:
                     "top_k": [],
                     "flop_k": [],
                     "long_return": 0.0,
+                    "plong_return": 0.0,
                     "short_return": 0.0,
-                    "portfolio_return": 0.0,
-                    "portfolio_return_after_cost": 0.0,
-                    "portfolio_return_before_cost": 0.0,
+                    "pshort_return": 0.0,
+                    "gross_return": 0.0,
+                    "pgross_return": 0.0,
+                    "net_return": 0.0,
+                    "pnet_return": 0.0,
                     "cost": 0.0,
-                    "traded": False
+                    "pcost": 0.0,
+                    "traded": False,
+                    "total_trades": 0,
+                    "total_value": total_value
                 })
                 # Reset positions when we can't trade
                 prev_positions = None
@@ -990,11 +1006,6 @@ class ModelEvaluator:
 
             top = group.nlargest(k, "pred")
             flop = group.nsmallest(k, "pred")
-
-            print("top pred:")
-            print(top["pred"])
-            print("flop pred:")
-            print(flop["pred"])
             
             # Get current day's positions using indices within this date group
             # These indices (0 to n_rows-1) represent the same stocks across all dates
@@ -1016,36 +1027,44 @@ class ModelEvaluator:
             current_positions[list(current_long_indices)] = 1   # Long positions
             current_positions[list(current_short_indices)] = -1  # Short positions
             
+
             # Calculate returns first (needed for cost calculation)
             long_return = float(top["ret"].sum()) if not top.empty else 0.0
             short_return = -1.0 * float(flop["ret"].sum()) if not flop.empty else 0.0
             gross_return = long_return + short_return
 
-            print(flop["ret"])
-
-            plong_return = long_return / 100
-            pshort_return = short_return / 100
-            pgross_return = gross_return / 100
-            
             # Calculate transaction costs based on gross return
             # First day: assume positions already held, so no cost
             # Subsequent days: cost is 0.2% of gross return
-            if prev_positions is None:
-                pdaily_cost = 0.0
+            if prev_positions is not None:
+                daily_cost = 0.002*total_value
+                pdaily_cost = daily_cost/total_value
+                net_return = gross_return - daily_cost
             else:
-                pdaily_cost = 0.002 * abs(pgross_return)
+                net_return = gross_return
+                daily_cost = 0.0
+                pdaily_cost = 0.0
             
+            plong_return = long_return / total_value
+            pshort_return = short_return / total_value
+            pgross_return = gross_return / total_value
+            pnet_return = net_return / total_value
+
             num_trades = 2*k
-            pnet_return = pgross_return - pdaily_cost
 
-            
-
-            portfolio_returns.append(pnet_return)
-            long_leg_returns.append(plong_return)
-            short_leg_returns.append(pshort_return)
-            gross_returns.append(pgross_return)
-            net_returns.append(pnet_return)
-            daily_costs.append(pdaily_cost)
+            # Append percent returns (with p prefix)
+            pportfolio_returns.append(pnet_return)
+            plong_leg_returns.append(plong_return)
+            pshort_leg_returns.append(pshort_return)
+            pgross_returns.append(pgross_return)
+            pnet_returns.append(pnet_return)
+            pdaily_costs.append(pdaily_cost)
+            # Append real returns (no prefix)
+            long_leg_returns.append(long_return)
+            short_leg_returns.append(short_return)
+            gross_returns.append(gross_return)
+            net_returns.append(net_return)
+            daily_costs.append(daily_cost)
             traded_days.append(True)
             
             # Mark traded stocks in the global traded_mask using original row_id
@@ -1060,29 +1079,50 @@ class ModelEvaluator:
                 "top_k": list(current_long_indices),
                 "flop_k": list(current_short_indices),
                 "long_return": long_return,
+                "plong_return": plong_return,
                 "short_return": short_return,
-                "portfolio_return": pnet_return,
-                "portfolio_return_after_cost": pnet_return,
-                "portfolio_return_before_cost": pgross_return,
-                "cost": pdaily_cost,
+                "pshort_return": pshort_return,
+                "gross_return": gross_return,
+                "pgross_return": pgross_return,
+                "net_return": net_return,
+                "pnet_return": pnet_return,
+                "cost": daily_cost,
+                "pcost": pdaily_cost,
                 "traded": True,
-                "total_trades": num_trades
+                "total_trades": num_trades,
+                "total_value": total_value
             })
+
+            total_value = total_value + net_return
             
             # Update previous positions for next iteration
             prev_positions = current_positions.copy()
 
-        portfolio_returns = np.asarray(portfolio_returns, dtype=float)
+        # Convert to numpy arrays
+        pportfolio_returns = np.asarray(pportfolio_returns, dtype=float)
+        plong_leg_returns = np.asarray(plong_leg_returns, dtype=float)
+        pshort_leg_returns = np.asarray(pshort_leg_returns, dtype=float)
+        pgross_returns = np.asarray(pgross_returns, dtype=float)
+        pnet_returns = np.asarray(pnet_returns, dtype=float)
+        pdaily_costs = np.asarray(pdaily_costs, dtype=float)
         long_leg_returns = np.asarray(long_leg_returns, dtype=float)
         short_leg_returns = np.asarray(short_leg_returns, dtype=float)
         gross_returns = np.asarray(gross_returns, dtype=float)
         net_returns = np.asarray(net_returns, dtype=float)
         daily_costs = np.asarray(daily_costs, dtype=float)
         traded_days = np.asarray(traded_days, dtype=bool)
+        
         portfolio_info = {
             "daily_info": daily_info,
             "unique_dates": unique_dates,
             "traded_mask": traded_mask,
+            # Percent returns (with p prefix)
+            "plong_leg_returns": plong_leg_returns,
+            "pshort_leg_returns": pshort_leg_returns,
+            "pgross_returns": pgross_returns,
+            "pnet_returns": pnet_returns,
+            "pdaily_costs": pdaily_costs,
+            # Real returns (no prefix)
             "long_leg_returns": long_leg_returns,
             "short_leg_returns": short_leg_returns,
             "gross_returns": gross_returns,
@@ -1091,7 +1131,7 @@ class ModelEvaluator:
             "traded_days_mask": traded_days
         }
 
-        return portfolio_returns, traded_mask, portfolio_info
+        return gross_returns, net_returns, pportfolio_returns, traded_mask, portfolio_info
     
     def _build_cross_sectional_frame(self,
                                      raw_predictions: np.ndarray,
@@ -1473,10 +1513,11 @@ class ModelEvaluator:
         
         return metrics
         
-    def calculate_portfolio_risk_metrics(self, portfolio_returns: np.ndarray) -> Dict[str, float]:
+    def calculate_portfolio_risk_metrics(self, pportfolio_returns: np.ndarray, real_portfolio_returns: Optional[np.ndarray] = None) -> Dict[str, float]:
         """
         Calculate comprehensive risk metrics for portfolio returns (paper-aligned).
         
+        Calculates metrics for both percent returns (with "p" prefix) and real returns (no prefix).
         Following Fischer-Krauss/Ghosh, includes:
         - Sharpe ratio
         - Sortino ratio (downside deviation)
@@ -1485,148 +1526,160 @@ class ModelEvaluator:
         - Skewness and kurtosis
         
         Args:
-            portfolio_returns: Daily portfolio returns (can include zeros)
+            pportfolio_returns: Daily portfolio returns as percentages (can include zeros)
+            real_portfolio_returns: Daily portfolio returns as real values (can include zeros)
             
         Returns:
-            Dictionary of risk metrics
+            Dictionary of risk metrics with "p" prefix for percent metrics
         """
         metrics = {}
-        returns = np.asarray(portfolio_returns, dtype=float)
-        returns = returns[np.isfinite(returns)]
-
-        if returns.size == 0:
-            return {
-                'volatility_annualized': 0.0,
-                'sharpe_ratio': 0.0,
-                'sortino_ratio': 0.0,
-                'var_1pct': 0.0,
-                'cvar_1pct': 0.0,
-                'var_5pct': 0.0,
-                'cvar_5pct': 0.0,
-                'max_drawdown': 0.0,
-                'skewness': 0.0,
-                'kurtosis': 0.0,
-                'mean_return': 0.0,
-                'annualized_return': 0.0,
-                'standard_deviation': 0.0,
-                'share_positive': 0.0,
-                'newey_west_std_error': 0.0,
-                'newey_west_t_stat': 0.0,
-                'standard_error': 0.0,
-                't_stat': 0.0,
-                'min_return': 0.0,
-                'max_return': 0.0,
-                'quantile_25': 0.0,
-                'median': 0.0,
-                'quantile_75': 0.0,
-                'downside_deviation_annualized': 0.0,
-                'downside_deviation_daily': 0.0
-            }
-        # Include all returns (papers don't filter zeros)
         
-        # Mean and volatility
-        mean_return = np.mean(returns)
-        std_return = np.std(returns, ddof=1) if returns.size > 1 else 0.0
+        # Process percent returns
+        preturns = np.asarray(pportfolio_returns, dtype=float)
+        preturns = preturns[np.isfinite(preturns)]
         
-        metrics['mean_return'] = float(mean_return)
-        metrics['annualized_return'] = float(mean_return * 252)
-        metrics['volatility_annualized'] = float(std_return * np.sqrt(252)) if std_return > 0 else 0.0
-        metrics['standard_deviation'] = float(std_return)
-        metrics['share_positive'] = float(np.mean(returns > 0)) if returns.size > 0 else 0.0
-        metrics['min_return'] = float(np.min(returns))
-        metrics['max_return'] = float(np.max(returns))
-        metrics['quantile_25'] = float(np.percentile(returns, 25))
-        metrics['median'] = float(np.percentile(returns, 50))
-        metrics['quantile_75'] = float(np.percentile(returns, 75))
-        
-        # Sharpe ratio (assuming zero risk-free rate)
-        if std_return > 0:
-            metrics['sharpe_ratio'] = float(mean_return / std_return * np.sqrt(252))
+        # Process real returns (optional)
+        if real_portfolio_returns is not None:
+            real_returns = np.asarray(real_portfolio_returns, dtype=float)
+            real_returns = real_returns[np.isfinite(real_returns)]
         else:
-            metrics['sharpe_ratio'] = 0.0
+            real_returns = np.array([])
         
-        # Sortino ratio (downside deviation)
-        downside_returns = returns[returns < 0]
-        if downside_returns.size > 1:
-            downside_std = np.std(downside_returns, ddof=1)
-            if downside_std > 0:
-                metrics['sortino_ratio'] = float(mean_return / downside_std * np.sqrt(252))
-                metrics['downside_deviation_daily'] = float(downside_std)
-                metrics['downside_deviation_annualized'] = float(downside_std * np.sqrt(252))
+        # Helper function to calculate metrics for a returns array
+        def _calculate_metrics_for_returns(returns: np.ndarray, is_percent: bool) -> Dict[str, float]:
+            """Calculate risk metrics for a returns array."""
+            result = {}
+            prefix = 'p' if is_percent else ''
+            
+            if returns.size == 0:
+                return {
+                    f'{prefix}volatility_annualized': 0.0,
+                    f'{prefix}sharpe_ratio': 0.0,
+                    f'{prefix}sortino_ratio': 0.0,
+                    f'{prefix}var_1pct': 0.0,
+                    f'{prefix}cvar_1pct': 0.0,
+                    f'{prefix}var_5pct': 0.0,
+                    f'{prefix}cvar_5pct': 0.0,
+                    f'{prefix}max_drawdown': 0.0,
+                    f'{prefix}skewness': 0.0,
+                    f'{prefix}kurtosis': 0.0,
+                    f'{prefix}mean_return': 0.0,
+                    f'{prefix}annualized_return': 0.0,
+                    f'{prefix}standard_deviation': 0.0,
+                    f'{prefix}share_positive': 0.0,
+                    f'{prefix}standard_error': 0.0,
+                    f'{prefix}t_stat': 0.0,
+                    f'{prefix}min_return': 0.0,
+                    f'{prefix}max_return': 0.0,
+                    f'{prefix}quantile_25': 0.0,
+                    f'{prefix}median': 0.0,
+                    f'{prefix}quantile_75': 0.0,
+                    f'{prefix}downside_deviation_annualized': 0.0
+                }
+            
+            # Mean and volatility
+            mean_return = np.mean(returns)
+            std_return = np.std(returns, ddof=1) if returns.size > 1 else 0.0
+            
+            result[f'{prefix}mean_return'] = float(mean_return)
+            result[f'{prefix}annualized_return'] = float(mean_return * 252)
+            result[f'{prefix}volatility_annualized'] = float(std_return * np.sqrt(252)) if std_return > 0 else 0.0
+            result[f'{prefix}standard_deviation'] = float(std_return)
+            result[f'{prefix}share_positive'] = float(np.mean(returns > 0)) if returns.size > 0 else 0.0
+            result[f'{prefix}min_return'] = float(np.min(returns))
+            result[f'{prefix}max_return'] = float(np.max(returns))
+            result[f'{prefix}quantile_25'] = float(np.percentile(returns, 25))
+            result[f'{prefix}median'] = float(np.percentile(returns, 50))
+            result[f'{prefix}quantile_75'] = float(np.percentile(returns, 75))
+            
+            # Sharpe ratio (assuming zero risk-free rate)
+            if std_return > 0:
+                result[f'{prefix}sharpe_ratio'] = float(mean_return / std_return * np.sqrt(252))
             else:
-                metrics['sortino_ratio'] = 0.0
-                metrics['downside_deviation_daily'] = 0.0
-                metrics['downside_deviation_annualized'] = 0.0
-        else:
-            metrics['sortino_ratio'] = 0.0
-            metrics['downside_deviation_daily'] = 0.0
-            metrics['downside_deviation_annualized'] = 0.0
-        
-        # VaR and CVaR (Value at Risk and Conditional VaR)
-        if returns.size > 0:
-            # VaR at 1%
-            var_1pct = np.percentile(returns, 1.0)
-            metrics['var_1pct'] = float(var_1pct)
+                result[f'{prefix}sharpe_ratio'] = 0.0
             
-            # CVaR at 1% (expected loss given loss exceeds VaR)
-            cvar_1pct = np.mean(returns[returns <= var_1pct]) if np.any(returns <= var_1pct) else var_1pct
-            metrics['cvar_1pct'] = float(cvar_1pct)
+            # Sortino ratio (downside deviation)
+            downside_returns = returns[returns < 0]
+            if downside_returns.size > 1:
+                downside_std = np.std(downside_returns, ddof=1)
+                if downside_std > 0:
+                    result[f'{prefix}sortino_ratio'] = float(mean_return / downside_std * np.sqrt(252))
+                    result[f'{prefix}downside_deviation_annualized'] = float(downside_std * np.sqrt(252))
+                else:
+                    result[f'{prefix}sortino_ratio'] = 0.0
+                    result[f'{prefix}downside_deviation_annualized'] = 0.0
+            else:
+                result[f'{prefix}sortino_ratio'] = 0.0
+                result[f'{prefix}downside_deviation_annualized'] = 0.0
             
-            # VaR at 5%
-            var_5pct = np.percentile(returns, 5.0)
-            metrics['var_5pct'] = float(var_5pct)
+            # VaR and CVaR (Value at Risk and Conditional VaR)
+            if returns.size > 0:
+                # VaR at 1%
+                var_1pct = np.percentile(returns, 1.0)
+                result[f'{prefix}var_1pct'] = float(var_1pct)
+                
+                # CVaR at 1% (expected loss given loss exceeds VaR)
+                cvar_1pct = np.mean(returns[returns <= var_1pct]) if np.any(returns <= var_1pct) else var_1pct
+                result[f'{prefix}cvar_1pct'] = float(cvar_1pct)
+                
+                # VaR at 5%
+                var_5pct = np.percentile(returns, 5.0)
+                result[f'{prefix}var_5pct'] = float(var_5pct)
+                
+                # CVaR at 5%
+                cvar_5pct = np.mean(returns[returns <= var_5pct]) if np.any(returns <= var_5pct) else var_5pct
+                result[f'{prefix}cvar_5pct'] = float(cvar_5pct)
+            else:
+                result[f'{prefix}var_1pct'] = 0.0
+                result[f'{prefix}cvar_1pct'] = 0.0
+                result[f'{prefix}var_5pct'] = 0.0
+                result[f'{prefix}cvar_5pct'] = 0.0
             
-            # CVaR at 5%
-            cvar_5pct = np.mean(returns[returns <= var_5pct]) if np.any(returns <= var_5pct) else var_5pct
-            metrics['cvar_5pct'] = float(cvar_5pct)
-        else:
-            metrics['var_1pct'] = 0.0
-            metrics['cvar_1pct'] = 0.0
-            metrics['var_5pct'] = 0.0
-            metrics['cvar_5pct'] = 0.0
-        
-        # Maximum drawdown (positive convention on wealth curve)
-        # Convert returns to wealth: start with 1, multiply by (1 + return)
-        wealth = self._wealth_curve(returns)
-        if wealth.size > 0 and np.all(wealth > 0):
-            # Running maximum (peak)
-            peak = np.maximum.accumulate(wealth)
-            # Drawdown: (peak - wealth) / peak (positive value)
-            drawdown = (peak - wealth) / peak
-            max_drawdown = np.max(drawdown)  # Maximum drawdown as positive value
-            metrics['max_drawdown'] = float(max_drawdown * 100)  # Convert to percentage
-        else:
-            metrics['max_drawdown'] = 0.0
-        
-        # Skewness and kurtosis
-        if returns.size > 2:
-            metrics['skewness'] = float(scipy_stats.skew(returns))
-            metrics['kurtosis'] = float(scipy_stats.kurtosis(returns))  # Excess kurtosis
-        else:
-            metrics['skewness'] = 0.0
-            metrics['kurtosis'] = 0.0
+            # Maximum drawdown (positive convention on wealth curve)
+            # Convert returns to wealth: start with 1, multiply by (1 + return)
+            wealth = self._wealth_curve(returns)
+            if wealth.size > 0 and np.all(wealth > 0):
+                # Running maximum (peak)
+                peak = np.maximum.accumulate(wealth)
+                # Drawdown: (peak - wealth) / peak (positive value)
+                drawdown = (peak - wealth) / peak
+                max_drawdown = np.max(drawdown)  # Maximum drawdown as positive value
+                if is_percent:
+                    # For percent returns, convert to percentage (0-100)
+                    result[f'{prefix}max_drawdown'] = float(max_drawdown * 100)
+                else:
+                    # For real returns, keep as dollar amount
+                    result[f'{prefix}max_drawdown'] = float(max_drawdown)
+            else:
+                result[f'{prefix}max_drawdown'] = 0.0
+            
+            # Skewness and kurtosis
+            if returns.size > 2:
+                result[f'{prefix}skewness'] = float(scipy_stats.skew(returns))
+                result[f'{prefix}kurtosis'] = float(scipy_stats.kurtosis(returns))  # Excess kurtosis
+            else:
+                result[f'{prefix}skewness'] = 0.0
+                result[f'{prefix}kurtosis'] = 0.0
 
-        # Newey-West adjusted standard error and t-statistic of mean returns
-        if returns.size > 1:
-            centered_returns = returns - mean_return
-            nw_variance = self._newey_west_variance(centered_returns)
-            if nw_variance < 0:
-                nw_variance = 0.0
-            nw_std_error = np.sqrt(nw_variance / returns.size) if returns.size > 0 else 0.0
-            metrics['newey_west_std_error'] = float(nw_std_error)
-            metrics['newey_west_t_stat'] = float(mean_return / nw_std_error) if nw_std_error > 0 else 0.0
-        else:
-            metrics['newey_west_std_error'] = 0.0
-            metrics['newey_west_t_stat'] = 0.0
-
-        # Naive (iid) standard error and t-stat for reference
-        if returns.size > 1 and std_return > 0:
-            standard_error = std_return / np.sqrt(returns.size)
-            metrics['standard_error'] = float(standard_error)
-            metrics['t_stat'] = float(mean_return / standard_error) if standard_error > 0 else 0.0
-        else:
-            metrics['standard_error'] = 0.0
-            metrics['t_stat'] = 0.0
+            # Standard error and t-statistic
+            if returns.size > 1 and std_return > 0:
+                standard_error = std_return / np.sqrt(returns.size)
+                result[f'{prefix}standard_error'] = float(standard_error)
+                result[f'{prefix}t_stat'] = float(mean_return / standard_error) if standard_error > 0 else 0.0
+            else:
+                result[f'{prefix}standard_error'] = 0.0
+                result[f'{prefix}t_stat'] = 0.0
+            
+            return result
+        
+        # Calculate metrics for percent returns (with p prefix)
+        pmetrics = _calculate_metrics_for_returns(preturns, is_percent=True)
+        metrics.update(pmetrics)
+        
+        # Calculate metrics for real returns (no prefix) - only if provided
+        if real_returns.size > 0:
+            real_metrics = _calculate_metrics_for_returns(real_returns, is_percent=False)
+            metrics.update(real_metrics)
         
         return metrics
         
@@ -1845,7 +1898,7 @@ class ModelEvaluator:
         
         # Construct portfolios
         print(f"[Evaluator] Constructing {k}-long/{k}-short portfolios...")
-        portfolio_returns, traded_mask, portfolio_info = self.construct_portfolio_returns(
+        gross_returns, net_returns, pportfolio_returns, traded_mask, portfolio_info = self.construct_portfolio_returns(
             raw_predictions, returns, self.test_dates,
             k=k, cost_bps_per_side=cost_bps_per_side
         )
@@ -1867,88 +1920,138 @@ class ModelEvaluator:
         
         # Portfolio risk metrics
         print("[Evaluator] Calculating portfolio risk metrics...")
-        risk_metrics = self.calculate_portfolio_risk_metrics(portfolio_returns)
+        # Get both percent and real returns from portfolio_info
+        pgross_returns = portfolio_info.get('pgross_returns')
         gross_returns = portfolio_info.get('gross_returns')
+        pnet_returns = portfolio_info.get('pnet_returns')
+        net_returns = portfolio_info.get('net_returns')
         daily_costs = portfolio_info.get('daily_costs')
-        if daily_costs is None:
-            # This should not happen - construct_portfolio_returns always returns daily_costs
-            raise ValueError("daily_costs not found in portfolio_info. This indicates an issue with portfolio construction.")
-        if gross_returns is None:
-            gross_returns = portfolio_returns + daily_costs
+        pdaily_costs = portfolio_info.get('pdaily_costs')
         traded_days_mask = portfolio_info.get('traded_days_mask')
         if traded_days_mask is None:
-            traded_days_mask = np.ones_like(portfolio_returns, dtype=bool)
+            traded_days_mask = np.ones_like(pportfolio_returns, dtype=bool)
 
-        gross_risk_metrics = self.calculate_portfolio_risk_metrics(gross_returns)
+        # Calculate risk metrics for net returns (after cost) - both percent and real
+        risk_metrics = self.calculate_portfolio_risk_metrics(pportfolio_returns, net_returns)
+        
+        # Calculate risk metrics for gross returns (before cost) - both percent and real
+        gross_risk_metrics = self.calculate_portfolio_risk_metrics(pgross_returns, gross_returns)
+        
+        # Get leg returns (percent versions)
+        plong_leg_returns = portfolio_info.get('plong_leg_returns')
+        pshort_leg_returns = portfolio_info.get('pshort_leg_returns')
         long_leg_returns = portfolio_info.get('long_leg_returns')
         short_leg_returns = portfolio_info.get('short_leg_returns')
+        if plong_leg_returns is None:
+            plong_leg_returns = np.zeros_like(pportfolio_returns)
+        if pshort_leg_returns is None:
+            pshort_leg_returns = np.zeros_like(pportfolio_returns)
         if long_leg_returns is None:
-            long_leg_returns = np.zeros_like(portfolio_returns)
+            long_leg_returns = np.zeros_like(net_returns) if net_returns is not None else np.zeros_like(pportfolio_returns)
         if short_leg_returns is None:
-            short_leg_returns = np.zeros_like(portfolio_returns)
+            short_leg_returns = np.zeros_like(net_returns) if net_returns is not None else np.zeros_like(pportfolio_returns)
 
-        traded_long_returns = long_leg_returns[traded_days_mask]
-        traded_short_returns = short_leg_returns[traded_days_mask]
-        traded_gross_returns = gross_returns[traded_days_mask]
-        traded_costs = daily_costs[traded_days_mask]
+        # Use percent returns for leg distributions (matching paper methodology)
+        traded_plong_returns = plong_leg_returns[traded_days_mask]
+        traded_pshort_returns = pshort_leg_returns[traded_days_mask]
+        traded_pgross_returns = pgross_returns[traded_days_mask]
+        traded_pcosts = pdaily_costs[traded_days_mask]
+        
+        # Also get real returns for real value metrics
+        traded_long_returns = long_leg_returns[traded_days_mask] if long_leg_returns is not None else np.array([])
+        traded_short_returns = short_leg_returns[traded_days_mask] if short_leg_returns is not None else np.array([])
+        traded_gross_returns = gross_returns[traded_days_mask] if gross_returns is not None else np.array([])
+        traded_costs = daily_costs[traded_days_mask] if daily_costs is not None else np.array([])
 
+        # Percent returns (for leg distribution)
+        mean_plong_return = float(np.mean(traded_plong_returns)) if traded_plong_returns.size > 0 else 0.0
+        mean_pshort_return = float(np.mean(traded_pshort_returns)) if traded_pshort_returns.size > 0 else 0.0
+        mean_pgross_return = float(np.mean(traded_pgross_returns)) if traded_pgross_returns.size > 0 else float(np.mean(pgross_returns)) if np.size(pgross_returns) > 0 else 0.0
+        annualized_pgross_return = mean_pgross_return * 252
+        pgross_share_positive = float(np.mean(traded_pgross_returns > 0)) if traded_pgross_returns.size > 0 else float(np.mean(pgross_returns > 0)) if np.size(pgross_returns) > 0 else 0.0
+
+        # Real returns
         mean_long_return = float(np.mean(traded_long_returns)) if traded_long_returns.size > 0 else 0.0
         mean_short_return = float(np.mean(traded_short_returns)) if traded_short_returns.size > 0 else 0.0
-        mean_gross_return = float(np.mean(traded_gross_returns)) if traded_gross_returns.size > 0 else float(np.mean(gross_returns)) if np.size(gross_returns) > 0 else 0.0
+        mean_gross_return = float(np.mean(traded_gross_returns)) if traded_gross_returns.size > 0 else float(np.mean(gross_returns)) if gross_returns is not None and np.size(gross_returns) > 0 else 0.0
         annualized_gross_return = mean_gross_return * 252
-        gross_share_positive = float(np.mean(traded_gross_returns > 0)) if traded_gross_returns.size > 0 else float(np.mean(gross_returns > 0)) if np.size(gross_returns) > 0 else 0.0
+        gross_share_positive = float(np.mean(traded_gross_returns > 0)) if traded_gross_returns.size > 0 else float(np.mean(gross_returns > 0)) if gross_returns is not None and np.size(gross_returns) > 0 else 0.0
 
-        mean_daily_cost = float(np.mean(traded_costs)) if traded_costs.size > 0 else float(np.mean(daily_costs)) if np.size(daily_costs) > 0 else 0.0
-        total_cost = float(np.sum(traded_costs)) if traded_costs.size > 0 else float(np.sum(daily_costs)) if np.size(daily_costs) > 0 else 0.0
+        mean_pdaily_cost = float(np.mean(traded_pcosts)) if traded_pcosts.size > 0 else float(np.mean(pdaily_costs)) if pdaily_costs is not None and np.size(pdaily_costs) > 0 else 0.0
+        mean_daily_cost = float(np.mean(traded_costs)) if traded_costs.size > 0 else float(np.mean(daily_costs)) if daily_costs is not None and np.size(daily_costs) > 0 else 0.0
+        total_cost = float(np.sum(traded_costs)) if traded_costs.size > 0 else float(np.sum(daily_costs)) if daily_costs is not None and np.size(daily_costs) > 0 else 0.0
         annualized_cost = mean_daily_cost * 252
 
+        # Leg distribution - use percent returns (matching paper)
+        # Only compute mean returns (other metrics removed per user's list)
         leg_distribution = {
+            'pmean_long_return': mean_plong_return,
+            'pmean_short_return': mean_pshort_return,
+            # Real returns
             'mean_long_return': mean_long_return,
-            'mean_short_return': mean_short_return,
-            'median_long_return': float(np.median(traded_long_returns)) if traded_long_returns.size > 0 else 0.0,
-            'median_short_return': float(np.median(traded_short_returns)) if traded_short_returns.size > 0 else 0.0,
-            'std_long_return': float(np.std(traded_long_returns, ddof=1)) if traded_long_returns.size > 1 else 0.0,
-            'std_short_return': float(np.std(traded_short_returns, ddof=1)) if traded_short_returns.size > 1 else 0.0,
-            'share_positive_long': float(np.mean(traded_long_returns > 0)) if traded_long_returns.size > 0 else 0.0,
-            'share_positive_short': float(np.mean(traded_short_returns > 0)) if traded_short_returns.size > 0 else 0.0
+            'mean_short_return': mean_short_return
         }
 
+        # Net distribution (after cost) - both percent and real
         net_distribution = {
-            'mean_return_after_cost': risk_metrics['mean_return'],
-            'annualized_return_after_cost': risk_metrics['annualized_return'],
-            'std_return_after_cost': risk_metrics['standard_deviation'],
-            'share_positive_after_cost': risk_metrics['share_positive'],
-            'min_return_after_cost': risk_metrics['min_return'],
-            'quantile_25_after_cost': risk_metrics['quantile_25'],
-            'median_return_after_cost': risk_metrics['median'],
-            'quantile_75_after_cost': risk_metrics['quantile_75'],
-            'max_return_after_cost': risk_metrics['max_return'],
-            'newey_west_std_error_after_cost': risk_metrics['newey_west_std_error'],
-            'newey_west_t_stat_after_cost': risk_metrics['newey_west_t_stat'],
-            'standard_error_after_cost': risk_metrics['standard_error'],
-            't_stat_after_cost': risk_metrics['t_stat']
+            # Percent metrics
+            'pmean_return_after_cost': risk_metrics.get('pmean_return', 0.0),
+            'pannualized_return_after_cost': risk_metrics.get('pannualized_return', 0.0),
+            'pstd_return_after_cost': risk_metrics.get('pstandard_deviation', 0.0),
+            'pshare_positive_after_cost': risk_metrics.get('pshare_positive', 0.0),
+            'pmin_return_after_cost': risk_metrics.get('pmin_return', 0.0),
+            'pquantile_25_after_cost': risk_metrics.get('pquantile_25', 0.0),
+            'pmedian_return_after_cost': risk_metrics.get('pmedian', 0.0),
+            'pquantile_75_after_cost': risk_metrics.get('pquantile_75', 0.0),
+            'pmax_return_after_cost': risk_metrics.get('pmax_return', 0.0),
+            'pstandard_error_after_cost': risk_metrics.get('pstandard_error', 0.0),
+            'pt_stat_after_cost': risk_metrics.get('pt_stat', 0.0),
+            # Real metrics
+            'mean_return_after_cost': risk_metrics.get('mean_return', 0.0),
+            'annualized_return_after_cost': risk_metrics.get('annualized_return', 0.0),
+            'std_return_after_cost': risk_metrics.get('standard_deviation', 0.0),
+            'share_positive_after_cost': risk_metrics.get('share_positive', 0.0),
+            'min_return_after_cost': risk_metrics.get('min_return', 0.0),
+            'quantile_25_after_cost': risk_metrics.get('quantile_25', 0.0),
+            'median_return_after_cost': risk_metrics.get('median', 0.0),
+            'quantile_75_after_cost': risk_metrics.get('quantile_75', 0.0),
+            'max_return_after_cost': risk_metrics.get('max_return', 0.0),
+            'standard_error_after_cost': risk_metrics.get('standard_error', 0.0),
+            't_stat_after_cost': risk_metrics.get('t_stat', 0.0)
         }
 
+        # Gross distribution (before cost) - both percent and real
         gross_distribution = {
+            # Percent metrics
+            'pmean_return_before_cost': mean_pgross_return,
+            'pannualized_return_before_cost': annualized_pgross_return,
+            'pstd_return_before_cost': gross_risk_metrics.get('pstandard_deviation', 0.0),
+            'pshare_positive_before_cost': pgross_share_positive,
+            'pmin_return_before_cost': gross_risk_metrics.get('pmin_return', 0.0),
+            'pquantile_25_before_cost': gross_risk_metrics.get('pquantile_25', 0.0),
+            'pmedian_return_before_cost': gross_risk_metrics.get('pmedian', 0.0),
+            'pquantile_75_before_cost': gross_risk_metrics.get('pquantile_75', 0.0),
+            'pmax_return_before_cost': gross_risk_metrics.get('pmax_return', 0.0),
+            'pstandard_error_before_cost': gross_risk_metrics.get('pstandard_error', 0.0),
+            'pt_stat_before_cost': gross_risk_metrics.get('pt_stat', 0.0),
+            # Real metrics
             'mean_return_before_cost': mean_gross_return,
             'annualized_return_before_cost': annualized_gross_return,
-            'std_return_before_cost': gross_risk_metrics['standard_deviation'],
+            'std_return_before_cost': gross_risk_metrics.get('standard_deviation', 0.0),
             'share_positive_before_cost': gross_share_positive,
-            'min_return_before_cost': gross_risk_metrics['min_return'],
-            'quantile_25_before_cost': gross_risk_metrics['quantile_25'],
-            'median_return_before_cost': gross_risk_metrics['median'],
-            'quantile_75_before_cost': gross_risk_metrics['quantile_75'],
-            'max_return_before_cost': gross_risk_metrics['max_return'],
-            'newey_west_std_error_before_cost': gross_risk_metrics['newey_west_std_error'],
-            'newey_west_t_stat_before_cost': gross_risk_metrics['newey_west_t_stat'],
-            'standard_error_before_cost': gross_risk_metrics['standard_error'],
-            't_stat_before_cost': gross_risk_metrics['t_stat']
+            'min_return_before_cost': gross_risk_metrics.get('min_return', 0.0),
+            'quantile_25_before_cost': gross_risk_metrics.get('quantile_25', 0.0),
+            'median_return_before_cost': gross_risk_metrics.get('median', 0.0),
+            'quantile_75_before_cost': gross_risk_metrics.get('quantile_75', 0.0),
+            'max_return_before_cost': gross_risk_metrics.get('max_return', 0.0),
+            'standard_error_before_cost': gross_risk_metrics.get('standard_error', 0.0),
+            't_stat_before_cost': gross_risk_metrics.get('t_stat', 0.0)
         }
         
         # S&P 500 benchmark comparison (aligned by date)
         sp500_returns = self._get_sp500_returns()
         sp500_metrics = {}
-        if sp500_returns is not None and len(portfolio_returns) > 0:
+        if sp500_returns is not None and len(pportfolio_returns) > 0:
             unique_dates = portfolio_info['unique_dates']
 
             # Align S&P 500 returns by date (not just length)
@@ -1971,30 +2074,46 @@ class ModelEvaluator:
             
             sp500_aligned = np.array(sp500_aligned)
             
-            if len(sp500_aligned) == len(portfolio_returns):
-                sp500_risk = self.calculate_portfolio_risk_metrics(sp500_aligned)
+            if len(sp500_aligned) == len(pportfolio_returns):
+                # S&P 500 returns are percent returns, so pass as both percent and None for real
+                sp500_risk = self.calculate_portfolio_risk_metrics(sp500_aligned, None)
+                # Compute all metrics from user's list for S&P 500 (percent only, no real values)
                 sp500_metrics = {
-                    'sp500_annualized_return': sp500_risk['annualized_return'],
-                    'sp500_volatility': sp500_risk['volatility_annualized'],
-                    'sp500_sharpe': sp500_risk['sharpe_ratio'],
-                    'sp500_max_drawdown': sp500_risk['max_drawdown'],
-                    'sp500_distribution': {
-                        'std_return': sp500_risk['standard_deviation'],
-                        'share_positive': sp500_risk['share_positive'],
-                        'min_return': sp500_risk['min_return'],
-                        'quantile_25': sp500_risk['quantile_25'],
-                        'median': sp500_risk['median'],
-                        'quantile_75': sp500_risk['quantile_75'],
-                        'max_return': sp500_risk['max_return'],
-                        'newey_west_std_error': sp500_risk['newey_west_std_error'],
-                        'newey_west_t_stat': sp500_risk['newey_west_t_stat']
-                    },
-                    'excess_return_vs_sp500': risk_metrics['annualized_return'] - sp500_risk['annualized_return'],
-                    'excess_sharpe_vs_sp500': risk_metrics['sharpe_ratio'] - sp500_risk['sharpe_ratio']
+                    # Mean return
+                    'sp500_pmean_return': sp500_risk.get('pmean_return', 0.0),
+                    # Standard error and t-statistic
+                    'sp500_pstandard_error': sp500_risk.get('pstandard_error', 0.0),
+                    'sp500_pt_stat': sp500_risk.get('pt_stat', 0.0),
+                    # Distribution metrics
+                    'sp500_pmin_return': sp500_risk.get('pmin_return', 0.0),
+                    'sp500_pquantile_25': sp500_risk.get('pquantile_25', 0.0),
+                    'sp500_pmedian': sp500_risk.get('pmedian', 0.0),
+                    'sp500_pquantile_75': sp500_risk.get('pquantile_75', 0.0),
+                    'sp500_pmax_return': sp500_risk.get('pmax_return', 0.0),
+                    'sp500_pshare_positive': sp500_risk.get('pshare_positive', 0.0),
+                    'sp500_pstandard_deviation': sp500_risk.get('pstandard_deviation', 0.0),
+                    # Skewness and kurtosis
+                    'sp500_pskewness': sp500_risk.get('pskewness', 0.0),
+                    'sp500_pkurtosis': sp500_risk.get('pkurtosis', 0.0),
+                    # VaR and CVaR
+                    'sp500_pvar_1pct': sp500_risk.get('pvar_1pct', 0.0),
+                    'sp500_pcvar_1pct': sp500_risk.get('pcvar_1pct', 0.0),
+                    'sp500_pvar_5pct': sp500_risk.get('pvar_5pct', 0.0),
+                    'sp500_pcvar_5pct': sp500_risk.get('pcvar_5pct', 0.0),
+                    # Max drawdown
+                    'sp500_pmax_drawdown': sp500_risk.get('pmax_drawdown', 0.0),
+                    # Annualized metrics
+                    'sp500_pannualized_return': sp500_risk.get('pannualized_return', 0.0),
+                    'sp500_pvolatility_annualized': sp500_risk.get('pvolatility_annualized', 0.0),
+                    'sp500_pdownside_deviation_annualized': sp500_risk.get('pdownside_deviation_annualized', 0.0),
+                    'sp500_psharpe_ratio': sp500_risk.get('psharpe_ratio', 0.0),
+                    'sp500_psortino_ratio': sp500_risk.get('psortino_ratio', 0.0),
+                    # Excess return (portfolio return - S&P 500 return)
+                    'pexcess_return_vs_sp500': gross_risk_metrics.get('pannualized_return', 0.0) - sp500_risk.get('pannualized_return', 0.0)
                 }
                 self.sp500_returns = sp500_aligned
             else:
-                print(f"[Evaluator] Warning: S&P 500 alignment failed (expected {len(portfolio_returns)}, got {len(sp500_aligned)})")
+                print(f"[Evaluator] Warning: S&P 500 alignment failed (expected {len(pportfolio_returns)}, got {len(sp500_aligned)})")
         
         # Random benchmark
         # Note: Using fewer portfolios for computational efficiency
@@ -2008,35 +2127,26 @@ class ModelEvaluator:
         )
         
         random_metrics = {}
-        if len(random_portfolio_returns) > 0 and len(random_portfolio_returns) == len(portfolio_returns):
-            random_risk = self.calculate_portfolio_risk_metrics(random_portfolio_returns)
+        if len(random_portfolio_returns) > 0 and len(random_portfolio_returns) == len(pportfolio_returns):
+            # Random portfolio returns are percent returns, so pass as both percent and None for real
+            random_risk = self.calculate_portfolio_risk_metrics(random_portfolio_returns, None)
             
             # Compute percentile rank of strategy's mean return in random distribution
+            # Use gross returns (before cost) to match paper's approach - use percent returns
             percentile_rank = None
             if random_info.get('all_returns') is not None:
-                # Compute mean return across all days for strategy
-                strategy_mean_return = np.mean(portfolio_returns)
+                # Compute mean return across all days for strategy (gross, before cost) - percent
+                strategy_pmean_return = np.mean(pgross_returns) if pgross_returns is not None else 0.0
                 # Compute mean return for each random portfolio (across all days)
                 random_means = np.mean(random_info['all_returns'], axis=0)  # Shape: (n_portfolios,)
                 # Percentile rank: what % of random portfolios have mean <= strategy mean
-                percentile_rank = (random_means <= strategy_mean_return).mean() * 100
+                percentile_rank = (random_means <= strategy_pmean_return).mean() * 100
             
             random_metrics = {
-                'random_annualized_return': random_risk['annualized_return'],
-                'random_sharpe': random_risk['sharpe_ratio'],
-                'random_max_drawdown': random_risk['max_drawdown'],
-                'random_distribution': {
-                    'std_return': random_risk['standard_deviation'],
-                    'share_positive': random_risk['share_positive'],
-                    'min_return': random_risk['min_return'],
-                    'quantile_25': random_risk['quantile_25'],
-                    'median': random_risk['median'],
-                    'quantile_75': random_risk['quantile_75'],
-                    'max_return': random_risk['max_return'],
-                    'newey_west_std_error': random_risk['newey_west_std_error'],
-                    'newey_west_t_stat': random_risk['newey_west_t_stat']
-                },
-                'outperformance_vs_random': risk_metrics['annualized_return'] - random_risk['annualized_return'],
+                'random_pannualized_return': random_risk.get('pannualized_return', 0.0),
+                'random_psharpe': random_risk.get('psharpe_ratio', 0.0),
+                'poutperformance_vs_random': gross_risk_metrics.get('pannualized_return', 0.0) - random_risk.get('pannualized_return', 0.0),
+                'outperformance_vs_random': gross_risk_metrics.get('annualized_return', 0.0) - random_risk.get('annualized_return', 0.0),
                 'percentile_rank_in_random_distribution': percentile_rank,
                 'random_percentile_5_annualized': np.mean(random_info.get('percentile_5', [])) * 252 if len(random_info.get('percentile_5', [])) > 0 else None,
                 'random_percentile_50_annualized': np.mean(random_info.get('percentile_50', [])) * 252 if len(random_info.get('percentile_50', [])) > 0 else None,
@@ -2044,62 +2154,133 @@ class ModelEvaluator:
             }
         
         # Compile results
+        # Primary metrics use gross returns (before cost) to match paper's "Mean return" definition
+        # Include both percent (p prefix) and real (no prefix) metrics
         paper_metrics = {
             'portfolio_performance': {
-                'mean_daily_return': risk_metrics['mean_return'],
-                'annualized_return': risk_metrics['annualized_return'],
-                'volatility_annualized': risk_metrics['volatility_annualized'],
-                'sharpe_ratio': risk_metrics['sharpe_ratio'],
-                'sortino_ratio': risk_metrics['sortino_ratio'],
-                'max_drawdown_pct': risk_metrics['max_drawdown'],
-                'var_1pct': risk_metrics['var_1pct'],
-                'cvar_1pct': risk_metrics['cvar_1pct'],
-                'var_5pct': risk_metrics['var_5pct'],
-                'cvar_5pct': risk_metrics['cvar_5pct'],
-                'skewness': risk_metrics['skewness'],
-                'kurtosis': risk_metrics['kurtosis'],
-                'standard_deviation': risk_metrics['standard_deviation'],
-                'share_positive': risk_metrics['share_positive'],
-                'min_return': risk_metrics['min_return'],
-                'quantile_25': risk_metrics['quantile_25'],
-                'median_return': risk_metrics['median'],
-                'quantile_75': risk_metrics['quantile_75'],
-                'max_return': risk_metrics['max_return'],
-                'downside_deviation_daily': risk_metrics['downside_deviation_daily'],
-                'downside_deviation_annualized': risk_metrics['downside_deviation_annualized'],
-                'newey_west_std_error': risk_metrics['newey_west_std_error'],
-                'newey_west_t_stat': risk_metrics['newey_west_t_stat'],
-                'standard_error': risk_metrics['standard_error'],
-                't_stat': risk_metrics['t_stat'],
-                'mean_daily_return_before_cost': gross_distribution['mean_return_before_cost'],
-                'annualized_return_before_cost': gross_distribution['annualized_return_before_cost'],
-                'std_return_before_cost': gross_distribution['std_return_before_cost'],
-                'share_positive_before_cost': gross_distribution['share_positive_before_cost'],
-                'min_return_before_cost': gross_distribution['min_return_before_cost'],
-                'quantile_25_before_cost': gross_distribution['quantile_25_before_cost'],
-                'median_return_before_cost': gross_distribution['median_return_before_cost'],
-                'quantile_75_before_cost': gross_distribution['quantile_75_before_cost'],
-                'max_return_before_cost': gross_distribution['max_return_before_cost'],
-                'newey_west_std_error_before_cost': gross_distribution['newey_west_std_error_before_cost'],
-                'newey_west_t_stat_before_cost': gross_distribution['newey_west_t_stat_before_cost'],
-                'standard_error_before_cost': gross_distribution['standard_error_before_cost'],
-                't_stat_before_cost': gross_distribution['t_stat_before_cost'],
-                'mean_long_leg_return': leg_distribution['mean_long_return'],
-                'mean_short_leg_return': leg_distribution['mean_short_return'],
-                'median_long_leg_return': leg_distribution['median_long_return'],
-                'median_short_leg_return': leg_distribution['median_short_return'],
-                'std_long_leg_return': leg_distribution['std_long_return'],
-                'std_short_leg_return': leg_distribution['std_short_return'],
-                'share_positive_long_leg': leg_distribution['share_positive_long'],
-                'share_positive_short_leg': leg_distribution['share_positive_short'],
+                # Percent metrics (p prefix) - before cost
+                'pmean_daily_return': gross_risk_metrics.get('pmean_return', 0.0),
+                'pannualized_return': gross_risk_metrics.get('pannualized_return', 0.0),
+                'pvolatility_annualized': gross_risk_metrics.get('pvolatility_annualized', 0.0),
+                'psharpe_ratio': gross_risk_metrics.get('psharpe_ratio', 0.0),
+                'psortino_ratio': gross_risk_metrics.get('psortino_ratio', 0.0),
+                'pmax_drawdown': gross_risk_metrics.get('pmax_drawdown', 0.0),
+                'pvar_1pct': gross_risk_metrics.get('pvar_1pct', 0.0),
+                'pcvar_1pct': gross_risk_metrics.get('pcvar_1pct', 0.0),
+                'pvar_5pct': gross_risk_metrics.get('pvar_5pct', 0.0),
+                'pcvar_5pct': gross_risk_metrics.get('pcvar_5pct', 0.0),
+                'pskewness': gross_risk_metrics.get('pskewness', 0.0),
+                'pkurtosis': gross_risk_metrics.get('pkurtosis', 0.0),
+                'pstandard_deviation': gross_risk_metrics.get('pstandard_deviation', 0.0),
+                'pshare_positive': gross_risk_metrics.get('pshare_positive', 0.0),
+                'pmin_return': gross_risk_metrics.get('pmin_return', 0.0),
+                'pquantile_25': gross_risk_metrics.get('pquantile_25', 0.0),
+                'pmedian_return': gross_risk_metrics.get('pmedian', 0.0),
+                'pquantile_75': gross_risk_metrics.get('pquantile_75', 0.0),
+                'pmax_return': gross_risk_metrics.get('pmax_return', 0.0),
+                'pdownside_deviation_annualized': gross_risk_metrics.get('pdownside_deviation_annualized', 0.0),
+                'pstandard_error': gross_risk_metrics.get('pstandard_error', 0.0),
+                'pt_stat': gross_risk_metrics.get('pt_stat', 0.0),
+                # Real metrics (no prefix) - before cost
+                'mean_daily_return': gross_risk_metrics.get('mean_return', 0.0),
+                'annualized_return': gross_risk_metrics.get('annualized_return', 0.0),
+                'volatility_annualized': gross_risk_metrics.get('volatility_annualized', 0.0),
+                'sharpe_ratio': gross_risk_metrics.get('sharpe_ratio', 0.0),
+                'sortino_ratio': gross_risk_metrics.get('sortino_ratio', 0.0),
+                'max_drawdown': gross_risk_metrics.get('max_drawdown', 0.0),
+                'var_1pct': gross_risk_metrics.get('var_1pct', 0.0),
+                'cvar_1pct': gross_risk_metrics.get('cvar_1pct', 0.0),
+                'var_5pct': gross_risk_metrics.get('var_5pct', 0.0),
+                'cvar_5pct': gross_risk_metrics.get('cvar_5pct', 0.0),
+                'skewness': gross_risk_metrics.get('skewness', 0.0),
+                'kurtosis': gross_risk_metrics.get('kurtosis', 0.0),
+                'standard_deviation': gross_risk_metrics.get('standard_deviation', 0.0),
+                'share_positive': gross_risk_metrics.get('share_positive', 0.0),
+                'min_return': gross_risk_metrics.get('min_return', 0.0),
+                'quantile_25': gross_risk_metrics.get('quantile_25', 0.0),
+                'median_return': gross_risk_metrics.get('median', 0.0),
+                'quantile_75': gross_risk_metrics.get('quantile_75', 0.0),
+                'max_return': gross_risk_metrics.get('max_return', 0.0),
+                'downside_deviation_annualized': gross_risk_metrics.get('downside_deviation_annualized', 0.0),
+                'standard_error': gross_risk_metrics.get('standard_error', 0.0),
+                't_stat': gross_risk_metrics.get('t_stat', 0.0),
+                # Percent metrics - before cost (distribution)
+                'pmean_daily_return_before_cost': gross_distribution.get('pmean_return_before_cost', 0.0),
+                'pannualized_return_before_cost': gross_distribution.get('pannualized_return_before_cost', 0.0),
+                'pstd_return_before_cost': gross_distribution.get('pstd_return_before_cost', 0.0),
+                'pshare_positive_before_cost': gross_distribution.get('pshare_positive_before_cost', 0.0),
+                'pmin_return_before_cost': gross_distribution.get('pmin_return_before_cost', 0.0),
+                'pquantile_25_before_cost': gross_distribution.get('pquantile_25_before_cost', 0.0),
+                'pmedian_return_before_cost': gross_distribution.get('pmedian_return_before_cost', 0.0),
+                'pquantile_75_before_cost': gross_distribution.get('pquantile_75_before_cost', 0.0),
+                'pmax_return_before_cost': gross_distribution.get('pmax_return_before_cost', 0.0),
+                'pstandard_error_before_cost': gross_distribution.get('pstandard_error_before_cost', 0.0),
+                'pt_stat_before_cost': gross_distribution.get('pt_stat_before_cost', 0.0),
+                # Real metrics - before cost (distribution)
+                'mean_daily_return_before_cost': gross_distribution.get('mean_return_before_cost', 0.0),
+                'annualized_return_before_cost': gross_distribution.get('annualized_return_before_cost', 0.0),
+                'std_return_before_cost': gross_distribution.get('std_return_before_cost', 0.0),
+                'share_positive_before_cost': gross_distribution.get('share_positive_before_cost', 0.0),
+                'min_return_before_cost': gross_distribution.get('min_return_before_cost', 0.0),
+                'quantile_25_before_cost': gross_distribution.get('quantile_25_before_cost', 0.0),
+                'median_return_before_cost': gross_distribution.get('median_return_before_cost', 0.0),
+                'quantile_75_before_cost': gross_distribution.get('quantile_75_before_cost', 0.0),
+                'max_return_before_cost': gross_distribution.get('max_return_before_cost', 0.0),
+                'standard_error_before_cost': gross_distribution.get('standard_error_before_cost', 0.0),
+                't_stat_before_cost': gross_distribution.get('t_stat_before_cost', 0.0),
+                # Percent metrics - after cost
+                'pmean_daily_return_after_cost': net_distribution.get('pmean_return_after_cost', 0.0),
+                'pannualized_return_after_cost': net_distribution.get('pannualized_return_after_cost', 0.0),
+                'pstd_return_after_cost': net_distribution.get('pstd_return_after_cost', 0.0),
+                'pshare_positive_after_cost': net_distribution.get('pshare_positive_after_cost', 0.0),
+                'pmin_return_after_cost': net_distribution.get('pmin_return_after_cost', 0.0),
+                'pquantile_25_after_cost': net_distribution.get('pquantile_25_after_cost', 0.0),
+                'pmedian_return_after_cost': net_distribution.get('pmedian_return_after_cost', 0.0),
+                'pquantile_75_after_cost': net_distribution.get('pquantile_75_after_cost', 0.0),
+                'pmax_return_after_cost': net_distribution.get('pmax_return_after_cost', 0.0),
+                'pstandard_error_after_cost': net_distribution.get('pstandard_error_after_cost', 0.0),
+                'pt_stat_after_cost': net_distribution.get('pt_stat_after_cost', 0.0),
+                'pvar_1pct_after_cost': risk_metrics.get('pvar_1pct', 0.0),
+                'pcvar_1pct_after_cost': risk_metrics.get('pcvar_1pct', 0.0),
+                'pvar_5pct_after_cost': risk_metrics.get('pvar_5pct', 0.0),
+                'pcvar_5pct_after_cost': risk_metrics.get('pcvar_5pct', 0.0),
+                'pmax_drawdown_after_cost': risk_metrics.get('pmax_drawdown', 0.0),
+                'pvolatility_annualized_after_cost': risk_metrics.get('pvolatility_annualized', 0.0),
+                'psharpe_ratio_after_cost': risk_metrics.get('psharpe_ratio', 0.0),
+                'psortino_ratio_after_cost': risk_metrics.get('psortino_ratio', 0.0),
+                'pdownside_deviation_annualized_after_cost': risk_metrics.get('pdownside_deviation_annualized', 0.0),
+                # Real metrics - after cost
+                'mean_daily_return_after_cost': net_distribution.get('mean_return_after_cost', 0.0),
+                'annualized_return_after_cost': net_distribution.get('annualized_return_after_cost', 0.0),
+                'std_return_after_cost': net_distribution.get('std_return_after_cost', 0.0),
+                'share_positive_after_cost': net_distribution.get('share_positive_after_cost', 0.0),
+                'min_return_after_cost': net_distribution.get('min_return_after_cost', 0.0),
+                'quantile_25_after_cost': net_distribution.get('quantile_25_after_cost', 0.0),
+                'median_return_after_cost': net_distribution.get('median_return_after_cost', 0.0),
+                'quantile_75_after_cost': net_distribution.get('quantile_75_after_cost', 0.0),
+                'max_return_after_cost': net_distribution.get('max_return_after_cost', 0.0),
+                'standard_error_after_cost': net_distribution.get('standard_error_after_cost', 0.0),
+                't_stat_after_cost': net_distribution.get('t_stat_after_cost', 0.0),
+                'var_1pct_after_cost': risk_metrics.get('var_1pct', 0.0),
+                'cvar_1pct_after_cost': risk_metrics.get('cvar_1pct', 0.0),
+                'var_5pct_after_cost': risk_metrics.get('var_5pct', 0.0),
+                'cvar_5pct_after_cost': risk_metrics.get('cvar_5pct', 0.0),
+                'max_drawdown_after_cost': risk_metrics.get('max_drawdown', 0.0),
+                'volatility_annualized_after_cost': risk_metrics.get('volatility_annualized', 0.0),
+                'sharpe_ratio_after_cost': risk_metrics.get('sharpe_ratio', 0.0),
+                'sortino_ratio_after_cost': risk_metrics.get('sortino_ratio', 0.0),
+                'downside_deviation_annualized_after_cost': risk_metrics.get('downside_deviation_annualized', 0.0),
+                # Leg returns - percent (only mean per user's list)
+                'pmean_long_leg_return': leg_distribution.get('pmean_long_return', 0.0),
+                'pmean_short_leg_return': leg_distribution.get('pmean_short_return', 0.0),
+                # Leg returns - real (only mean per user's list)
+                'mean_long_leg_return': leg_distribution.get('mean_long_return', 0.0),
+                'mean_short_leg_return': leg_distribution.get('mean_short_return', 0.0),
+                # Costs (keep mean_daily_transaction_cost for cost calculations)
                 'mean_daily_transaction_cost': mean_daily_cost,
-                'annualized_transaction_cost': annualized_cost,
-                'total_transaction_cost': total_cost,
-                'traded_days': int(traded_days_mask.sum()),
-                'non_traded_days': int(traded_days_mask.size - traded_days_mask.sum()),
-                'n_trading_days': len(portfolio_returns),
-                'k': k,
-                'cost_bps_per_side': cost_bps_per_side
+                'pmean_daily_transaction_cost': mean_pdaily_cost,
+                'n_trading_days': len(pportfolio_returns),
+                'k': k
             },
             'portfolio_distribution': {
                 **gross_distribution,
@@ -2135,6 +2316,44 @@ class ModelEvaluator:
         diagnostics_payload = self._compute_cross_sectional_diagnostics(
             raw_predictions, paper_targets, returns, self.test_dates, k
         )
+        
+        # Merge portfolio daily_info into daily_metrics
+        if portfolio_info and 'daily_info' in portfolio_info and len(portfolio_info['daily_info']) > 0:
+            portfolio_daily_df = pd.DataFrame(portfolio_info['daily_info'])
+            portfolio_daily_df['date'] = pd.to_datetime(portfolio_daily_df['date'])
+            portfolio_daily_df = portfolio_daily_df.set_index('date').sort_index()
+            
+            # Merge with existing daily_metrics
+            daily_metrics = diagnostics_payload['daily_metrics']
+            if daily_metrics is not None and not daily_metrics.empty:
+                # daily_metrics should already have date as index from groupby operation
+                # Ensure it's a DatetimeIndex
+                if not isinstance(daily_metrics.index, pd.DatetimeIndex):
+                    daily_metrics.index = pd.to_datetime(daily_metrics.index)
+                
+                # Merge portfolio info into daily_metrics
+                # Use outer join to keep all dates from both DataFrames
+                daily_metrics = daily_metrics.merge(
+                    portfolio_daily_df,
+                    left_index=True,
+                    right_index=True,
+                    how='outer',
+                    suffixes=('', '_portfolio')
+                )
+                
+                # Sort by date
+                daily_metrics = daily_metrics.sort_index()
+                
+                # Update diagnostics_payload with merged daily_metrics
+                diagnostics_payload['daily_metrics'] = daily_metrics
+                
+                # Re-serialize the updated daily_metrics
+                diagnostics_payload['summary']['daily_metrics'] = self._serialize_dataframe(daily_metrics)
+            else:
+                # If daily_metrics is empty, just use portfolio_daily_df
+                diagnostics_payload['daily_metrics'] = portfolio_daily_df
+                diagnostics_payload['summary']['daily_metrics'] = self._serialize_dataframe(portfolio_daily_df)
+        
         paper_metrics['cross_sectional_diagnostics'] = diagnostics_payload['summary']
 
         self.cross_sectional_frame = diagnostics_payload['frame']
@@ -2146,9 +2365,12 @@ class ModelEvaluator:
         self.cross_sectional_k = k
 
         # Store for visualization
-        self.portfolio_returns = portfolio_returns
-        self.portfolio_returns_before_cost = gross_returns
-        self.daily_transaction_costs = daily_costs
+        self.pportfolio_returns = pportfolio_returns  # Percent returns
+        self.portfolio_returns = net_returns  # Real returns
+        self.pportfolio_returns_before_cost = pgross_returns  # Percent returns before cost
+        self.portfolio_returns_before_cost = gross_returns  # Real returns before cost
+        self.pdaily_transaction_costs = pdaily_costs  # Percent costs
+        self.daily_transaction_costs = daily_costs  # Real costs
         self.portfolio_info = portfolio_info
         
         return paper_metrics
@@ -2167,9 +2389,11 @@ class ModelEvaluator:
         # Calculate returns based on predictions and revenues
         # Predictions and targets are already classified (thresholded to -1, 0, or +1)
         # So we can directly multiply: prediction * revenue gives the return
+        # Revenues are real dollar values (close - open), so returns are also real dollar values
         pred_returns = predictions * revenues
         target_returns = targets * revenues
 
+        # Real value metrics (no prefix)
         # Mean return
         metrics['mean_prediction_return'] = np.mean(pred_returns) if len(pred_returns) > 0 else 0.0
         metrics['mean_target_return'] = np.mean(target_returns) if len(target_returns) > 0 else 0.0
@@ -2211,6 +2435,50 @@ class ModelEvaluator:
             metrics['final_target_growth'] = 0.0
             metrics['total_target_return'] = 0.0
 
+        # Percent value metrics (p prefix) - convert real returns to percentages
+        # Use absolute value of revenues as denominator to get percent returns
+        # If revenues are all zero or very small, use a default base
+        revenue_base = np.abs(revenues)
+        revenue_base[revenue_base < 1e-10] = 1.0  # Avoid division by zero
+        
+        # Calculate percent returns: real_return / base_value
+        ppred_returns = pred_returns / revenue_base if len(pred_returns) > 0 else np.array([])
+        ptarget_returns = target_returns / revenue_base if len(target_returns) > 0 else np.array([])
+        
+        if len(ppred_returns) > 0:
+            metrics['pmean_prediction_return'] = float(np.mean(ppred_returns)) * 100  # Convert to percentage
+            metrics['pannualized_prediction_return'] = metrics['pmean_prediction_return'] * 252
+        else:
+            metrics['pmean_prediction_return'] = 0.0
+            metrics['pannualized_prediction_return'] = 0.0
+            
+        if len(ptarget_returns) > 0:
+            metrics['pmean_target_return'] = float(np.mean(ptarget_returns)) * 100  # Convert to percentage
+            metrics['pannualized_target_return'] = metrics['pmean_target_return'] * 252
+        else:
+            metrics['pmean_target_return'] = 0.0
+            metrics['pannualized_target_return'] = 0.0
+        
+        # Percent excess return
+        pexcess_returns = ppred_returns - ptarget_returns if len(ppred_returns) > 0 else np.array([])
+        if len(pexcess_returns) > 0:
+            metrics['pmean_excess_return'] = float(np.mean(pexcess_returns)) * 100  # Convert to percentage
+            metrics['pannualized_excess_return'] = metrics['pmean_excess_return'] * 252
+        else:
+            metrics['pmean_excess_return'] = 0.0
+            metrics['pannualized_excess_return'] = 0.0
+        
+        # Percent share of positive returns
+        if len(ppred_returns) > 0:
+            metrics['pshare_positive_prediction_returns'] = np.sum(ppred_returns > 0) / len(ppred_returns) * 100
+        else:
+            metrics['pshare_positive_prediction_returns'] = 0.0
+            
+        if len(ptarget_returns) > 0:
+            metrics['pshare_positive_target_returns'] = np.sum(ptarget_returns > 0) / len(ptarget_returns) * 100
+        else:
+            metrics['pshare_positive_target_returns'] = 0.0
+
         # Random "monkey" benchmark (random walk with same volatility as target)
         if len(target_returns) > 0 and np.std(target_returns) > 0:
             np.random.seed(42)  # For reproducibility
@@ -2221,34 +2489,65 @@ class ModelEvaluator:
             metrics['random_benchmark_total_return'] = random_cumulative_growth[-1]
             metrics['random_benchmark_annualized_return'] = np.mean(random_returns) * 252
             
+            # Percent version
+            prandom_returns = random_returns / revenue_base if len(random_returns) > 0 else np.array([])
+            if len(prandom_returns) > 0:
+                metrics['prandom_benchmark_annualized_return'] = float(np.mean(prandom_returns)) * 100 * 252
+            else:
+                metrics['prandom_benchmark_annualized_return'] = 0.0
+            
             # Performance vs random benchmark
             metrics['outperformance_vs_random'] = metrics['final_prediction_growth'] - metrics['random_benchmark_final_growth']
+            # Percent version
+            if len(ppred_returns) > 0 and len(prandom_returns) > 0:
+                prandom_cumulative = np.cumsum(prandom_returns)
+                ppred_cumulative = np.cumsum(ppred_returns)
+                metrics['poutperformance_vs_random'] = (ppred_cumulative[-1] - prandom_cumulative[-1]) * 100
+            else:
+                metrics['poutperformance_vs_random'] = 0.0
         else:
             metrics['random_benchmark_final_growth'] = 0.0
             metrics['random_benchmark_total_return'] = 0.0
             metrics['random_benchmark_annualized_return'] = 0.0
+            metrics['prandom_benchmark_annualized_return'] = 0.0
             metrics['outperformance_vs_random'] = 0.0
+            metrics['poutperformance_vs_random'] = 0.0
         
         # S&P 500 benchmark comparison
         # _get_sp500_returns() handles priority: metrics data -> standalone cache -> fetch
         sp500_returns = self._get_sp500_returns()
         
         if sp500_returns is not None and len(sp500_returns) == len(pred_returns):
-            # Calculate S&P 500 metrics
+            # Calculate S&P 500 metrics (S&P 500 returns are already percentages)
             metrics['sp500_mean_return'] = np.mean(sp500_returns)
             metrics['sp500_annualized_return'] = metrics['sp500_mean_return'] * 252
             metrics['sp500_volatility'] = np.std(sp500_returns) * np.sqrt(252) if len(sp500_returns) > 1 else 0.0
             metrics['sp500_sharpe'] = (metrics['sp500_mean_return'] / np.std(sp500_returns) * np.sqrt(252)) if np.std(sp500_returns) > 0 else 0.0
             
-            # Cumulative S&P 500 growth
-            sp500_cumulative = np.cumsum(sp500_returns)
+            # Percent versions (S&P 500 is already in percent, so use directly)
+            metrics['psp500_mean_return'] = metrics['sp500_mean_return'] * 100
+            metrics['psp500_annualized_return'] = metrics['psp500_mean_return'] * 252
+            metrics['psp500_volatility'] = metrics['sp500_volatility'] * 100
+            metrics['psp500_sharpe'] = metrics['sp500_sharpe']
+            
+            # Cumulative S&P 500 growth (for real values, convert percent to real using revenue base)
+            sp500_real_returns = sp500_returns * revenue_base  # Convert percent to real
+            sp500_cumulative = np.cumsum(sp500_real_returns)
             metrics['sp500_final_growth'] = sp500_cumulative[-1]
             metrics['sp500_total_return'] = sp500_cumulative[-1]
             
+            # Percent cumulative growth (use percent returns directly)
+            sp500_pcumulative = self._wealth_curve(sp500_returns)  # Wealth curve from percent returns
+            metrics['psp500_final_growth'] = (sp500_pcumulative[-1] - 1.0) * 100 if len(sp500_pcumulative) > 0 else 0.0
+            
             # Performance vs S&P 500
             metrics['outperformance_vs_sp500'] = metrics['final_prediction_growth'] - metrics['sp500_final_growth']
-            metrics['excess_return_vs_sp500'] = metrics['mean_prediction_return'] - metrics['sp500_mean_return']
+            metrics['excess_return_vs_sp500'] = metrics['mean_prediction_return'] - np.mean(sp500_real_returns)
             metrics['annualized_excess_return_vs_sp500'] = metrics['excess_return_vs_sp500'] * 252
+            
+            # Percent versions
+            metrics['pexcess_return_vs_sp500'] = (metrics['pmean_prediction_return'] / 100) - metrics['sp500_mean_return']
+            metrics['pannualized_excess_return_vs_sp500'] = metrics['pexcess_return_vs_sp500'] * 252
             
             # Store for visualization
             self.sp500_returns = sp500_returns
@@ -2263,6 +2562,13 @@ class ModelEvaluator:
             metrics['outperformance_vs_sp500'] = None
             metrics['excess_return_vs_sp500'] = None
             metrics['annualized_excess_return_vs_sp500'] = None
+            metrics['psp500_mean_return'] = None
+            metrics['psp500_annualized_return'] = None
+            metrics['psp500_volatility'] = None
+            metrics['psp500_sharpe'] = None
+            metrics['psp500_final_growth'] = None
+            metrics['pexcess_return_vs_sp500'] = None
+            metrics['pannualized_excess_return_vs_sp500'] = None
             self.sp500_returns = None
             self.sp500_cumulative = None
         

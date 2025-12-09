@@ -18,8 +18,8 @@ RESULTS_DIR="$ACTUAL_PROJECT_ROOT/deliverables/results"
 mkdir -p "$RESULTS_DIR"
 
 # Default values
-MODEL_NAME="${1:-savedmodel_classification_cnn_lstm.pth}"
-MODEL_TYPE="${2:-cnn_lstm}"
+MODEL_NAME="${1:-savedmodel_classification_cae_lstm.pth}"
+MODEL_TYPE="${2:-cae_lstm}"
 TIME_ARGS="${3:-1990-01-01,2015-12-31}"
 
 echo "=========================================="

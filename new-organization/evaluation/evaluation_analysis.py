@@ -487,10 +487,22 @@ class EvaluationAnalysis:
         if not metrics:
             return {"status": "not_available", "reason": "Portfolio metrics missing."}
 
+        # Percent metrics
+        psharpe = metrics.get("psharpe_ratio")
+        pskew = metrics.get("pskewness")
+        pkurt = metrics.get("pkurtosis")
+        n_days = metrics.get("n_trading_days")
+        metrics["pdeflated_sharpe_ratio"] = self._deflated_sharpe_ratio(
+            sharpe=psharpe,
+            skew=pskew,
+            kurtosis=pkurt,
+            n_obs=n_days,
+        )
+        
+        # Real metrics
         sharpe = metrics.get("sharpe_ratio")
         skew = metrics.get("skewness")
         kurt = metrics.get("kurtosis")
-        n_days = metrics.get("n_trading_days")
         metrics["deflated_sharpe_ratio"] = self._deflated_sharpe_ratio(
             sharpe=sharpe,
             skew=skew,
@@ -498,9 +510,20 @@ class EvaluationAnalysis:
             n_obs=n_days,
         )
 
+        # Random benchmark context - use percent metrics (random portfolios are percent returns)
         random_percentile = self.benchmark_metrics.get(
             "percentile_rank_in_random_distribution"
         )
+        metrics["prandom_benchmark_context"] = {
+            "percentile_rank": random_percentile,
+            "pmean_vs_random": self.benchmark_metrics.get("poutperformance_vs_random"),
+            "prandom_percentiles": {
+                "p5": self.benchmark_metrics.get("random_percentile_5_annualized"),
+                "p50": self.benchmark_metrics.get("random_percentile_50_annualized"),
+                "p95": self.benchmark_metrics.get("random_percentile_95_annualized"),
+            },
+        }
+        # Also keep real version for backward compatibility (though random benchmarks are percent)
         metrics["random_benchmark_context"] = {
             "percentile_rank": random_percentile,
             "mean_vs_random": self.benchmark_metrics.get("outperformance_vs_random"),
@@ -513,7 +536,7 @@ class EvaluationAnalysis:
         return metrics
 
     def build_portfolio_table(self) -> pd.DataFrame:
-        columns = ["Group", "Metric", "Model", "Before costs", "After costs"]
+        columns = ["Group", "Metric", "Model", "Before costs (pct)", "After costs (pct)", "Before costs (real)", "After costs (real)"]
         if not self.portfolio_metrics:
             return pd.DataFrame(columns=columns)
 
@@ -522,205 +545,247 @@ class EvaluationAnalysis:
         portfolio_distribution = self.paper_metrics.get("portfolio_distribution", {})
         costs_payload = portfolio_distribution.get("costs", {}) if portfolio_distribution else {}
         mean_daily_cost = metrics.get("mean_daily_transaction_cost")
+        pmean_daily_cost = metrics.get("pmean_daily_transaction_cost")
         if mean_daily_cost is None:
             mean_daily_cost = costs_payload.get("mean_daily_cost")
+        if pmean_daily_cost is None:
+            pmean_daily_cost = costs_payload.get("pmean_daily_cost")
 
         model_label = self._model_label()
         rows: List[Dict[str, Any]] = []
 
-        def add_row(group: str, metric_name: str, before_val: Optional[Any], after_val: Optional[Any], model: Optional[str] = None) -> None:
+        def add_row(group: str, metric_name: str, 
+                   before_pct: Optional[Any], after_pct: Optional[Any],
+                   before_real: Optional[Any], after_real: Optional[Any],
+                   model: Optional[str] = None) -> None:
             rows.append(
                 {
                     "Group": group,
                     "Metric": metric_name,
                     "Model": model or model_label,
-                    "Before costs": self._coerce_float(before_val),
-                    "After costs": self._coerce_float(after_val),
+                    "Before costs (pct)": self._coerce_float(before_pct),
+                    "After costs (pct)": self._coerce_float(after_pct),
+                    "Before costs (real)": self._coerce_float(before_real),
+                    "After costs (real)": self._coerce_float(after_real),
                 }
             )
 
         # Panel A: Return distribution (before vs after costs)
-        add_row(
-            "Panel A",
-            "Mean return (long)",
-            metrics.get("mean_long_leg_return"),
-            self._leg_after_cost(metrics.get("mean_long_leg_return"), mean_daily_cost),
-        )
-        add_row(
-            "Panel A",
-            "Mean return (short)",
-            metrics.get("mean_short_leg_return"),
-            self._leg_after_cost(metrics.get("mean_short_leg_return"), mean_daily_cost),
-        )
+        # Mean return (long) - percent and real
+        pmean_long_before = metrics.get("pmean_long_leg_return")
+        pmean_long_after = self._leg_after_cost(metrics.get("pmean_long_leg_return"), pmean_daily_cost)
+        mean_long_before = metrics.get("mean_long_leg_return")
+        mean_long_after = self._leg_after_cost(metrics.get("mean_long_leg_return"), mean_daily_cost)
+        add_row("Panel A", "Mean return (long)", pmean_long_before, pmean_long_after, mean_long_before, mean_long_after)
+        
+        # Mean return (short) - percent and real
+        pmean_short_before = metrics.get("pmean_short_leg_return")
+        pmean_short_after = self._leg_after_cost(metrics.get("pmean_short_leg_return"), pmean_daily_cost)
+        mean_short_before = metrics.get("mean_short_leg_return")
+        mean_short_after = self._leg_after_cost(metrics.get("mean_short_leg_return"), mean_daily_cost)
+        add_row("Panel A", "Mean return (short)", pmean_short_before, pmean_short_after, mean_short_before, mean_short_after)
 
+        # Mean return (portfolio) - percent and real
+        pmean_return_before = metrics.get("pmean_daily_return_before_cost") or gross_metrics.get("pmean_return")
+        pmean_return_after = metrics.get("pmean_daily_return_after_cost") or metrics.get("pmean_daily_return") or metrics.get("pmean_return")
         mean_return_before = metrics.get("mean_daily_return_before_cost") or gross_metrics.get("mean_return")
-        mean_return_after = metrics.get("mean_daily_return") or metrics.get("mean_return")
-        add_row("Panel A", "Mean return (portfolio)", mean_return_before, mean_return_after)
+        mean_return_after = metrics.get("mean_daily_return_after_cost") or metrics.get("mean_daily_return") or metrics.get("mean_return")
+        add_row("Panel A", "Mean return (portfolio)", pmean_return_before, pmean_return_after, mean_return_before, mean_return_after)
 
+        # Std. dev. - percent and real
+        pstd_before = metrics.get("pstd_return_before_cost") or gross_metrics.get("pstandard_deviation")
+        pstd_after = metrics.get("pstd_return_after_cost") or metrics.get("pstandard_deviation")
         std_before = metrics.get("std_return_before_cost") or gross_metrics.get("standard_deviation")
-        std_after = metrics.get("standard_deviation")
-        add_row("Panel A", "Std. dev.", std_before, std_after)
+        std_after = metrics.get("std_return_after_cost") or metrics.get("standard_deviation")
+        add_row("Panel A", "Std. dev.", pstd_before, pstd_after, std_before, std_after)
 
+        # Skewness - percent and real
+        pskew_before = (gross_metrics or {}).get("pskewness")
+        pskew_after = metrics.get("pskewness")
+        skew_before = (gross_metrics or {}).get("skewness")
+        skew_after = metrics.get("skewness")
+        add_row("Panel A", "Skewness", pskew_before, pskew_after, skew_before, skew_after)
+        
+        # Kurtosis - percent and real
+        pkurt_before = (gross_metrics or {}).get("pkurtosis")
+        pkurt_after = metrics.get("pkurtosis")
+        kurt_before = (gross_metrics or {}).get("kurtosis")
+        kurt_after = metrics.get("kurtosis")
+        add_row("Panel A", "Kurtosis", pkurt_before, pkurt_after, kurt_before, kurt_after)
+
+        # Share > 0 - percent and real
+        pshare_before = metrics.get("pshare_positive_before_cost") or gross_metrics.get("pshare_positive")
+        pshare_after = metrics.get("pshare_positive_after_cost") or metrics.get("pshare_positive")
         share_before = metrics.get("share_positive_before_cost") or gross_metrics.get("share_positive")
-        share_after = metrics.get("share_positive")
-        add_row("Panel A", "Share > 0", share_before, share_after)
+        share_after = metrics.get("share_positive_after_cost") or metrics.get("share_positive")
+        add_row("Panel A", "Share > 0", pshare_before, pshare_after, share_before, share_after)
 
-        add_row(
-            "Panel A",
-            "Minimum return",
-            metrics.get("min_return_before_cost") or gross_metrics.get("min_return"),
-            metrics.get("min_return"),
-        )
-        add_row(
-            "Panel A",
-            "First quartile",
-            metrics.get("quantile_25_before_cost") or gross_metrics.get("quantile_25"),
-            metrics.get("quantile_25"),
-        )
-        add_row(
-            "Panel A",
-            "Median return",
-            metrics.get("median_return_before_cost") or gross_metrics.get("median"),
-            metrics.get("median_return") or metrics.get("median"),
-        )
-        add_row(
-            "Panel A",
-            "Third quartile",
-            metrics.get("quantile_75_before_cost") or gross_metrics.get("quantile_75"),
-            metrics.get("quantile_75"),
-        )
-        add_row(
-            "Panel A",
-            "Maximum return",
-            metrics.get("max_return_before_cost") or gross_metrics.get("max_return"),
-            metrics.get("max_return"),
-        )
-        add_row(
-            "Panel A",
-            "Kurtosis",
-            (gross_metrics or {}).get("kurtosis"),
-            metrics.get("kurtosis"),
-        )
-        add_row(
-            "Panel A",
-            "Newey-West SE",
-            metrics.get("newey_west_std_error_before_cost") or gross_metrics.get("newey_west_std_error"),
-            metrics.get("newey_west_std_error"),
-        )
-        add_row(
-            "Panel A",
-            "Newey-West t-stat",
-            metrics.get("newey_west_t_stat_before_cost") or gross_metrics.get("newey_west_t_stat"),
-            metrics.get("newey_west_t_stat"),
-        )
-        add_row(
-            "Panel A",
-            "Standard error",
-            metrics.get("standard_error_before_cost") or gross_metrics.get("standard_error"),
-            metrics.get("standard_error"),
-        )
-        add_row(
-            "Panel A",
-            "t-stat (iid)",
-            metrics.get("t_stat_before_cost") or gross_metrics.get("t_stat"),
-            metrics.get("t_stat"),
-        )
+        # Minimum return - percent and real
+        pmin_before = metrics.get("pmin_return_before_cost") or gross_metrics.get("pmin_return")
+        pmin_after = metrics.get("pmin_return_after_cost") or metrics.get("pmin_return")
+        min_before = metrics.get("min_return_before_cost") or gross_metrics.get("min_return")
+        min_after = metrics.get("min_return_after_cost") or metrics.get("min_return")
+        add_row("Panel A", "Minimum return", pmin_before, pmin_after, min_before, min_after)
+        
+        # First quartile - percent and real
+        pq25_before = metrics.get("pquantile_25_before_cost") or gross_metrics.get("pquantile_25")
+        pq25_after = metrics.get("pquantile_25_after_cost") or metrics.get("pquantile_25")
+        q25_before = metrics.get("quantile_25_before_cost") or gross_metrics.get("quantile_25")
+        q25_after = metrics.get("quantile_25_after_cost") or metrics.get("quantile_25")
+        add_row("Panel A", "First quartile", pq25_before, pq25_after, q25_before, q25_after)
+        
+        # Median return - percent and real
+        pmedian_before = metrics.get("pmedian_return_before_cost") or gross_metrics.get("pmedian")
+        pmedian_after = metrics.get("pmedian_return_after_cost") or metrics.get("pmedian_return") or metrics.get("pmedian")
+        median_before = metrics.get("median_return_before_cost") or gross_metrics.get("median")
+        median_after = metrics.get("median_return_after_cost") or metrics.get("median_return") or metrics.get("median")
+        add_row("Panel A", "Median return", pmedian_before, pmedian_after, median_before, median_after)
+        
+        # Third quartile - percent and real
+        pq75_before = metrics.get("pquantile_75_before_cost") or gross_metrics.get("pquantile_75")
+        pq75_after = metrics.get("pquantile_75_after_cost") or metrics.get("pquantile_75")
+        q75_before = metrics.get("quantile_75_before_cost") or gross_metrics.get("quantile_75")
+        q75_after = metrics.get("quantile_75_after_cost") or metrics.get("quantile_75")
+        add_row("Panel A", "Third quartile", pq75_before, pq75_after, q75_before, q75_after)
+        
+        # Maximum return - percent and real
+        pmax_before = metrics.get("pmax_return_before_cost") or gross_metrics.get("pmax_return")
+        pmax_after = metrics.get("pmax_return_after_cost") or metrics.get("pmax_return")
+        max_before = metrics.get("max_return_before_cost") or gross_metrics.get("max_return")
+        max_after = metrics.get("max_return_after_cost") or metrics.get("max_return")
+        add_row("Panel A", "Maximum return", pmax_before, pmax_after, max_before, max_after)
+        
+        # Newey-West SE - percent and real
+        pnw_se_before = metrics.get("pnewey_west_std_error_before_cost") or gross_metrics.get("pnewey_west_std_error")
+        pnw_se_after = metrics.get("pnewey_west_std_error_after_cost") or metrics.get("pnewey_west_std_error")
+        nw_se_before = metrics.get("newey_west_std_error_before_cost") or gross_metrics.get("newey_west_std_error")
+        nw_se_after = metrics.get("newey_west_std_error_after_cost") or metrics.get("newey_west_std_error")
+        add_row("Panel A", "Newey-West SE", pnw_se_before, pnw_se_after, nw_se_before, nw_se_after)
 
         # Panel B: Tail risk and drawdowns
-        add_row(
-            "Panel B",
-            "VaR (5%)",
-            (gross_metrics or {}).get("var_5pct"),
-            metrics.get("var_5pct"),
-        )
-        add_row(
-            "Panel B",
-            "CVaR (5%)",
-            (gross_metrics or {}).get("cvar_5pct"),
-            metrics.get("cvar_5pct"),
-        )
-        add_row(
-            "Panel B",
-            "VaR (1%)",
-            (gross_metrics or {}).get("var_1pct"),
-            metrics.get("var_1pct"),
-        )
-        add_row(
-            "Panel B",
-            "CVaR (1%)",
-            (gross_metrics or {}).get("cvar_1pct"),
-            metrics.get("cvar_1pct"),
-        )
-        add_row(
-            "Panel B",
-            "Max drawdown (%)",
-            (gross_metrics or {}).get("max_drawdown"),
-            metrics.get("max_drawdown_pct"),
-        )
+        # VaR (5%) - percent and real
+        pvar5_before = (gross_metrics or {}).get("pvar_5pct")
+        pvar5_after = metrics.get("pvar_5pct_after_cost") or metrics.get("pvar_5pct")
+        var5_before = (gross_metrics or {}).get("var_5pct")
+        var5_after = metrics.get("var_5pct_after_cost") or metrics.get("var_5pct")
+        add_row("Panel B", "VaR (5%)", pvar5_before, pvar5_after, var5_before, var5_after)
+        
+        # CVaR (5%) - percent and real
+        pcvar5_before = (gross_metrics or {}).get("pcvar_5pct")
+        pcvar5_after = metrics.get("pcvar_5pct_after_cost") or metrics.get("pcvar_5pct")
+        cvar5_before = (gross_metrics or {}).get("cvar_5pct")
+        cvar5_after = metrics.get("cvar_5pct_after_cost") or metrics.get("cvar_5pct")
+        add_row("Panel B", "CVaR (5%)", pcvar5_before, pcvar5_after, cvar5_before, cvar5_after)
+        
+        # VaR (1%) - percent and real
+        pvar1_before = (gross_metrics or {}).get("pvar_1pct")
+        pvar1_after = metrics.get("pvar_1pct_after_cost") or metrics.get("pvar_1pct")
+        var1_before = (gross_metrics or {}).get("var_1pct")
+        var1_after = metrics.get("var_1pct_after_cost") or metrics.get("var_1pct")
+        add_row("Panel B", "VaR (1%)", pvar1_before, pvar1_after, var1_before, var1_after)
+        
+        # CVaR (1%) - percent and real
+        pcvar1_before = (gross_metrics or {}).get("pcvar_1pct")
+        pcvar1_after = metrics.get("pcvar_1pct_after_cost") or metrics.get("pcvar_1pct")
+        cvar1_before = (gross_metrics or {}).get("cvar_1pct")
+        cvar1_after = metrics.get("cvar_1pct_after_cost") or metrics.get("cvar_1pct")
+        add_row("Panel B", "CVaR (1%)", pcvar1_before, pcvar1_after, cvar1_before, cvar1_after)
+        
+        # Max drawdown - percent and real
+        pmaxdd_before = (gross_metrics or {}).get("pmax_drawdown")
+        pmaxdd_after = metrics.get("pmax_drawdown_after_cost") or metrics.get("pmax_drawdown")
+        maxdd_before = (gross_metrics or {}).get("max_drawdown")
+        maxdd_after = metrics.get("max_drawdown_after_cost") or metrics.get("max_drawdown")
+        add_row("Panel B", "Max drawdown", pmaxdd_before, pmaxdd_after, maxdd_before, maxdd_after)
 
         # Panel C: Annualised performance
-        add_row(
-            "Panel C",
-            "Return p.a.",
-            (gross_metrics or {}).get("annualized_return") or metrics.get("annualized_return_before_cost"),
-            metrics.get("annualized_return"),
-        )
+        # Return p.a. - percent and real
+        pret_ann_before = (gross_metrics or {}).get("pannualized_return") or metrics.get("pannualized_return_before_cost")
+        pret_ann_after = metrics.get("pannualized_return_after_cost") or metrics.get("pannualized_return")
+        ret_ann_before = (gross_metrics or {}).get("annualized_return") or metrics.get("annualized_return_before_cost")
+        ret_ann_after = metrics.get("annualized_return_after_cost") or metrics.get("annualized_return")
+        add_row("Panel C", "Return p.a.", pret_ann_before, pret_ann_after, ret_ann_before, ret_ann_after)
 
-        sp500_ann = self.benchmark_metrics.get("sp500_annualized_return")
+        # Std. dev. p.a. - percent and real
+        pvol_before = (gross_metrics or {}).get("pvolatility_annualized")
+        pvol_after = metrics.get("pvolatility_annualized_after_cost") or metrics.get("pvolatility_annualized")
+        vol_before = (gross_metrics or {}).get("volatility_annualized")
+        vol_after = metrics.get("volatility_annualized_after_cost") or metrics.get("volatility_annualized")
+        add_row("Panel C", "Std. dev. p.a.", pvol_before, pvol_after, vol_before, vol_after)
+        
+        # Downside dev. p.a. - percent and real
+        pdownside_before = (gross_metrics or {}).get("pdownside_deviation_annualized")
+        pdownside_after = metrics.get("pdownside_deviation_annualized_after_cost") or metrics.get("pdownside_deviation_annualized")
+        downside_before = (gross_metrics or {}).get("downside_deviation_annualized")
+        downside_after = metrics.get("downside_deviation_annualized_after_cost") or metrics.get("downside_deviation_annualized")
+        add_row("Panel C", "Downside dev. p.a.", pdownside_before, pdownside_after, downside_before, downside_after)
+
+        # Sharpe ratio - percent and real
+        psharpe_before = (gross_metrics or {}).get("psharpe_ratio")
+        psharpe_after = metrics.get("psharpe_ratio_after_cost") or metrics.get("psharpe_ratio")
+        sharpe_before = (gross_metrics or {}).get("sharpe_ratio")
+        sharpe_after = metrics.get("sharpe_ratio_after_cost") or metrics.get("sharpe_ratio")
+        add_row("Panel C", "Sharpe ratio", psharpe_before, psharpe_after, sharpe_before, sharpe_after)
+        
+        # Sortino ratio - percent and real
+        psortino_before = (gross_metrics or {}).get("psortino_ratio")
+        psortino_after = metrics.get("psortino_ratio_after_cost") or metrics.get("psortino_ratio")
+        sortino_before = (gross_metrics or {}).get("sortino_ratio")
+        sortino_after = metrics.get("sortino_ratio_after_cost") or metrics.get("sortino_ratio")
+        add_row("Panel C", "Sortino ratio", psortino_before, psortino_after, sortino_before, sortino_after)
+
+        # Excess return p.a. - percent and real
+        sp500_pann = self.benchmark_metrics.get("sp500_pannualized_return")
+        sp500_ann = None  # S&P 500 has no real values (market index)
+        pexcess_before = None
         excess_before = None
+        if sp500_pann is not None:
+            pbefore_val = (gross_metrics or {}).get("pannualized_return") or metrics.get("pannualized_return_before_cost")
+            if pbefore_val is not None:
+                pexcess_before = float(pbefore_val) - float(sp500_pann)
         if sp500_ann is not None:
             before_val = (gross_metrics or {}).get("annualized_return") or metrics.get("annualized_return_before_cost")
             if before_val is not None:
                 excess_before = float(before_val) - float(sp500_ann)
+        pexcess_after = self.benchmark_metrics.get("pexcess_return_vs_sp500")
         excess_after = self.benchmark_metrics.get("excess_return_vs_sp500")
-        add_row("Panel C", "Excess return p.a.", excess_before, excess_after)
+        add_row("Panel C", "Excess return p.a.", pexcess_before, pexcess_after, excess_before, excess_after)
 
-        add_row(
-            "Panel C",
-            "Std. dev. p.a.",
-            (gross_metrics or {}).get("volatility_annualized"),
-            metrics.get("volatility_annualized"),
-        )
-        add_row(
-            "Panel C",
-            "Downside dev. p.a.",
-            (gross_metrics or {}).get("downside_deviation_annualized"),
-            metrics.get("downside_deviation_annualized"),
-        )
-        add_row(
-            "Panel C",
-            "Sharpe ratio",
-            (gross_metrics or {}).get("sharpe_ratio"),
-            metrics.get("sharpe_ratio"),
-        )
-        add_row(
-            "Panel C",
-            "Sortino ratio",
-            (gross_metrics or {}).get("sortino_ratio"),
-            metrics.get("sortino_ratio"),
-        )
+        
+        
+        
 
-        # Benchmarks
+        # Benchmarks (S&P 500 returns are percent returns, so use percent metrics)
         if self.benchmark_metrics:
+            sp500_pret = self.benchmark_metrics.get("sp500_pannualized_return")
+            sp500_pvol = self.benchmark_metrics.get("sp500_pvolatility_annualized")
+            sp500_psharpe = self.benchmark_metrics.get("sp500_psharpe_ratio")
+            # Real values would be None for S&P 500 since it's a percent benchmark
             add_row(
                 "Benchmarks",
                 "Return p.a. (S&P 500)",
-                self.benchmark_metrics.get("sp500_annualized_return"),
-                self.benchmark_metrics.get("sp500_annualized_return"),
+                sp500_pret,
+                sp500_pret,
+                None,  # No real value for S&P 500
+                None,
                 model="S&P 500",
             )
             add_row(
                 "Benchmarks",
                 "Volatility p.a. (S&P 500)",
-                self.benchmark_metrics.get("sp500_volatility"),
-                self.benchmark_metrics.get("sp500_volatility"),
+                sp500_pvol,
+                sp500_pvol,
+                None,  # No real value for S&P 500
+                None,
                 model="S&P 500",
             )
             add_row(
                 "Benchmarks",
                 "Sharpe (S&P 500)",
-                self.benchmark_metrics.get("sp500_sharpe"),
-                self.benchmark_metrics.get("sp500_sharpe"),
+                sp500_psharpe,
+                sp500_psharpe,
+                None,  # No real value for S&P 500
+                None,
                 model="S&P 500",
             )
 
@@ -1267,13 +1332,29 @@ class EvaluationAnalysis:
             },
             "top_k": baseline_hit if isinstance(baseline_hit, dict) else baseline_hit,
             "portfolio": {
+                # Percent metrics
+                "pmean_daily_return": portfolio_stats.get("pmean_daily_return")
+                if isinstance(portfolio_stats, dict)
+                else None,
+                "psharpe_ratio": portfolio_stats.get("psharpe_ratio")
+                if isinstance(portfolio_stats, dict)
+                else None,
+                "pmax_drawdown": portfolio_stats.get("pmax_drawdown")
+                if isinstance(portfolio_stats, dict)
+                else None,
+                "ppercentile_vs_random": portfolio_stats.get("prandom_benchmark_context", {}).get(
+                    "percentile_rank"
+                )
+                if isinstance(portfolio_stats, dict)
+                else None,
+                # Real metrics
                 "mean_daily_return": portfolio_stats.get("mean_daily_return")
                 if isinstance(portfolio_stats, dict)
                 else None,
                 "sharpe_ratio": portfolio_stats.get("sharpe_ratio")
                 if isinstance(portfolio_stats, dict)
                 else None,
-                "max_drawdown_pct": portfolio_stats.get("max_drawdown_pct")
+                "max_drawdown": portfolio_stats.get("max_drawdown")
                 if isinstance(portfolio_stats, dict)
                 else None,
                 "percentile_vs_random": portfolio_stats.get("random_benchmark_context", {}).get(

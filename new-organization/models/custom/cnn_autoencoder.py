@@ -63,7 +63,20 @@ class CNNAutoEncoder(BaseModel):
         # nn.MSELoss()
         # optimizer = torch.optim.Adam()
 
-    def forward(self, x, params=None):
+    def forward(self, x, params=None, return_encoded=False):
+        """
+        Forward pass through CNN autoencoder.
+        
+        Args:
+            x: Input tensor of shape (batch, seq_len, num_features)
+            params: Optional parameters (unused)
+            return_encoded: If True, return encoder output (compressed representation) instead of decoder output.
+                          Default: False (returns decoder output for reconstruction)
+        
+        Returns:
+            If return_encoded=False: Decoder output (batch, seq_len, num_features) - same shape as input
+            If return_encoded=True: Encoder output (batch, seq_len, 2*num_features) - compressed representation
+        """
         # assume x in shape (batch, 31, num_features) = (batch, time_steps, features)
         # num_features can be 3 (price only), 7 (price + 4 NLP), 13 (price + 10 NLP), etc.
         # Normalize input
@@ -74,31 +87,39 @@ class CNNAutoEncoder(BaseModel):
         short_enc = short_enc.transpose(1, 2)  # [batch, channels, 11] -> [batch, 11, channels]
         # Normalize after short encoder
         short_enc = self.short_enc_norm(short_enc)
-        # Transpose back to [batch, channels, time] for decoder
-        short_enc = short_enc.transpose(1, 2)  # [batch, 11, channels] -> [batch, channels, 11]
         
         long_enc = self.long_enc_conv(x[:, 11:, :].transpose(1, 2))   # [batch, num_features, 20] -> [batch, channels, 20]
         # Transpose to [batch, time, channels] for normalization
         long_enc = long_enc.transpose(1, 2)  # [batch, channels, 20] -> [batch, 20, channels]
         # Normalize after long encoder
         long_enc = self.long_enc_norm(long_enc)
-        # Transpose back to [batch, channels, time] for decoder
-        long_enc = long_enc.transpose(1, 2)  # [batch, 20, channels] -> [batch, channels, 20]
         
-        short_dec = self.short_dec_conv(short_enc)  # [batch, channels, 11] -> [batch, num_features, 11]
-        # Transpose to [batch, time, channels] for normalization
+        # Always decode (even if returning encoded) so hooks can capture decoder output for loss
+        # Transpose encoder outputs to [batch, channels, time] for decoder
+        short_enc_for_decoder = short_enc.transpose(1, 2)  # [batch, 11, channels] -> [batch, channels, 11]
+        long_enc_for_decoder = long_enc.transpose(1, 2)  # [batch, 20, channels] -> [batch, channels, 20]
+        
+        # Decode short sequence (hooks will capture norm outputs)
+        short_dec = self.short_dec_conv(short_enc_for_decoder)  # [batch, channels, 11] -> [batch, num_features, 11]
         short_dec = short_dec.transpose(1, 2)  # [batch, num_features, 11] -> [batch, 11, num_features]
-        # Normalize after short decoder
         short_dec = self.short_dec_norm(short_dec)
         
-        long_dec = self.long_dec_conv(long_enc)    # [batch, channels, 20] -> [batch, num_features, 20]
-        # Transpose to [batch, time, channels] for normalization
-        long_dec = long_dec.transpose(1, 2)  # [batch, num_features, 20] -> [batch, 20, num_features] 
-        # Normalize after long decoder
+        # Decode long sequence
+        long_dec = self.long_dec_conv(long_enc_for_decoder)  # [batch, channels, 20] -> [batch, num_features, 20]
+        long_dec = long_dec.transpose(1, 2)  # [batch, num_features, 20] -> [batch, 20, num_features]
         long_dec = self.long_dec_norm(long_dec)
-
-        x = torch.cat((short_dec, long_dec), dim=1)  # [batch, 31, num_features]
-        return x
+        
+        # Concatenate in correct order: short (first 11) then long (last 20)
+        decoded = torch.cat((short_dec, long_dec), dim=1)  # [batch, 31, num_features]
+        
+        if return_encoded:
+            # Return encoder output (compressed representation) concatenated
+            # Concatenate encoder outputs: short (first 11) then long (last 20)
+            encoded_concatenated = torch.cat((short_enc, long_enc), dim=1)  # [batch, 31, 2*num_features]
+            return encoded_concatenated
+        
+        # Return decoder output (for reconstruction loss or when not using return_encoded)
+        return decoded
 
     @classmethod
     def from_config(cls, model_config):

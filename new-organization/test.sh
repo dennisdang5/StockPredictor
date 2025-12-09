@@ -17,7 +17,7 @@ from main import get_model_config_by_name
 import util
 
 # Get the exact configs that would be used by the training scripts
-config_names = ["aelstm_base", "cnnlstm_base", "cnnaelstm_base"]
+config_names = ["aelstm_base", "caelstm_base"]
 
 print("Creating model configs for mapping file...")
 print("=" * 80)

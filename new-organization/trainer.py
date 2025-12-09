@@ -24,8 +24,9 @@ except ImportError:
 from models import create_model, ModelRegistry, get_available_models
 from models.configs import (
     BaseModelConfig,
-    LSTMConfig, CNNLSTMConfig, AELSTMConfig, CNNAELSTMConfig, TimesNetConfig, TabPFNConfig
+    LSTMConfig, CAELSTMConfig, AELSTMConfig, TimesNetConfig, TabPFNConfig
 )
+from models.losses import LossRegistry, get_loss, BaseLoss
 from models.external.TabPFN import TabPFNAdapter
 import util
 from data_sources import YFinanceDataSource, StaticFileDataSource, DataSource
@@ -41,6 +42,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler
 from scipy.stats import norm
+from scipy import stats as scipy_stats
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.stattools import adfuller, acf, pacf
 import warnings
@@ -264,7 +266,7 @@ class TrainerConfig:
             k: Number of top/bottom positions for long-short portfolio
             cost_bps_per_side: Transaction costs per side in basis points
             save_every_epochs: Save model every N epochs (0 to disable periodic saves)
-            model_type: Type of model ("LSTM", "CNNLSTM", "AELSTM", "CNNAELSTM", "TimesNet", etc.)
+            model_type: Type of model ("LSTM", "CAELSTM", "AELSTM", "TimesNet", etc.)
             model_config: Model-specific configuration object. Must be an instance of the appropriate
                          config class (e.g., LSTMConfig for "LSTM", TimesNetConfig for "TimesNet").
                          Users must create this config object themselves - see class docstring for examples.
@@ -563,7 +565,13 @@ class EarlyStopper():
                     return True
             return False
         
-
+def get_loss_function(config):
+    if config.model_type == "AELSTM":
+        return nn.MSELoss()
+    elif config.prediction_type == "classification":
+        return nn.CrossEntropyLoss()
+    else:
+        raise ValueError(f"Invalid prediction type: {config.prediction_type}")
 class Trainer():
     def __init__(self, config):
         """
@@ -919,6 +927,13 @@ class Trainer():
             self.save_path = self.config.saved_model
             if os.path.exists(self.config.saved_model):
                 existing_model_path = self.config.saved_model
+            # Generate model_id and save mapping even when saved_model is provided
+            # This ensures the model config is registered for future lookups
+            model_id = util._get_model_id(self.config.model_config)
+            util._save_model_mapping(model_id, self.config.model_config)
+            if self.is_main:
+                print(f"[model] Using provided model path: {self.save_path}")
+                print(f"[model] Registered config in mapping (ID: {model_id})")
         else:
             model_id, existing_model_path = util.find_model_by_config(self.config.model_config)
             if existing_model_path is not None:
@@ -1026,7 +1041,14 @@ class Trainer():
                     print(f"[load] Starting training with initialized weights (Xavier/orthogonal) (new model)")
 
         self.optimizer = optim.Adam(self.Model.parameters(), lr=5e-5, weight_decay=1e-5)
-        self.loss_fn = nn.MSELoss()
+        
+        # Initialize intermediate storage and hook handles for loss functions
+        self.intermediate_storage = {}
+        self.hook_handles = []
+        
+        # Setup loss function (may register hooks if needed)
+        self._setup_loss_function()
+        
         self.max_grad_norm = 0.5
         early_stop_patience = self.config.early_stop_patience
         early_stop_min_delta = self.config.early_stop_min_delta
@@ -1112,6 +1134,133 @@ class Trainer():
             final_config.enc_in = num_features
         
         return final_config
+    
+    def _setup_loss_function(self):
+        """
+        Setup loss function based on model config.
+        Registers forward hooks if loss function requires intermediate outputs.
+        """
+        # Skip for TabPFN (handled separately)
+        if self.is_tabpfn:
+            return
+        
+        # Get loss config from model config, default to MSE if not specified
+        loss_config = None
+        if self.config.model_config and hasattr(self.config.model_config, 'loss_config'):
+            loss_config = self.config.model_config.loss_config
+        
+        if loss_config is None:
+            # Default: use MSE loss
+            loss_name = "mse"
+            loss_kwargs = {}
+            intermediate_layers = []
+        else:
+            loss_name = loss_config.get('loss_name', 'mse')
+            loss_kwargs = loss_config.get('loss_kwargs', {})
+            intermediate_layers = loss_config.get('intermediate_layers', [])
+        
+        # Get loss function from registry
+        try:
+            self.loss_fn = LossRegistry.get_loss(loss_name, loss_kwargs)
+        except ValueError as e:
+            if self.is_main:
+                print(f"[WARNING] Failed to get loss '{loss_name}': {e}")
+                print(f"[WARNING] Falling back to MSE loss")
+            self.loss_fn = LossRegistry.get_loss("mse", {})
+        
+        # Register hooks if loss requires intermediates and model exists
+        if self.loss_fn.requires_intermediates() and self.Model is not None:
+            # Get target layers from loss function or config
+            hook_targets = self.loss_fn.get_hook_targets()
+            if not hook_targets and intermediate_layers:
+                hook_targets = intermediate_layers
+            
+            if hook_targets:
+                self._register_intermediate_hooks(hook_targets)
+                if self.is_main:
+                    print(f"[loss] Registered hooks for intermediate layers: {hook_targets}")
+            elif self.is_main:
+                print(f"[WARNING] Loss function requires intermediates but no hook targets specified")
+        elif self.is_main:
+            print(f"[loss] Using loss function: {loss_name}")
+    
+    def _register_intermediate_hooks(self, layer_names: list):
+        """
+        Register forward hooks on specified model layers to capture intermediate outputs.
+        
+        Args:
+            layer_names: List of layer names/paths to hook (e.g., ["encoder", "decoder", "AE.encoder"])
+        """
+        # Skip if model doesn't exist (e.g., TabPFN)
+        if self.Model is None:
+            return
+        
+        # Get the actual model (handle DDP/DataParallel wrapping)
+        model = self.Model.module if hasattr(self.Model, "module") else self.Model
+        
+        # Remove any existing hooks first
+        self._remove_hooks()
+        
+        for layer_name in layer_names:
+            # Try to find the layer in the model
+            layer = self._get_layer_by_name(model, layer_name)
+            if layer is None:
+                if self.is_main:
+                    print(f"[WARNING] Could not find layer '{layer_name}' for hook registration")
+                continue
+            
+            # Create hook function that stores output
+            def make_hook(name):
+                def hook_fn(module, input, output):
+                    # Store output in intermediate_storage
+                    self.intermediate_storage[name] = output
+                return hook_fn
+            
+            # Register forward hook
+            handle = layer.register_forward_hook(make_hook(layer_name))
+            self.hook_handles.append(handle)
+    
+    def _get_layer_by_name(self, model, layer_name: str):
+        """
+        Get a layer/module from model by name/path.
+        
+        Supports dot notation for nested modules (e.g., "AE.encoder").
+        
+        Args:
+            model: PyTorch model
+            layer_name: Name or path of layer (e.g., "encoder", "AE.encoder")
+        
+        Returns:
+            Module if found, None otherwise
+        """
+        try:
+            # Try direct attribute access first
+            if hasattr(model, layer_name):
+                return getattr(model, layer_name)
+            
+            # Try dot notation for nested modules
+            parts = layer_name.split('.')
+            current = model
+            for part in parts:
+                if hasattr(current, part):
+                    current = getattr(current, part)
+                else:
+                    return None
+            return current
+        except Exception:
+            return None
+    
+    def _clear_intermediates(self):
+        """Clear intermediate storage dictionary (call before each forward pass)."""
+        self.intermediate_storage.clear()
+        # Also store input for reconstruction losses if needed
+        # This will be set in _call_model if loss requires it
+    
+    def _remove_hooks(self):
+        """Remove all registered forward hooks."""
+        for handle in self.hook_handles:
+            handle.remove()
+        self.hook_handles.clear()
     
     def _synchronize_skip_decision(self, should_skip):
         """
@@ -1940,7 +2089,16 @@ class Trainer():
     def _call_model(self, inputs, indices, split: str):
         """
         Helper to route a batch through the model with optional extra params.
+        Clears intermediate storage before forward pass and stores input if needed.
         """
+        # Clear intermediates before forward pass
+        self._clear_intermediates()
+        
+        # Store input if loss function requires it (for reconstruction losses)
+        if self.loss_fn.requires_intermediates():
+            self.intermediate_storage["input"] = inputs
+        
+        # Forward pass (hooks will populate intermediate_storage)
         params = self._build_model_params(indices, split)
         if params is not None:
             return self.Model(inputs, params=params)
@@ -2049,7 +2207,9 @@ class Trainer():
                             if self.is_main:
                                 print(f"[WARNING] NaN/Inf in model output at batch {pbar.n} (weights OK, skipping batch)")
                             continue
-                    loss = self.loss_fn(Y_pred, Y_batch)
+                    # Compute loss with intermediates if needed
+                    intermediates = self.intermediate_storage if self.loss_fn.requires_intermediates() else None
+                    loss = self.loss_fn(Y_pred, Y_batch, intermediates=intermediates)
                 # Check for NaN/Inf in loss (synchronized across ranks)
                 has_nan_loss = torch.isnan(loss) or torch.isinf(loss)
                 if self._synchronize_skip_decision(has_nan_loss):
@@ -2134,7 +2294,9 @@ class Trainer():
                         if self.is_main:
                             print(f"[WARNING] NaN/Inf in model output at batch {pbar.n} (weights OK, skipping batch)")
                         continue
-                loss = self.loss_fn(Y_pred, Y_batch)
+                # Compute loss with intermediates if needed
+                intermediates = self.intermediate_storage if self.loss_fn.requires_intermediates() else None
+                loss = self.loss_fn(Y_pred, Y_batch, intermediates=intermediates)
                 # Check for NaN/Inf in loss (synchronized across ranks)
                 has_nan_loss = torch.isnan(loss) or torch.isinf(loss)
                 if self._synchronize_skip_decision(has_nan_loss):
@@ -2266,13 +2428,17 @@ class Trainer():
                         if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                             val_nan_model_output += 1
                             continue
-                        loss = self.loss_fn(Y_pred, Y_batch)
+                        # Compute loss with intermediates if needed
+                        intermediates = self.intermediate_storage if self.loss_fn.requires_intermediates() else None
+                        loss = self.loss_fn(Y_pred, Y_batch, intermediates=intermediates)
                 else:
                     Y_pred = self._call_model(X_batch, indices, split="val")
                     if torch.isnan(Y_pred).any() or torch.isinf(Y_pred).any():
                         val_nan_model_output += 1
                         continue
-                    loss = self.loss_fn(Y_pred, Y_batch)
+                    # Compute loss with intermediates if needed
+                    intermediates = self.intermediate_storage if self.loss_fn.requires_intermediates() else None
+                    loss = self.loss_fn(Y_pred, Y_batch, intermediates=intermediates)
                 
                 if torch.isnan(loss) or torch.isinf(loss):
                     val_nan_loss += 1
@@ -2753,17 +2919,13 @@ class Trainer():
         q3 = np.percentile(returns, 75)
         rmax = np.max(returns)
         
-        # Skewness
-        if sigma_daily > 0:
-            skew = np.mean(((returns - mu_daily) / sigma_daily) ** 3)
+        # Skewness and kurtosis (using scipy for consistency with evaluator.py)
+        if returns.size > 2:
+            skew = float(scipy_stats.skew(returns))
+            kurt = float(scipy_stats.kurtosis(returns))  # Excess kurtosis (consistent with evaluator.py)
         else:
-            skew = 0
-        
-        # Kurtosis
-        if sigma_daily > 0:
-            kurt = np.mean(((returns - mu_daily) / sigma_daily) ** 4)
-        else:
-            kurt = 0
+            skew = 0.0
+            kurt = 0.0
         
         # Outperformance vs random (compare to zero-mean random walk)
         random_benchmark_return = 0  # Random walk has zero expected return
@@ -3317,8 +3479,9 @@ class Trainer():
                     for d, score, ret in zip(batch_dates, scores, realized_rets):
                         by_date.setdefault(d, []).append((score, ret))
                 
-                # Calculate test loss
-                loss = self.loss_fn(Y_pred, Y_batch)
+                # Calculate test loss with intermediates if needed
+                intermediates = self.intermediate_storage if self.loss_fn.requires_intermediates() else None
+                loss = self.loss_fn(Y_pred, Y_batch, intermediates=intermediates)
                 test_loss += loss.item()
                 
                 if self.is_main:

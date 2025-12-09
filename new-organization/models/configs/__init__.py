@@ -5,9 +5,8 @@ Model configuration classes.
 from .base_config import BaseModelConfig
 from .model_configs import (
     LSTMConfig,
-    CNNLSTMConfig,
+    CAELSTMConfig,
     AELSTMConfig,
-    CNNAELSTMConfig,
     AutoEncoderConfig,
     CNNAutoEncoderConfig,
     TimesNetConfig,
@@ -19,9 +18,8 @@ from .model_configs import (
 __all__ = [
     'BaseModelConfig',
     'LSTMConfig',
-    'CNNLSTMConfig',
+    'CAELSTMConfig',
     'AELSTMConfig',
-    'CNNAELSTMConfig',
     'AutoEncoderConfig',
     'CNNAutoEncoderConfig',
     'TimesNetConfig',
