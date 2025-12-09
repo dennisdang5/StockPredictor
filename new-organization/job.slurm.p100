@@ -7,21 +7,18 @@
 #SBATCH --time=00:30:00
 #SBATCH --account=liu32_1378
 # allow any of these GPUs (so P100 jobs can land)
-#SBATCH --constraint=v100|a40|p100
-#SBATCH --constraint=xeon-2640v4
+#SBATCH --constraint=p100
 
 set -euo pipefail
 
-# 1) Minimal modules
+#    If you're using PyTorch wheels/conda, you usually don't need cluster CUDA modules at all.
 module purge
-module load ver/2506
+module load ver/2506  gcc/14.3.0
+module load python/3.11.13
 
-# predefine defaults so nounset doesn't complain
-export MKL_INTERFACE_LAYER=${MKL_INTERFACE_LAYER:-LP64}
-export MKL_THREADING_LAYER=${MKL_THREADING_LAYER:-GNU}
-
-# 2) Initialize conda for batch shells
-source /apps/conda/miniforge3/24.11.3/etc/profile.d/conda.sh
+# 2) Initialize conda for non-interactive shells, then activate your env.
+#    (No 'conda init' needed in your dotfiles.)
+source /scratch1/lkyamamo/stock_prediction/new_train/StockPredictor/.venv/bin/activate
 
 # 3) Detect GPU and choose env
 GPU_NAME="$(command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name --format=csv,noheader | head -1 || echo UNKNOWN)"
