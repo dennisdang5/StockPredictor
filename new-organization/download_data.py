@@ -97,7 +97,7 @@ PERIOD_TYPE = "full"
 PREDICTION_TYPE = "classification"
 
 # NLP options
-USE_NLP = False  # Set to True to include NLP features
+USE_NLP = True  # Set to True to include NLP features
 NLP_METHOD = "aggregated"  # "aggregated" (NYT headlines) or "individual" (yfinance per stock)
 
 # Stock indices option

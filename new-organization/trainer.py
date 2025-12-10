@@ -929,6 +929,9 @@ class Trainer():
                 existing_model_path = self.config.saved_model
             # Generate model_id and save mapping even when saved_model is provided
             # This ensures the model config is registered for future lookups
+            # In distributed mode, synchronize before rank 0 saves mapping
+            if self.is_dist:
+                dist.barrier()
             model_id = util._get_model_id(self.config.model_config)
             util._save_model_mapping(model_id, self.config.model_config)
             if self.is_main:
@@ -948,6 +951,9 @@ class Trainer():
                 if self.is_main:
                     print(f"[model] No matching model found, creating new model (ID: {model_id})")
                     print(f"[model] Model will be saved to: {self.save_path}")
+                # In distributed mode, synchronize before rank 0 saves mapping
+                if self.is_dist:
+                    dist.barrier()
                 util._save_model_mapping(model_id, self.config.model_config)
 
         if self.is_tabpfn:
@@ -1008,6 +1014,16 @@ class Trainer():
         
         if self.is_dist:
             self.Model = DDP(self.Model, device_ids=[self.local_rank], find_unused_parameters=True)
+            
+            # For AELSTM and CAELSTM models, use static graph mode to handle decoder execution
+            # when return_encoded=True. These models train both autoencoder (reconstruction loss)
+            # and LSTM (prediction loss) simultaneously, requiring decoder to always execute
+            # even though its output isn't used in the forward path.
+            if self.model_type_upper in ["AELSTM", "CAELSTM"]:
+                self.Model._set_static_graph()
+                if self.is_main:
+                    print(f"[DDP] Enabled static graph mode for {self.model_type_upper} (multi-task learning: AE reconstruction + LSTM prediction)")
+            
             if self.is_main:
                 print(f"[DDP] using {self.world_size} processes across {dist.get_world_size()} GPUs (find_unused_parameters=True)")
         elif self.device.type == "cuda" and torch.cuda.device_count() > 1:

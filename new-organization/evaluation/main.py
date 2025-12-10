@@ -781,7 +781,6 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
             input_shape=(31,3)
         ))
 
-    """
     # ---------------------------------------------------------------------
     # 12. LSTM Full Base
     # ---------------------------------------------------------------------
@@ -797,11 +796,11 @@ def get_evaluation_configs_legacy() -> List[EvaluationConfig]:
             cost_bps_per_side=5.0,
             use_nlp=False,
             nlp_method=None,
-            create_plots=True,
+            create_plots=True, 
             log_dir="deliverables/evaluation",
-            input_shape=(31,3)
+            input_shape=(31,240)
         ))
-
+    """
     # ---------------------------------------------------------------------
     # 13. LSTM Full NLP (aggregated)
     # ---------------------------------------------------------------------

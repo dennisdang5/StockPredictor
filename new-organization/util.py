@@ -417,10 +417,31 @@ def _save_model_mapping(model_id, model_config):
     """
     Save the ID to model config mapping to disk.
     
+    In distributed training, only rank 0 writes the mapping file to avoid race conditions.
+    Other ranks wait for rank 0 to complete before proceeding.
+    
     Args:
         model_id: Short hash ID
         model_config: Model configuration object
     """
+    # Check if we're in distributed mode and if this is rank 0
+    rank = os.getenv("RANK")
+    is_rank_zero = rank is None or rank == "0"
+    
+    # In distributed mode, synchronize before rank 0 writes
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            # All ranks wait here to ensure synchronization
+            dist.barrier()
+    except (ImportError, RuntimeError):
+        # Not in distributed mode or distributed not initialized, continue normally
+        pass
+    
+    # Only rank 0 (or non-distributed process) writes the mapping file
+    if not is_rank_zero:
+        return
+    
     os.makedirs(MODELS_DIR, exist_ok=True)  # Ensure directory exists
     mapping_path = os.path.join(MODELS_DIR, "_model_mapping.json")
     
@@ -458,6 +479,14 @@ def _save_model_mapping(model_id, model_config):
         # Atomic rename
         import shutil
         shutil.move(temp_path, mapping_path)
+        
+        # Synchronize after rank 0 writes (optional, but ensures all ranks see the update)
+        try:
+            import torch.distributed as dist
+            if dist.is_initialized():
+                dist.barrier()
+        except (ImportError, RuntimeError):
+            pass
     except Exception as e:
         print(f"Warning: Could not save model mapping: {e}")
         import traceback

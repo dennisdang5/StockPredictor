@@ -94,19 +94,19 @@ class CAELSTMModel(BaseModel):
         # Concatenate encoder outputs for LSTM: [batch, seq_len, 2*num_features]
         x = torch.cat((short_enc, long_enc), dim=1)  # [batch, 31, 2*num_features]
         
-        # Store encoder outputs for potential decoder/reconstruction (if needed for loss)
+        # Store encoder outputs for decoder/reconstruction (needed for reconstruction loss)
         # Transpose back to [batch, channels, time] for decoder operations
         short_enc_for_decoder = short_enc.transpose(1, 2)  # [batch, 2*num_features, 20]
         long_enc_for_decoder = long_enc.transpose(1, 2)  # [batch, 2*num_features, 11]
         
-        # Decode short sequence (for reconstruction loss if needed)
+        # Decode short sequence (for reconstruction loss - enables multi-task learning)
         short_dec = self.short_dec_conv(short_enc_for_decoder)  # [batch, channels, 20] -> [batch, num_features, 20]
         # Transpose to [batch, time, channels] for normalization
         short_dec = short_dec.transpose(1, 2)  # [batch, num_features, 20] -> [batch, 20, num_features]
         # Normalize after short decoder
         short_dec = self.short_dec_norm(short_dec)
         
-        # Decode long sequence (for reconstruction loss if needed)
+        # Decode long sequence (for reconstruction loss - enables multi-task learning)
         long_dec = self.long_dec_conv(long_enc_for_decoder)    # [batch, channels, 11] -> [batch, num_features, 11]
         # Transpose to [batch, time, channels] for normalization
         long_dec = long_dec.transpose(1, 2)  # [batch, num_features, 11] -> [batch, 11, num_features] 
