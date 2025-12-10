@@ -72,6 +72,11 @@ class AutoEncoder(BaseModel):
         Returns:
             If return_encoded=False: Decoder output (batch, seq_len, num_features) - same shape as input
             If return_encoded=True: Encoder output reshaped to (batch, seq_len, 2*num_features)
+        
+        Note:
+            Decoder is always executed (even when return_encoded=True) to enable reconstruction loss
+            for multi-task learning (training autoencoder and LSTM simultaneously).
+            DDP compatibility is handled via _set_static_graph() in the trainer.
         """
         # assume x in shape (batch, 31, 3) or (31, 3)
         if x.dim() == 2:
@@ -83,7 +88,8 @@ class AutoEncoder(BaseModel):
         x = self.input_norm(x)
         encoded = self.encoder(x)  # Shape: (batch, 2*dof) where dof = seq_len * num_features
         
-        # Always decode (even if returning encoded) so hooks can capture decoder output for loss
+        # Always decode (even if returning encoded) so hooks can capture decoder output for reconstruction loss
+        # This enables multi-task learning: training autoencoder (reconstruction loss) and LSTM (prediction loss) simultaneously
         decoded = self.decoder(encoded)
         
         if return_encoded:
