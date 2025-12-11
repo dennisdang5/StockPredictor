@@ -4,8 +4,8 @@
 
 source /Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.venv/bin/activate
 
-echo "run lstm nlp full"
-python main_lstm_full_nlp.py
+#echo "run lstm nlp full"
+#python main_lstm_full_nlp.py
 
 echo "run lstm base full"
 python main_lstm_full_base.py

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J portfolio_train
+#SBATCH -J train_final
 #SBATCH --ntasks=4
 #SBATCH --gpus-per-task=2
 #SBATCH --nodes=4
@@ -88,10 +88,10 @@ fi
 echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
 
 SCRIPTS=(
-  "main_timesnet_small_base.py"
-  "main_portfolio_lstm_independent_base.py"
-  "main_portfolio_tabpfn_individual_base.py"
-  "main_portfolio_tabpfn_shared_base.py"
+  "main_caelstm_base.py"
+  "main_aelstm_base.py"
+  "main_caelstm_nlp.py"
+  "main_aelstm_nlp.py"
 )
 
 for SCRIPT in "${SCRIPTS[@]}"; do
