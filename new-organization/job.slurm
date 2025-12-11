@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -J train_final
-#SBATCH --ntasks=4
-#SBATCH --gpus-per-task=2
 #SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=2
 #SBATCH --mem=0
 #SBATCH --partition=gpu
 #SBATCH --time=48:00:00
@@ -80,19 +80,25 @@ MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)
 export MASTER_ADDR
 
 # Processes per node = GPUs per node (fallback if env var missing)
-NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-}
+NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-2}
 if ! [[ "$NPROC_PER_NODE" =~ ^[0-9]+$ ]]; then
   NPROC_PER_NODE=$(nvidia-smi -L | wc -l)
 fi
 
 echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
 
+# Simplified for debugging: run only one script at a time
 SCRIPTS=(
-  "main_caelstm_base.py"
   "main_aelstm_base.py"
-  "main_caelstm_nlp.py"
-  "main_aelstm_nlp.py"
 )
+
+# To run multiple scripts, uncomment the ones you want:
+# SCRIPTS=(
+#   "main_caelstm_base.py"
+#   "main_aelstm_base.py"
+#   "main_caelstm_nlp.py"
+#   "main_aelstm_nlp.py"
+# )
 
 for SCRIPT in "${SCRIPTS[@]}"; do
   MASTER_PORT=$((10000 + RANDOM % 50000))

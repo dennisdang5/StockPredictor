@@ -916,8 +916,10 @@ class Trainer():
                 if self.is_main:
                     print(f"[config] No data available, using estimated input_shape: {input_shape} (lookback={lookback}, estimated_seq_len={estimated_seq_len})")
         except Exception as e:
-            print(f"[ERROR] Failed to determine input_shape: {e}")
-            return None
+            print(f"[ERROR][rank {self.rank}] Failed to determine input_shape: {e}", flush=True)
+            if self.is_dist:
+                dist.destroy_process_group()
+            raise
         
         final_model_config = self._create_model_config(input_shape)
         
@@ -1013,6 +1015,22 @@ class Trainer():
                     )
         
         if self.is_dist:
+            # Sanity check: verify all ranks have the same model size
+            num_params = sum(p.numel() for p in self.Model.parameters())
+            print(f"[RANK {self.rank}] num_params={num_params}", flush=True)
+            
+            # All-gather param counts across ranks
+            local = torch.tensor([num_params], device=self.device)
+            counts = [torch.zeros_like(local) for _ in range(self.world_size)]
+            dist.all_gather(counts, local)
+            
+            if self.is_main:
+                param_counts = [c.item() for c in counts]
+                print(f"[DDP-debug] param counts per rank: {param_counts}", flush=True)
+                if len(set(param_counts)) > 1:
+                    raise RuntimeError(f"Model parameter mismatch across ranks: {param_counts}")
+            
+            # Then wrap in DDP
             self.Model = DDP(self.Model, device_ids=[self.local_rank], find_unused_parameters=True)
             
             # For AELSTM and CAELSTM models, use static graph mode to handle decoder execution
