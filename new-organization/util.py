@@ -688,6 +688,14 @@ def fetch_stock_data(stocks, args, data_source: DataSource, max_retries=3):
     return data_source.fetch_stock_data(stocks, args, max_retries)
 
 def get_data(stocks, args, seq_len, data_source: DataSource, force=False, prediction_type="classification", open_close_data=None, problematic_stocks=None, use_nlp=False, nlp_csv_paths=None, nlp_method="aggregated", period_type="LS", return_stock_indices=False):
+    # #region agent log
+    import json
+    log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+    try:
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "util.py:690", "message": "get_data called", "data": {"use_nlp": use_nlp, "nlp_method": nlp_method, "prediction_type": prediction_type}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}) + "\n")
+    except: pass
+    # #endregion
     """
     Return 12-tuple: (Xtrain, Xval, Xtest, Ytrain, Yval, Ytest, Dtrain, Dval, Dtest, Rev_test, Returns_test, Sp500_test)
     Loads from .npz if present (and not force); otherwise builds from the provided data source,
@@ -749,13 +757,45 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
             return_stock_indices=return_stock_indices
         )
         if cached_data is not None:
+            # #region agent log
+            try:
+                import json
+                log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({"location": "util.py:760", "message": "Cache loaded", "data": {"use_nlp": use_nlp, "nlp_method": nlp_method, "prediction_type": prediction_type}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "E"}) + "\n")
+            except: pass
+            # #endregion
             print(f"[cache] Loaded data from cache (prediction_type={prediction_type}, use_nlp={use_nlp}, nlp_method={nlp_method})")
             return cached_data
         else:
             print(f"[cache] Cache not found (or conditions don't match), will download and process data...")
+            # #region agent log
+            try:
+                import json
+                log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({"location": "util.py:771", "message": "Cache miss, proceeding to download", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+            except: pass
+            # #endregion
     
     # Step 2: Load saved problematic stocks for this time period
+    # #region agent log
+    try:
+        import json
+        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "util.py:774", "message": "Loading problematic stocks", "data": {"args": args}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+    except: pass
+    # #endregion
     problematic_stocks_saved = _load_problematic_stocks(args)
+    # #region agent log
+    try:
+        import json
+        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "util.py:775", "message": "Problematic stocks loaded", "data": {"num_problematic": len(problematic_stocks_saved) if problematic_stocks_saved else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+    except: pass
+    # #endregion
     
     # Step 3: Remove problematic stocks from input set
     if problematic_stocks_saved:
@@ -788,6 +828,14 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
     # Step 5: Download data if needed
     # If open_close_data is provided, use it (avoids redundant download)
     if open_close_data is not None:
+        # #region agent log
+        try:
+            import json
+            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "util.py:806", "message": "Using provided open_close_data", "data": {"num_stocks": len(valid_stocks)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+        except: pass
+        # #endregion
         open_close = open_close_data
         # Get successfully downloaded stocks from the DataFrame columns (use valid_stocks, not original stocks)
         successfully_downloaded_stocks = [stock for stock in valid_stocks if stock in open_close["Open"].columns]
@@ -799,9 +847,24 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         # For large stock lists, use fewer retries to speed up the download
         # Most errors are permanent (delisted, no data for date range), so 1 retry is sufficient
         max_retries = 1 if len(valid_stocks) > 50 else 3
-        
+        # #region agent log
+        try:
+            import json
+            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "util.py:819", "message": "Starting data download", "data": {"num_stocks": len(valid_stocks), "max_retries": max_retries, "time_args": args}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+        except: pass
+        # #endregion
         print(f"[data] Downloading data for {len(valid_stocks)} stocks...")
         open_close, failed_stocks = fetch_stock_data(valid_stocks, args, data_source, max_retries=max_retries)
+        # #region agent log
+        try:
+            import json
+            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "util.py:821", "message": "Data download completed", "data": {"num_failed": len(failed_stocks) if failed_stocks else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+        except: pass
+        # #endregion
         
         validate_dataframe_not_none(open_close, "open_close DataFrame")
 
@@ -835,6 +898,12 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
     # Extract NLP features if requested
     nlp_features_dict = None
     if use_nlp:
+        # #region agent log
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "util.py:837", "message": "NLP extraction starting", "data": {"use_nlp": use_nlp, "nlp_method": nlp_method}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
+        except: pass
+        # #endregion
         print(f"[nlp] Extracting NLP features using method: {nlp_method}...")
         try:
             from nlp_features import extract_daily_nlp_features, extract_daily_nlp_features_yfinance, align_nlp_with_trading_days, get_nlp_feature_vector
@@ -856,12 +925,56 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
                 if nlp_csv_paths is None:
                     import glob
                     from pathlib import Path
-                    # Look for NYT CSV files in the default data directory
-                    nyt_dir = Path(DATA_DIR) / "huggingface_nyt_articles"
-                    nlp_csv_paths = sorted(glob.glob(str(nyt_dir / "new_york_times_stories_*.csv")))
+                    # Look for NYT CSV files in multiple possible locations
+                    possible_dirs = [
+                        Path(DATA_DIR) / "huggingface_nyt_articles",
+                        Path(DATA_DIR).parent / "data" / "huggingface_nyt_articles",  # Alternative location
+                        Path(__file__).parent.parent / "data" / "huggingface_nyt_articles",  # Relative to util.py
+                    ]
+                    # Also check environment variable if set
+                    env_nyt_dir = os.getenv("NYT_DATA_DIR")
+                    if env_nyt_dir:
+                        possible_dirs.insert(0, Path(env_nyt_dir))
+                    
+                    nlp_csv_paths = []
+                    searched_dirs = []
+                    for nyt_dir in possible_dirs:
+                        searched_dirs.append(str(nyt_dir))
+                        csv_files = sorted(glob.glob(str(nyt_dir / "new_york_times_stories_*.csv")))
+                        if csv_files:
+                            nlp_csv_paths.extend(csv_files)
+                            print(f"[nlp] Found {len(csv_files)} NYT CSV files in {nyt_dir}")
+                            break  # Use first location that has files
+                    
+                    # #region agent log
+                    try:
+                        with open(log_path, "a") as f:
+                            f.write(json.dumps({"location": "util.py:861", "message": "NYT CSV search", "data": {"searched_dirs": searched_dirs, "found_files": len(nlp_csv_paths), "files": nlp_csv_paths[:3] if nlp_csv_paths else []}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
+                    except: pass
+                    # #endregion
+                    
                     if not nlp_csv_paths:
-                        import warnings
-                        warnings.warn(f"No NYT CSV files found in {nyt_dir}. NLP features will be disabled.")
+                        error_msg = (
+                            f"\n[nlp] ERROR: No NYT CSV files found for aggregated NLP method.\n"
+                            f"[nlp] Searched in the following directories:\n"
+                        )
+                        for dir_path in searched_dirs:
+                            error_msg += f"  - {dir_path}\n"
+                        error_msg += (
+                            f"\n[nlp] To use aggregated NLP features, you need NYT CSV files named 'new_york_times_stories_*.csv'\n"
+                            f"[nlp] Place them in one of the directories above, or:\n"
+                            f"[nlp]   1. Set environment variable NYT_DATA_DIR to the directory containing the CSV files\n"
+                            f"[nlp]   2. Pass nlp_csv_paths parameter to get_data() with explicit file paths\n"
+                            f"[nlp]   3. Use nlp_method='individual' instead to fetch news from yfinance API\n"
+                            f"[nlp] NLP features will be disabled for this run.\n"
+                        )
+                        print(error_msg)
+                        # #region agent log
+                        try:
+                            with open(log_path, "a") as f:
+                                f.write(json.dumps({"location": "util.py:892", "message": "NYT CSV files not found, disabling NLP", "data": {"searched_dirs": searched_dirs}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
+                        except: pass
+                        # #endregion
                         use_nlp = False
                 
                 if use_nlp and nlp_csv_paths:
@@ -874,6 +987,12 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
                         progress=True
                     )
                     
+                    # #region agent log
+                    try:
+                        with open(log_path, "a") as f:
+                            f.write(json.dumps({"location": "util.py:877", "message": "NLP extraction result", "data": {"nlp_df_len": len(nlp_df)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
+                    except: pass
+                    # #endregion
                     if len(nlp_df) > 0:
                         # Align NLP features with trading days
                         nlp_aligned = align_nlp_with_trading_days(
@@ -891,9 +1010,21 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
                             nlp_features_dict[date_obj] = row
                         
                         print(f"[nlp] NLP features aligned to {len(nlp_features_dict)} trading days (aggregated method)")
+                        # #region agent log
+                        try:
+                            with open(log_path, "a") as f:
+                                f.write(json.dumps({"location": "util.py:893", "message": "NLP features successfully extracted", "data": {"nlp_features_dict_len": len(nlp_features_dict)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
+                        except: pass
+                        # #endregion
                     else:
                         import warnings
                         warnings.warn("No NLP features extracted. Continuing without NLP features.")
+                        # #region agent log
+                        try:
+                            with open(log_path, "a") as f:
+                                f.write(json.dumps({"location": "util.py:897", "message": "NLP extraction returned empty DataFrame", "data": {}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
+                        except: pass
+                        # #endregion
                         use_nlp = False
                         nlp_features_dict = None
             
@@ -967,6 +1098,12 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
             import traceback
             warnings.warn(f"Error extracting NLP features: {e}. Continuing without NLP features.")
             traceback.print_exc()
+            # #region agent log
+            try:
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({"location": "util.py:965", "message": "NLP extraction exception", "data": {"error": str(e), "error_type": type(e).__name__}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}) + "\n")
+            except: pass
+            # #endregion
             use_nlp = False
             nlp_features_dict = None
 
@@ -997,6 +1134,12 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
     
     stock_indices = None
     if prediction_type == "classification":
+        # #region agent log
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "util.py:1000", "message": "Calling get_feature_input_classification", "data": {"use_nlp": use_nlp, "nlp_features_dict_is_none": nlp_features_dict is None, "nlp_features_dict_len": len(nlp_features_dict) if nlp_features_dict else 0, "actual_nlp_method": actual_nlp_method}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}) + "\n")
+        except: pass
+        # #endregion
         feature_result = get_feature_input_classification(
             op, cp, seq_len, op.shape[1], len(successfully_downloaded_stocks), date_index, 
             nlp_features=nlp_features_dict, use_nlp=use_nlp, nlp_method=actual_nlp_method, successfully_downloaded_stocks=successfully_downloaded_stocks, period_type=period_type,
@@ -1433,6 +1576,14 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
         else:
             # At least one is not using NLP, so nlp_method doesn't matter
             nlp_method_match = True
+        # #region agent log
+        try:
+            import json
+            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "util.py:1484", "message": "Cache matching check", "data": {"cached_use_nlp": cached_use_nlp, "requested_use_nlp": use_nlp, "cached_nlp_method": cached_nlp_method, "requested_nlp_method": nlp_method, "use_nlp_match": use_nlp_match, "nlp_method_match": nlp_method_match}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "E"}) + "\n")
+        except: pass
+        # #endregion
         # 5. prediction_type matches
         prediction_type_match = cached_prediction_type == prediction_type
         # 6. period_type matches
@@ -1493,6 +1644,14 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
             
             if actual_features != expected_features:
                 print(f"[cache] Warning: Cached data has {actual_features} features but expected {expected_features} features with NLP (method: {nlp_method}). Cache will be regenerated.")
+                # #region agent log
+                try:
+                    import json
+                    log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                    with open(log_path, "a") as f:
+                        f.write(json.dumps({"location": "util.py:1559", "message": "Cache feature mismatch", "data": {"actual_features": actual_features, "expected_features": expected_features, "use_nlp": use_nlp, "nlp_method": nlp_method}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "E"}) + "\n")
+                except: pass
+                # #endregion
                 return None
     
     # Load metrics - handle both old format and new format (Rev + Returns + Sp500)
@@ -1772,6 +1931,15 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                 continue
 
             # Add NLP features if available
+            # #region agent log
+            if len(X_list) == 0:
+                try:
+                    import json
+                    log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                    with open(log_path, "a") as f:
+                        f.write(json.dumps({"location": "util.py:1775", "message": "Checking NLP features in feature extraction", "data": {"use_nlp": use_nlp, "nlp_features_is_none": nlp_features is None, "nlp_features_len": len(nlp_features) if nlp_features else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}) + "\n")
+                except: pass
+            # #endregion
             if use_nlp and nlp_features is not None:
                 from nlp_features import get_nlp_feature_vector
                 
@@ -1867,6 +2035,14 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
             else:
                 # Debug: Print when NLP features are NOT added
                 if len(X_list) == 0:
+                    # #region agent log
+                    try:
+                        import json
+                        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                        with open(log_path, "a") as f:
+                            f.write(json.dumps({"location": "util.py:1868", "message": "NLP features NOT added", "data": {"use_nlp": use_nlp, "nlp_features_is_none": nlp_features is None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}) + "\n")
+                    except: pass
+                    # #endregion
                     if use_nlp:
                         print(f"[features] ⚠️  Warning: use_nlp=True but nlp_features is None. Only base features will be used.")
                     print(f"[features] Total features per timestep: {window.shape[1]} (base features only)")

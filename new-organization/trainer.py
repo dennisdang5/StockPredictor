@@ -309,6 +309,7 @@ class TrainerConfig:
         shared_tabpfn_training_method="naive",
         cotraining_refit_interval=5,
         cotraining_start_epoch=1,
+        nlp_csv_paths=None,  # Optional: explicit CSV paths for aggregated NLP method
         **model_args
     ):
         """
@@ -410,6 +411,8 @@ class TrainerConfig:
         # Extract common model args for convenience
         self.use_nlp = model_args.get("use_nlp", True)  # Default to True
         self.nlp_method = model_args.get("nlp_method", "aggregated")  # Default to aggregated
+        # nlp_csv_paths can be passed as direct parameter or via model_args
+        self.nlp_csv_paths = nlp_csv_paths if nlp_csv_paths is not None else model_args.get("nlp_csv_paths", None)
     
     def to_dict(self):
         """Convert config to dictionary for easy inspection."""
@@ -693,6 +696,7 @@ class Trainer():
                     self.is_shared_tabpfn_portfolio = True
         self.use_nlp = config.use_nlp
         self.nlp_method = config.nlp_method
+        self.nlp_csv_paths = config.nlp_csv_paths
         
         # Setup distributed training
         self.local_rank, device, self.is_dist = setup_dist()
@@ -759,7 +763,8 @@ class Trainer():
                     data_source=data_source,
                     prediction_type=self.prediction_type, 
                     use_nlp=self.use_nlp, 
-                    nlp_method=self.nlp_method, 
+                    nlp_method=self.nlp_method,
+                    nlp_csv_paths=self.nlp_csv_paths,
                     period_type=self.config.period_type,
                     return_stock_indices=self.requires_stock_indices
                 )
@@ -792,7 +797,8 @@ class Trainer():
                 data_source=data_source,
                 prediction_type=self.prediction_type, 
                 use_nlp=self.use_nlp, 
-                nlp_method=self.nlp_method, 
+                nlp_method=self.nlp_method,
+                nlp_csv_paths=self.nlp_csv_paths,
                 period_type=self.config.period_type,
                 return_stock_indices=self.requires_stock_indices
             )

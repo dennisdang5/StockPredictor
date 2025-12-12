@@ -230,6 +230,7 @@ class ModelTrainingConfig:
             shared_tabpfn_training_method=self.shared_tabpfn_training_method,
             cotraining_refit_interval=self.cotraining_refit_interval,
             cotraining_start_epoch=self.cotraining_start_epoch,
+            nlp_csv_paths=getattr(self, 'nlp_csv_paths', None),  # Support for explicit CSV paths
             **self.kwargs
         )
 
@@ -358,7 +359,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
 
     # ---------------------------------------------------------------------
-    # 4. AELSTM NLP
+    # 4. AELSTM full NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
         name="aelstm_full_nlp",
@@ -380,7 +381,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
 
     # ---------------------------------------------------------------------
-    # 4. AELSTM NLP
+    # 4. AELSTM full base
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
         name="aelstm_full_base",
@@ -474,7 +475,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
 
     # ---------------------------------------------------------------------
-    # 6. CAELSTM NLP
+    # 6. CAELSTM full NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
         name="caelstm_full_nlp",

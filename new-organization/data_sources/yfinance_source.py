@@ -38,13 +38,34 @@ class YFinanceDataSource(DataSource):
         valid_stocks = []
         
         # Try downloading each stock individually to handle errors gracefully
-        print(f"Fetching data for {len(stocks)} stocks...")
+        print(f"Fetching data for {len(stocks)} stocks...", flush=True)
+        import sys
+        sys.stdout.flush()
         for i, stock in enumerate(stocks, 1):
             if (i % 25 == 0) or (i == 1) or (i == len(stocks)):  # Print every 25 stocks, first, and last
-                print(f"  Progress: {i}/{len(stocks)} stocks processed...")
+                print(f"  Progress: {i}/{len(stocks)} stocks processed...", flush=True)
+                sys.stdout.flush()
+            # #region agent log
+            if i == 1 or i % 25 == 0:
+                try:
+                    import json
+                    log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                    with open(log_path, "a") as f:
+                        f.write(json.dumps({"location": "yfinance_source.py:42", "message": "Processing stock", "data": {"stock": stock, "index": i, "total": len(stocks)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+                except: pass
+            # #endregion
             success = False
             for attempt in range(max_retries):
                 try:
+                    # #region agent log
+                    if i == 1 or (i <= 5):
+                        try:
+                            import json
+                            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                            with open(log_path, "a") as f:
+                                f.write(json.dumps({"location": "yfinance_source.py:49", "message": "Downloading stock", "data": {"stock": stock, "attempt": attempt + 1, "max_retries": max_retries}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+                        except: pass
+                    # #endregion
                     # Create a Ticker object for individual download
                     ticker = yf.Ticker(stock)
                     
@@ -52,6 +73,15 @@ class YFinanceDataSource(DataSource):
                         stock_data = ticker.history(period=args[0], repair=True)
                     elif len(args) == 2:
                         stock_data = ticker.history(period=None, start=args[0], end=args[1], interval="1d", repair=True)
+                    # #region agent log
+                    if i == 1 or (i <= 5):
+                        try:
+                            import json
+                            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                            with open(log_path, "a") as f:
+                                f.write(json.dumps({"location": "yfinance_source.py:54", "message": "Stock download completed", "data": {"stock": stock, "has_data": stock_data is not None and not stock_data.empty if stock_data is not None else False}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+                        except: pass
+                    # #endregion
                     else:
                         failed_stocks['Other'].append((stock, 'InvalidArgs', f'Invalid args: {args}'))
                         break
