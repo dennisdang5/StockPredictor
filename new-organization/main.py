@@ -9,6 +9,7 @@ import os
 import time
 from datetime import datetime
 from typing import List, Dict, Optional
+import pandas as pd
 
 from trainer import Trainer, TrainerConfig
 from trainer_portfolio import PortfolioTrainer
@@ -775,6 +776,14 @@ def train_model(config: ModelTrainingConfig, log_dir: str = "training_logs") -> 
     _rank0_print(f"Model Type: {config.model_type}")
     _rank0_print(f"Stocks: {config.stocks}")
     _rank0_print(f"Time Range: {config.time_args}")
+    # #region agent log
+    try:
+        import json
+        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "main.py:777", "message": "Training config", "data": {"name": config.name, "num_stocks": len(config.stocks), "time_args": config.time_args, "stocks_tier": "large" if len(config.stocks) > 100 else "base" if len(config.stocks) > 20 else "small" if len(config.stocks) > 5 else "micro", "date_range_years": (pd.to_datetime(config.time_args[1]) - pd.to_datetime(config.time_args[0])).days / 365.25 if len(config.time_args) == 2 else None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "N"}) + "\n")
+    except: pass
+    # #endregion
     # Batch size is not relevant for TabPFN models
     if config.model_type.upper() == "TABPFN":
         _rank0_print(f"Batch Size: N/A (not used for TabPFN), Epochs: {config.num_epochs}")

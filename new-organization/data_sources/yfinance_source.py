@@ -73,6 +73,10 @@ class YFinanceDataSource(DataSource):
                         stock_data = ticker.history(period=args[0], repair=True)
                     elif len(args) == 2:
                         stock_data = ticker.history(period=None, start=args[0], end=args[1], interval="1d", repair=True)
+                    else:
+                        failed_stocks['Other'].append((stock, 'InvalidArgs', f'Invalid args: {args}'))
+                        break
+                    
                     # #region agent log
                     if i == 1 or (i <= 5):
                         try:
@@ -82,9 +86,6 @@ class YFinanceDataSource(DataSource):
                                 f.write(json.dumps({"location": "yfinance_source.py:54", "message": "Stock download completed", "data": {"stock": stock, "has_data": stock_data is not None and not stock_data.empty if stock_data is not None else False}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
                         except: pass
                     # #endregion
-                    else:
-                        failed_stocks['Other'].append((stock, 'InvalidArgs', f'Invalid args: {args}'))
-                        break
                     
                     # Check if we have valid data with required columns
                     if stock_data is not None and not stock_data.empty:

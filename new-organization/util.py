@@ -784,7 +784,7 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         import json
         log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
         with open(log_path, "a") as f:
-            f.write(json.dumps({"location": "util.py:774", "message": "Loading problematic stocks", "data": {"args": args}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+            f.write(json.dumps({"location": "util.py:774", "message": "Loading problematic stocks", "data": {"args": args, "input_stocks_count": len(stocks)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "P"}) + "\n")
     except: pass
     # #endregion
     problematic_stocks_saved = _load_problematic_stocks(args)
@@ -792,16 +792,59 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
     try:
         import json
         log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        problematic_list = sorted(list(problematic_stocks_saved))[:20] if problematic_stocks_saved else []
         with open(log_path, "a") as f:
-            f.write(json.dumps({"location": "util.py:775", "message": "Problematic stocks loaded", "data": {"num_problematic": len(problematic_stocks_saved) if problematic_stocks_saved else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+            f.write(json.dumps({"location": "util.py:790", "message": "Problematic stocks loaded", "data": {"num_problematic": len(problematic_stocks_saved) if problematic_stocks_saved else 0, "problematic_stocks_sample": problematic_list, "input_stocks_count": len(stocks)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "P"}) + "\n")
     except: pass
     # #endregion
     
     # Step 3: Remove problematic stocks from input set
+    # WARNING: Check if problematic stocks file seems incorrect (contains more stocks than input)
+    # This can happen if problematic stocks were saved from a different stock list
     if problematic_stocks_saved:
-        valid_stocks = [stock for stock in stocks if stock not in problematic_stocks_saved]
-        print(f"[data] Loaded {len(problematic_stocks_saved)} previously identified problematic stocks for this time period")
-        print(f"[data] Filtered input: {len(stocks)} -> {len(valid_stocks)} stocks")
+        # Check if problematic stocks file seems suspicious
+        # If problematic stocks count is close to or exceeds input stocks, it's likely wrong
+        problematic_count = len(problematic_stocks_saved)
+        input_count = len(stocks)
+        
+        # If problematic stocks >= 90% of input stocks, automatically ignore the file
+        # This prevents incorrect filtering when file was created with different stock list
+        if problematic_count >= 0.9 * input_count:
+            import warnings
+            problematic_file_path = os.path.join(DATA_DIR, f'_problematic_stocks_{_get_args_key(args)}.json')
+            warnings.warn(
+                f"\n[WARNING] Suspicious problematic stocks file detected and IGNORED!\n"
+                f"  Input stocks: {input_count}\n"
+                f"  Problematic stocks in file: {problematic_count}\n"
+                f"  This suggests the problematic stocks file was created with a different stock list.\n"
+                f"  Automatically ignoring problematic stocks file to prevent incorrect filtering.\n"
+                f"  All {input_count} stocks will be attempted for download.\n"
+                f"  To permanently fix, delete: {problematic_file_path}\n",
+                UserWarning
+            )
+            # Ignore problematic stocks file - use all input stocks
+            valid_stocks = stocks
+            # #region agent log
+            try:
+                import json
+                log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({"location": "util.py:811", "message": "Problematic stocks file ignored (suspicious)", "data": {"input_stocks_count": input_count, "problematic_count": problematic_count, "action": "ignored_file"}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "P"}) + "\n")
+            except: pass
+            # #endregion
+        else:
+            # Normal case: filter out problematic stocks
+            valid_stocks = [stock for stock in stocks if stock not in problematic_stocks_saved]
+            print(f"[data] Loaded {len(problematic_stocks_saved)} previously identified problematic stocks for this time period")
+            print(f"[data] Filtered input: {len(stocks)} -> {len(valid_stocks)} stocks")
+            # #region agent log
+            try:
+                import json
+                log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({"location": "util.py:824", "message": "Stocks filtered by problematic list", "data": {"input_stocks_count": len(stocks), "valid_stocks_count": len(valid_stocks), "filtered_out_count": len(stocks) - len(valid_stocks), "problematic_count": problematic_count, "suspicious": False, "valid_stocks_sample": sorted(valid_stocks)[:10] if len(valid_stocks) <= 10 else sorted(valid_stocks)[:10] + ["..."]}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "P"}) + "\n")
+            except: pass
+            # #endregion
     else:
         valid_stocks = stocks
     
@@ -861,8 +904,26 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         try:
             import json
             log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+            # Analyze failed stocks to understand why they failed
+            failed_analysis = {}
+            if failed_stocks:
+                for error_type, failures in failed_stocks.items():
+                    if failures:
+                        failed_analysis[error_type] = {
+                            "count": len(failures),
+                            "sample_errors": []
+                        }
+                        # Sample first 10 errors to see what's happening
+                        for failure in failures[:10]:
+                            if isinstance(failure, tuple) and len(failure) >= 3:
+                                stock, err_type, err_msg = failure[0], failure[1], failure[2]
+                                failed_analysis[error_type]["sample_errors"].append({
+                                    "stock": stock,
+                                    "error_type": err_type,
+                                    "error_message": str(err_msg)[:200] if err_msg else None  # Truncate long messages
+                                })
             with open(log_path, "a") as f:
-                f.write(json.dumps({"location": "util.py:821", "message": "Data download completed", "data": {"num_failed": len(failed_stocks) if failed_stocks else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "F"}) + "\n")
+                f.write(json.dumps({"location": "util.py:902", "message": "Data download completed", "data": {"num_failed": sum(len(failed_stocks[key]) for key in failed_stocks) if failed_stocks else 0, "failed_analysis": failed_analysis, "num_successful": len(open_close["Open"].columns) if open_close is not None else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "Q"}) + "\n")
         except: pass
         # #endregion
         
@@ -872,12 +933,25 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
         successfully_downloaded_stocks = [stock for stock in valid_stocks if stock in open_close["Open"].columns]
         # Calculate problematic stocks from valid_stocks
         new_problematic = [stock for stock in valid_stocks if stock not in successfully_downloaded_stocks]
-        # Combine with previously known problematic stocks
-        problematic_stocks = list(problematic_stocks_saved) + new_problematic
+        # Combine with previously known problematic stocks (but only if they weren't ignored)
+        if problematic_stocks_saved and len(problematic_stocks_saved) < 0.9 * len(stocks):
+            # Only combine if the saved problematic stocks weren't suspicious
+            problematic_stocks = list(problematic_stocks_saved) + new_problematic
+        else:
+            # If saved problematic stocks were ignored, only save new problematic stocks
+            problematic_stocks = new_problematic
     
     # Save problematic stocks for this time period (so we can skip checking them in future runs)
     if problematic_stocks:
         _save_problematic_stocks(problematic_stocks, args)
+        # #region agent log
+        try:
+            import json
+            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "util.py:923", "message": "Problematic stocks saved", "data": {"problematic_count": len(problematic_stocks), "original_input_count": len(stocks)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "P"}) + "\n")
+        except: pass
+        # #endregion
 
     # ========================================================================
     # Step 1: Pull all the data
@@ -978,6 +1052,14 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
                         use_nlp = False
                 
                 if use_nlp and nlp_csv_paths:
+                    # #region agent log
+                    try:
+                        import json
+                        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                        with open(log_path, "a") as f:
+                            f.write(json.dumps({"location": "util.py:980", "message": "Calling extract_daily_nlp_features", "data": {"num_csv_files": len(nlp_csv_paths), "start_date": start_date, "end_date": end_date, "csv_files": [str(p) for p in nlp_csv_paths[:5]]}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "I"}) + "\n")
+                    except: pass
+                    # #endregion
                     # Extract daily NLP features from NYT
                     nlp_df = extract_daily_nlp_features(
                         csv_paths=nlp_csv_paths,
@@ -989,12 +1071,22 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
                     
                     # #region agent log
                     try:
+                        import json
+                        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
                         with open(log_path, "a") as f:
-                            f.write(json.dumps({"location": "util.py:877", "message": "NLP extraction result", "data": {"nlp_df_len": len(nlp_df)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
+                            f.write(json.dumps({"location": "util.py:993", "message": "NLP extraction result", "data": {"nlp_df_len": len(nlp_df), "date_range": {"min": str(nlp_df['date'].min()) if len(nlp_df) > 0 else None, "max": str(nlp_df['date'].max()) if len(nlp_df) > 0 else None}}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
                     except: pass
                     # #endregion
                     if len(nlp_df) > 0:
                         # Align NLP features with trading days
+                        # #region agent log
+                        try:
+                            import json
+                            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                            with open(log_path, "a") as f:
+                                f.write(json.dumps({"location": "util.py:1007", "message": "Before alignment", "data": {"nlp_df_len": len(nlp_df), "trading_days_len": len(date_index), "nlp_date_range": {"min": str(nlp_df['date'].min()), "max": str(nlp_df['date'].max())}, "trading_date_range": {"min": str(date_index.min()), "max": str(date_index.max())}}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "I"}) + "\n")
+                        except: pass
+                        # #endregion
                         nlp_aligned = align_nlp_with_trading_days(
                             nlp_df,
                             trading_days=date_index,
@@ -1012,8 +1104,10 @@ def get_data(stocks, args, seq_len, data_source: DataSource, force=False, predic
                         print(f"[nlp] NLP features aligned to {len(nlp_features_dict)} trading days (aggregated method)")
                         # #region agent log
                         try:
+                            import json
+                            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
                             with open(log_path, "a") as f:
-                                f.write(json.dumps({"location": "util.py:893", "message": "NLP features successfully extracted", "data": {"nlp_features_dict_len": len(nlp_features_dict)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
+                                f.write(json.dumps({"location": "util.py:1025", "message": "NLP features successfully extracted", "data": {"nlp_features_dict_len": len(nlp_features_dict), "nlp_aligned_len": len(nlp_aligned), "days_with_news": int(nlp_aligned['has_news'].sum()) if 'has_news' in nlp_aligned.columns else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
                         except: pass
                         # #endregion
                     else:
@@ -1565,6 +1659,15 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
         # Verify all 9 conditions:
         # 1. Cleaned stock list matches
         stocks_match = set(filtered_stocks) == cached_stocks
+        # #region agent log
+        if not stocks_match:
+            try:
+                import json
+                log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({"location": "util.py:1587", "message": "Cache stock mismatch", "data": {"requested_stocks_count": len(filtered_stocks), "cached_stocks_count": len(cached_stocks), "requested_stocks": sorted(list(filtered_stocks))[:10] if len(filtered_stocks) <= 10 else sorted(list(filtered_stocks))[:10] + ["..."], "cached_stocks": sorted(list(cached_stocks))[:10] if len(cached_stocks) <= 10 else sorted(list(cached_stocks))[:10] + ["..."], "cache_id": cached_id}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "O"}) + "\n")
+            except: pass
+        # #endregion
         # 2. Time period matches
         time_period_match = cached_args_list == args_list
         # 3. use_nlp matches
@@ -1974,6 +2077,9 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                     if n < len(successfully_downloaded_stocks):
                         stock_ticker = successfully_downloaded_stocks[n]
                 
+                # #region agent log
+                nlp_lookup_stats = {"found": 0, "missing": 0, "dates_checked": set()}
+                # #endregion
                 for idx, t in enumerate(period):
                     # Get date for this time step
                     if t < len(date_index):
@@ -1988,21 +2094,69 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                                 nlp_row = nlp_features_clean[(stock_ticker, date_at_t)]
                                 nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=actual_method_for_features)
                                 nlp_window[idx, :] = nlp_vec
+                                # #region agent log
+                                nlp_lookup_stats["found"] += 1
+                                # #endregion
                             else:
                                 # No NLP data for this stock-date - use zeros
                                 nlp_window[idx, :] = np.zeros(nlp_feature_dim, dtype=float)
+                                # #region agent log
+                                nlp_lookup_stats["missing"] += 1
+                                # #endregion
                         else:
                             # Aggregated method: date -> row
+                            # #region agent log
+                            if date_at_t not in nlp_lookup_stats["dates_checked"]:
+                                nlp_lookup_stats["dates_checked"].add(date_at_t)
+                            # #endregion
                             if date_at_t in nlp_features_clean:
                                 nlp_row = nlp_features_clean[date_at_t]
                                 nlp_vec = get_nlp_feature_vector(nlp_row, nlp_method=actual_method_for_features)
                                 nlp_window[idx, :] = nlp_vec
+                                # #region agent log
+                                nlp_lookup_stats["found"] += 1
+                                # #endregion
                             else:
                                 # No NLP data for this date - use zeros
                                 nlp_window[idx, :] = np.zeros(nlp_feature_dim, dtype=float)
+                                # #region agent log
+                                nlp_lookup_stats["missing"] += 1
+                                # #endregion
                     else:
                         # Date index out of range - use zeros
                         nlp_window[idx, :] = np.zeros(nlp_feature_dim, dtype=float)
+                        # #region agent log
+                        nlp_lookup_stats["missing"] += 1
+                        # #endregion
+                
+                # #region agent log
+                if len(X_list) == 0 and use_nlp:
+                    try:
+                        import json
+                        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+                        stock_name = successfully_downloaded_stocks[n] if successfully_downloaded_stocks and n < len(successfully_downloaded_stocks) else None
+                        log_data = {
+                            "location": "util.py:1997",
+                            "message": "NLP feature lookup stats (first window)",
+                            "data": {
+                                "nlp_lookup_stats": {
+                                    "found": nlp_lookup_stats["found"],
+                                    "missing": nlp_lookup_stats["missing"],
+                                    "unique_dates_checked": len(nlp_lookup_stats["dates_checked"])
+                                },
+                                "is_aggregated": not is_individual_method,
+                                "stock": stock_name,
+                                "end_t": end_t
+                            },
+                            "timestamp": __import__("time").time(),
+                            "sessionId": "debug-session",
+                            "runId": "run1",
+                            "hypothesisId": "M"
+                        }
+                        with open(log_path, "a") as f:
+                            f.write(json.dumps(log_data) + "\n")
+                    except: pass
+                # #endregion
                 
                 # Normalize NLP features separately if requested
                 if normalize_nlp_separately:

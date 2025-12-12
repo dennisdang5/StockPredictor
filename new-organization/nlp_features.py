@@ -242,7 +242,16 @@ def filter_finance_articles(df: pd.DataFrame) -> pd.DataFrame:
     
     filtered_df = df[finance_mask].copy()
     
-    print(f"[filter] Filtered {len(df)} articles -> {len(filtered_df)} finance-related articles")
+    # #region agent log
+    try:
+        import json
+        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "nlp_features.py:243", "message": "Finance filter results", "data": {"articles_before": len(df), "articles_after": len(filtered_df), "filtered_out": len(df) - len(filtered_df), "filter_rate": (len(df) - len(filtered_df)) / len(df) if len(df) > 0 else 0, "desk_matches": int(desk_mask.sum()) if isinstance(desk_mask, pd.Series) else 0, "section_matches": int(section_mask.sum()) if isinstance(section_mask, pd.Series) else 0, "headline_matches": int(headline_mask.sum()) if isinstance(headline_mask, pd.Series) else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "I"}) + "\n")
+    except: pass
+    # #endregion
+    
+    print(f"[filter] Filtered {len(df)} articles -> {len(filtered_df)} finance-related articles ({len(filtered_df)/len(df)*100:.1f}% retained)")
     
     return filtered_df
 
@@ -543,7 +552,15 @@ def extract_daily_nlp_features(
     
     # Combine all articles
     articles_df = pd.concat(all_articles, ignore_index=True)
-    print(f"[nlp] Loaded {len(articles_df)} total articles")
+    print(f"[nlp] Loaded {len(articles_df)} total articles from {len(csv_paths)} CSV files")
+    # #region agent log
+    try:
+        import json
+        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "nlp_features.py:546", "message": "Articles loaded", "data": {"total_articles": len(articles_df), "num_csv_files": len(csv_paths), "date_range": {"min": str(articles_df['date'].min()) if 'date' in articles_df.columns and len(articles_df) > 0 else None, "max": str(articles_df['date'].max()) if 'date' in articles_df.columns and len(articles_df) > 0 else None}}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "I"}) + "\n")
+    except: pass
+    # #endregion
     
     # Filter by date range if specified
     if start_date is not None or end_date is not None:
@@ -581,9 +598,26 @@ def extract_daily_nlp_features(
         articles_df = articles_df[date_mask].copy()
         print(f"[nlp] Filtered to date range: {start_date_parsed or 'earliest'} to {end_date_parsed or 'latest'}")
         print(f"[nlp] Articles after date filtering: {len(articles_df)}")
+        # #region agent log
+        try:
+            import json
+            log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"location": "nlp_features.py:583", "message": "After date filtering", "data": {"articles_after_date_filter": len(articles_df), "start_date": str(start_date_parsed) if start_date_parsed else None, "end_date": str(end_date_parsed) if end_date_parsed else None}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "I"}) + "\n")
+        except: pass
+        # #endregion
     
     # Always filter to finance articles
+    articles_before_finance_filter = len(articles_df)
     articles_df = filter_finance_articles(articles_df)
+    # #region agent log
+    try:
+        import json
+        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "nlp_features.py:587", "message": "After finance filter", "data": {"articles_before": articles_before_finance_filter, "articles_after": len(articles_df), "filtered_out": articles_before_finance_filter - len(articles_df), "filter_rate": (articles_before_finance_filter - len(articles_df)) / articles_before_finance_filter if articles_before_finance_filter > 0 else 0}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "I"}) + "\n")
+    except: pass
+    # #endregion
     
     if len(articles_df) == 0:
         warnings.warn("No articles remaining after filtering")
@@ -668,6 +702,14 @@ def extract_daily_nlp_features(
     print(f"[nlp] Created daily features for {len(daily)} days")
     print(f"[nlp] Date range: {daily['date'].min()} to {daily['date'].max()}")
     print(f"[nlp] Days with news: {daily['has_news'].sum()}")
+    # #region agent log
+    try:
+        import json
+        log_path = "/Users/loganyamamoto/Desktop/class/CSCI/566/project/new_clone/StockPredictor/.cursor/debug.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"location": "nlp_features.py:670", "message": "Daily features created", "data": {"num_days": len(daily), "date_range": {"min": str(daily['date'].min()), "max": str(daily['date'].max())}, "days_with_news": int(daily['has_news'].sum()), "total_articles_processed": len(articles_df)}, "timestamp": __import__("time").time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "I"}) + "\n")
+    except: pass
+    # #endregion
     
     return daily
 
