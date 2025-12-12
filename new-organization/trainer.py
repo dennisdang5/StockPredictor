@@ -188,6 +188,10 @@ def _compute_directional_metrics(predictions: np.ndarray, targets: np.ndarray, i
         correct = np.sum(pred_labels == targets)
         total_predictions = len(targets)
         metrics['directional_accuracy'] = (correct / total_predictions) * 100 if total_predictions > 0 else 0
+        
+        # For classification, targets are already in {-1, 0, +1}, use them directly
+        pred_sign = pred_labels
+        target_sign = targets
     else:
         # Regression: use sign-based accuracy
         pred_sign = np.sign(predictions)
@@ -1252,7 +1256,7 @@ class Trainer():
         
         if loss_config is None:
             # Default: use classification_loss for LSTM models, MSE for others
-            if self.model_type in ["LSTM", "AELSTM", "CAELSTM"]:
+            if self.model_type in ["LSTM", "AELSTM", "CAELSTM", "PORTFOLIO"]:
                 loss_name = "classification_loss"
             else:
                 loss_name = "mse"
@@ -2201,6 +2205,14 @@ class Trainer():
         # Store input if loss function requires it (for reconstruction losses)
         if self.loss_fn.requires_intermediates():
             self.intermediate_storage["input"] = inputs
+            # #region agent log
+            try:
+                import json, time
+                log_data = {'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'B', 'location': 'trainer.py:2203', 'message': 'stored input in intermediates', 'data': {'input_shape': list(inputs.shape)}, 'timestamp': int(time.time() * 1000)}
+                with open('/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps(log_data) + '\n')
+            except: pass
+            # #endregion
         
         # Forward pass (hooks will populate intermediate_storage)
         params = self._build_model_params(indices, split)
@@ -3576,12 +3588,33 @@ class Trainer():
                 Y_pred_np = self._tensor_to_numpy(Y_pred)
                 Y_batch_np = self._tensor_to_numpy(Y_batch)
                 
-                self.predicted_values.extend(Y_pred_np.flatten().tolist())
-                self.actual_values.extend(Y_batch_np.flatten().tolist())
+                # Detect if this is a classification model
+                is_classification = self.model_type in ["LSTM", "AELSTM", "CAELSTM"] or (Y_pred_np.ndim == 2 and Y_pred_np.shape[1] == 3)
                 
-                # Store residuals
-                residuals_np = Y_batch_np.flatten() - Y_pred_np.flatten()
-                self.residuals.extend(residuals_np.tolist())
+                if is_classification:
+                    # Convert logits to class labels for classification models
+                    Y_pred_labels = _convert_logits_to_labels(Y_pred_np)
+                    # Store predictions as labels
+                    self.predicted_values.extend(Y_pred_labels.tolist())
+                    self.actual_values.extend(Y_batch_np.flatten().tolist())
+                    
+                    # For classification, residuals are difference between predicted and actual labels
+                    residuals_np = Y_batch_np.flatten() - Y_pred_labels
+                    self.residuals.extend(residuals_np.tolist())
+                    
+                    # For cross-sectional ranking, use the predicted class labels as scores
+                    scores = Y_pred_labels
+                else:
+                    # Regression model - use predictions directly
+                    self.predicted_values.extend(Y_pred_np.flatten().tolist())
+                    self.actual_values.extend(Y_batch_np.flatten().tolist())
+                    
+                    # Store residuals
+                    residuals_np = Y_batch_np.flatten() - Y_pred_np.flatten()
+                    self.residuals.extend(residuals_np.tolist())
+                    
+                    # For regression, use flattened predictions as scores
+                    scores = Y_pred_np.flatten()
                 
                 # Collect (date, score, realized_return) for cross-sectional ranking
                 if hasattr(self, 'test_revenues') and self.test_revenues is not None:
@@ -3593,7 +3626,6 @@ class Trainer():
                     
                     # Get actual revenues for this batch
                     indices_list = indices.tolist()
-                    scores = Y_pred_np.flatten()
                     realized_rets = np.array([test_revenues_np[idx] if idx < len(test_revenues_np) else 0 
                                             for idx in indices_list])
                     

@@ -94,13 +94,11 @@ echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_
 
 # To run multiple scripts, uncomment the ones you want:
  SCRIPTS=(
-  "main_lstm_base.py"
-  "main_aelstm_base.py"
-  "main_caelstm_base.py"
-  "main_portfolio_lstm_independent_base.py"
-  "main_lstm_nlp.py"
-  "main_aelstm_nlp.py"
-  "main_caelstm_nlp.py"
+  "main_caelstm_full_base.py"
+  "main_aelstm_full_base.py"
+  "main_lstm_full_base.py"
+  "main_caelstm_full_nlp.py"
+  "main_aelstm_full_nlp.py"
 )
 
 for SCRIPT in "${SCRIPTS[@]}"; do

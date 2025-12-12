@@ -1426,8 +1426,13 @@ def load_data_from_cache(stocks, args, data_source: DataSource, prediction_type=
         time_period_match = cached_args_list == args_list
         # 3. use_nlp matches
         use_nlp_match = cached_use_nlp == use_nlp
-        # 4. nlp_method matches
-        nlp_method_match = cached_nlp_method == nlp_method
+        # 4. nlp_method matches (only checked when use_nlp=True; ignored when use_nlp=False)
+        if use_nlp and cached_use_nlp:
+            # Both are using NLP, so nlp_method must match
+            nlp_method_match = cached_nlp_method == nlp_method
+        else:
+            # At least one is not using NLP, so nlp_method doesn't matter
+            nlp_method_match = True
         # 5. prediction_type matches
         prediction_type_match = cached_prediction_type == prediction_type
         # 6. period_type matches
@@ -1703,13 +1708,10 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
         # Labels: -1 (bottom third), 0 (middle third), +1 (top third)
         return_t_valid = return_t[valid_stocks, t]
         if len(return_t_valid) > 0:
-            # Calculate 33rd and 66th percentiles for 3-class split
-            p33 = np.percentile(return_t_valid, 33.33)
-            p66 = np.percentile(return_t_valid, 66.67)
             # Assign labels: -1 for bottom third, 0 for middle third, +1 for top third
             return_labels[valid_stocks, t] = np.where(
-                return_t_valid >= p66, 1.0,  # Top third: +1
-                np.where(return_t_valid >= p33, 0.0, -1.0)  # Middle third: 0, Bottom third: -1
+                return_t_valid > 0, 1.0,  # Top third: +1
+                np.where(return_t_valid <= 0, -1.0,0)  # Middle third: 0, Bottom third: -1
             )
     
     print(f"[features] Step 1/2 complete. Step 2/2: Building feature windows (this may take several minutes)...")

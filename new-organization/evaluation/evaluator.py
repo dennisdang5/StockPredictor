@@ -1099,14 +1099,12 @@ class ModelEvaluator:
             # Calculate transaction costs based on gross return
             # First day: assume positions already held, so no cost
             # Subsequent days: cost is 0.2% of gross return
-            if prev_positions is not None:
-                daily_cost = 0.002*total_value
-                pdaily_cost = daily_cost/total_value
-                net_return = gross_return - daily_cost
-            else:
-                net_return = gross_return
-                daily_cost = 0.0
-                pdaily_cost = 0.0
+
+            daily_cost = cost_per_side * float ((top["ret"].abs()).sum())
+            daily_cost += cost_per_side * float ((flop["ret"].abs()).sum())
+            pdaily_cost = daily_cost/total_value
+            
+            net_return = gross_return - daily_cost
             
             plong_return = long_return / total_value
             pshort_return = short_return / total_value

@@ -273,14 +273,54 @@ class CAELSTMLoss(BaseLoss):
                 # Get decoder outputs (already normalized and in correct shape [batch, time, features])
                 short_dec = intermediates["short_dec_norm"]  # [batch, 20, num_features] for CAELSTM
                 long_dec = intermediates["long_dec_norm"]  # [batch, 11, num_features] for CAELSTM
+                # #region agent log
+                print(f"[DEBUG LOSS] short_dec.shape={short_dec.shape}, long_dec.shape={long_dec.shape}, input.shape={intermediates['input'].shape}", file=__import__('sys').stderr, flush=True)
+                try:
+                    import json, time
+                    log_data = {'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'C', 'location': 'intermediate_losses.py:273', 'message': 'decoder outputs from intermediates', 'data': {'short_dec_shape': list(short_dec.shape), 'long_dec_shape': list(long_dec.shape), 'input_shape': list(intermediates["input"].shape)}, 'timestamp': int(time.time() * 1000)}
+                    with open('/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps(log_data) + '\n')
+                except: pass
+                # #endregion
                 
                 # Concatenate in correct order: short (first 20) then long (last 11)
                 decoder_output = torch.cat((short_dec, long_dec), dim=1)  # [batch, 31, num_features]
+                # #region agent log
+                print(f"[DEBUG LOSS] decoder_output after concat: shape={decoder_output.shape}, input.shape={intermediates['input'].shape}", file=__import__('sys').stderr, flush=True)
+                try:
+                    import json, time
+                    log_data = {'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'D', 'location': 'intermediate_losses.py:281', 'message': 'decoder_output after concat', 'data': {'decoder_output_shape': list(decoder_output.shape), 'input_shape': list(intermediates["input"].shape)}, 'timestamp': int(time.time() * 1000)}
+                    with open('/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps(log_data) + '\n')
+                except: pass
+                # #endregion
                 
-                recon_loss = self.reconstruction_loss(
-                    decoder_output,
-                    intermediates["input"]
-                )
+                # #region agent log
+                try:
+                    import json, time
+                    log_data = {'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'E', 'location': 'intermediate_losses.py:286', 'message': 'before reconstruction_loss call', 'data': {'decoder_output_shape': list(decoder_output.shape), 'decoder_output_dim1_size': decoder_output.shape[1], 'input_shape': list(intermediates["input"].shape), 'input_dim1_size': intermediates["input"].shape[1]}, 'timestamp': int(time.time() * 1000)}
+                    with open('/Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps(log_data) + '\n')
+                except Exception as e:
+                    print(f"[DEBUG] Logging failed: {e}")
+                # #endregion
+                
+                # #region agent log - print shapes to stderr as backup
+                print(f"[DEBUG] decoder_output.shape={decoder_output.shape}, input.shape={intermediates['input'].shape}", file=__import__('sys').stderr, flush=True)
+                # #endregion
+                
+                try:
+                    recon_loss = self.reconstruction_loss(
+                        decoder_output,
+                        intermediates["input"]
+                    )
+                except RuntimeError as e:
+                    # #region agent log - capture error details
+                    print(f"[DEBUG] Reconstruction loss error: {e}", file=__import__('sys').stderr, flush=True)
+                    print(f"[DEBUG] decoder_output.shape={decoder_output.shape}, input.shape={intermediates['input'].shape}", file=__import__('sys').stderr, flush=True)
+                    print(f"[DEBUG] short_dec.shape={short_dec.shape}, long_dec.shape={long_dec.shape}", file=__import__('sys').stderr, flush=True)
+                    # #endregion
+                    raise
                 total_loss += self.reconstruction_weight * recon_loss
             
             return total_loss
