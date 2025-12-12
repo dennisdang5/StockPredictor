@@ -395,7 +395,7 @@ def create_model_configs() -> List[ModelTrainingConfig]:
             'dropout': 0.1,
         }),
         stocks=large_stocks,
-        time_args=["1990-01-01", "2015-12-31"],
+        time_args=long_history,
         batch_size=64,
         num_epochs=1000,
         period_type="full",

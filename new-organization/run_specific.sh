@@ -4,7 +4,7 @@ export QUICK_TEST_EPOCHS=2
 
 source /Users/loganyamamoto/Desktop/class/CSCI/566/project/StockPredictor/.venv/bin/activate
 
-python main_aelstm_base.py
+#python main_aelstm_base.py
 python main_caelstm_base.py
 
 python main_lstm_nlp.py
