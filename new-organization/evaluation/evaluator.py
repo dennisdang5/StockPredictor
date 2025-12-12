@@ -8,6 +8,7 @@ on saved models and log results to TensorBoard for analysis.
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -820,9 +821,57 @@ class ModelEvaluator:
                 mapped[date_key] = value
         return mapped
 
+    def _convert_logits_to_score(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Convert logits [B, 3] to a single score for ranking.
+        
+        Uses softmax to get probabilities, then computes: prob(+1) - prob(-1)
+        This gives a score in [-1, +1] where higher values indicate stronger buy signals.
+        
+        Args:
+            logits: Model logits of shape [B, 3] where classes are {-1, 0, +1}
+        
+        Returns:
+            Scores of shape [B] in range [-1, +1]
+        """
+        if logits.dim() == 1:
+            # Handle flattened case - reshape if possible
+            if len(logits) % 3 == 0:
+                logits = logits.view(-1, 3)
+            else:
+                # Not logits, return as-is
+                return logits
+        
+        if logits.shape[1] != 3:
+            # Not 3-class logits, return as-is (regression or other)
+            return logits.squeeze(-1) if logits.dim() > 1 else logits
+        
+        # Apply softmax to get probabilities [p(-1), p(0), p(+1)]
+        probs = F.softmax(logits, dim=1)
+        
+        # Score = prob(+1) - prob(-1)  (ranges from -1 to +1)
+        # Higher score = stronger buy signal
+        score = probs[:, 2] - probs[:, 0]  # Class 2 (+1) - Class 0 (-1)
+        
+        return score
+    
     def _sign_arrays(self, predictions: np.ndarray, targets: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Return sign arrays for predictions and targets."""
-        return np.sign(predictions), np.sign(targets)
+        """
+        Return sign arrays for predictions and targets.
+        
+        For 3-class classification logits, converts to scores first.
+        """
+        # Check if predictions are logits [B, 3]
+        if predictions.ndim == 2 and predictions.shape[1] == 3:
+            # Convert logits to scores, then to signs
+            pred_tensor = torch.from_numpy(predictions).float()
+            scores = self._convert_logits_to_score(pred_tensor)
+            pred_signs = np.sign(self._tensor_to_numpy(scores))
+        else:
+            pred_signs = np.sign(predictions)
+        
+        target_signs = np.sign(targets)
+        return pred_signs, target_signs
 
     def _wealth_curve(self, returns: np.ndarray) -> np.ndarray:
         """Compute cumulative wealth curve from returns."""
@@ -882,15 +931,29 @@ class ModelEvaluator:
                 
                 if return_raw:
                     # Return raw predictions for ranking (paper methodology)
-                    predictions.extend(self._tensor_to_numpy(Y_pred.squeeze()))
+                    # For 3-class classification, convert logits to scores
+                    if Y_pred.dim() == 2 and Y_pred.shape[1] == 3:
+                        # Convert logits [B, 3] to scores [B] for ranking
+                        Y_pred_scores = self._convert_logits_to_score(Y_pred)
+                        predictions.extend(self._tensor_to_numpy(Y_pred_scores))
+                    else:
+                        # Regression or other: use as-is
+                        predictions.extend(self._tensor_to_numpy(Y_pred.squeeze()))
                 else:
                     # Legacy thresholding behavior
-                    abs_pred = torch.abs(Y_pred)
-                    Y_pred_thresholded = torch.where(
-                        abs_pred >= 0.1,
-                        torch.sign(Y_pred),
-                        torch.zeros_like(Y_pred)
-                    )
+                    # For 3-class classification, convert to class labels first
+                    if Y_pred.dim() == 2 and Y_pred.shape[1] == 3:
+                        # Convert logits to class labels {-1, 0, +1}
+                        class_indices = torch.argmax(Y_pred, dim=1)  # [B] with values {0, 1, 2}
+                        Y_pred_thresholded = (class_indices - 1).float()  # Map {0,1,2} -> {-1,0,+1}
+                    else:
+                        # Regression: use thresholding as before
+                        abs_pred = torch.abs(Y_pred)
+                        Y_pred_thresholded = torch.where(
+                            abs_pred >= 0.1,
+                            torch.sign(Y_pred),
+                            torch.zeros_like(Y_pred)
+                        )
                     predictions.extend(self._tensor_to_numpy(Y_pred_thresholded.squeeze()))
                 
                 targets.extend(self._tensor_to_numpy(Y_batch.squeeze()))

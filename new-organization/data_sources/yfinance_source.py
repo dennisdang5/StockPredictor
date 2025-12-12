@@ -148,9 +148,8 @@ class YFinanceDataSource(DataSource):
             else:
                 max_date_buffered = pd.Timestamp(max_date) + pd.Timedelta(days=1)
             
-            # Fetch S&P 500 data (^GSPC is the ticker for S&P 500)
+            # Fetch S&P 500 data (^SP500TR is the ticker for S&P 500)
             try:
-                #sp500 = yf.Ticker("^GSPC")
                 sp500 = yf.Ticker("^SP500TR")
                 sp500_data = sp500.history(start=min_date, end=max_date_buffered, repair=True)
             except Exception as yf_error:

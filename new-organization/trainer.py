@@ -93,54 +93,108 @@ except ImportError:
         print("[WARNING] evaluation.evaluator not available, metrics computation will be limited")
 
 
-def _compute_basic_metrics(predictions: np.ndarray, targets: np.ndarray) -> dict:
+def _convert_logits_to_labels(logits: np.ndarray) -> np.ndarray:
+    """
+    Convert logits [B, 3] to class labels {-1, 0, +1}.
+    
+    Args:
+        logits: Model logits of shape [B, 3] or flattened [B*3]
+        
+    Returns:
+        Class labels of shape [B] with values in {-1, 0, +1}
+    """
+    # Handle flattened logits (from .flatten())
+    if logits.ndim == 1:
+        # Reshape to [B, 3] assuming it was flattened
+        batch_size = len(logits) // 3
+        if len(logits) % 3 == 0:
+            logits = logits.reshape(batch_size, 3)
+        else:
+            # Not logits, return as-is (might be already converted)
+            return logits
+    
+    # Convert logits to class indices using argmax
+    class_indices = np.argmax(logits, axis=1)  # [B] with values {0, 1, 2}
+    
+    # Map {0, 1, 2} -> {-1, 0, +1}
+    labels = class_indices - 1  # {0,1,2} -> {-1,0,+1}
+    
+    return labels
+
+
+def _compute_basic_metrics(predictions: np.ndarray, targets: np.ndarray, is_classification: bool = True) -> dict:
     """
     Compute basic classification metrics (reusing evaluator logic).
     
     Args:
-        predictions: Model predictions (numpy array)
-        targets: True values (numpy array)
+        predictions: Model predictions (numpy array) - logits [B, 3] for classification or values [B] for regression
+        targets: True values (numpy array) with values in {-1, 0, +1} for classification
+        is_classification: Whether this is classification (3-class) or regression
         
     Returns:
         Dictionary with accuracy, MSE, RMSE, MAE
     """
     metrics = {}
     
-    # Classification accuracy (sign-based)
-    pred_sign = np.sign(predictions)
-    target_sign = np.sign(targets)
-    correct = np.sum(pred_sign == target_sign)
-    total = len(predictions)
-    metrics['accuracy'] = (correct / total) * 100 if total > 0 else 0
-    
-    # MSE for continuous predictions
-    from sklearn.metrics import mean_squared_error, mean_absolute_error
-    metrics['mse'] = mean_squared_error(targets, predictions)
-    metrics['rmse'] = np.sqrt(metrics['mse'])
-    metrics['mae'] = mean_absolute_error(targets, predictions)
+    if is_classification:
+        # Convert logits to class labels {-1, 0, +1}
+        pred_labels = _convert_logits_to_labels(predictions)
+        
+        # Classification accuracy (exact match)
+        correct = np.sum(pred_labels == targets)
+        total = len(targets)
+        metrics['accuracy'] = (correct / total) * 100 if total > 0 else 0
+        
+        # Also compute MSE/MAE using class labels (for compatibility)
+        from sklearn.metrics import mean_squared_error, mean_absolute_error
+        metrics['mse'] = mean_squared_error(targets, pred_labels)
+        metrics['rmse'] = np.sqrt(metrics['mse'])
+        metrics['mae'] = mean_absolute_error(targets, pred_labels)
+    else:
+        # Regression: use predictions as-is
+        pred_sign = np.sign(predictions)
+        target_sign = np.sign(targets)
+        correct = np.sum(pred_sign == target_sign)
+        total = len(predictions)
+        metrics['accuracy'] = (correct / total) * 100 if total > 0 else 0
+        
+        from sklearn.metrics import mean_squared_error, mean_absolute_error
+        metrics['mse'] = mean_squared_error(targets, predictions)
+        metrics['rmse'] = np.sqrt(metrics['mse'])
+        metrics['mae'] = mean_absolute_error(targets, predictions)
     
     return metrics
 
 
-def _compute_directional_metrics(predictions: np.ndarray, targets: np.ndarray) -> dict:
+def _compute_directional_metrics(predictions: np.ndarray, targets: np.ndarray, is_classification: bool = True) -> dict:
     """
     Compute directional accuracy metrics (reusing evaluator logic).
     
     Args:
-        predictions: Model predictions (numpy array)
-        targets: True values (numpy array)
+        predictions: Model predictions (numpy array) - logits [B, 3] for classification or values [B] for regression
+        targets: True values (numpy array) with values in {-1, 0, +1} for classification
+        is_classification: Whether this is classification (3-class) or regression
         
     Returns:
         Dictionary with directional accuracy, upward/downward accuracy
     """
     metrics = {}
     
-    # Classification accuracy
-    pred_sign = np.sign(predictions)
-    target_sign = np.sign(targets)
-    correct = np.sum(pred_sign == target_sign)
-    total_predictions = len(predictions)
-    metrics['directional_accuracy'] = (correct / total_predictions) * 100 if total_predictions > 0 else 0
+    if is_classification:
+        # Convert logits to class labels {-1, 0, +1}
+        pred_labels = _convert_logits_to_labels(predictions)
+        
+        # Classification accuracy (exact match)
+        correct = np.sum(pred_labels == targets)
+        total_predictions = len(targets)
+        metrics['directional_accuracy'] = (correct / total_predictions) * 100 if total_predictions > 0 else 0
+    else:
+        # Regression: use sign-based accuracy
+        pred_sign = np.sign(predictions)
+        target_sign = np.sign(targets)
+        correct = np.sum(pred_sign == target_sign)
+        total_predictions = len(predictions)
+        metrics['directional_accuracy'] = (correct / total_predictions) * 100 if total_predictions > 0 else 0
     
     # Upward movement accuracy
     up_mask = target_sign > 0
@@ -1197,8 +1251,11 @@ class Trainer():
             loss_config = self.config.model_config.loss_config
         
         if loss_config is None:
-            # Default: use MSE loss
-            loss_name = "mse"
+            # Default: use classification_loss for LSTM models, MSE for others
+            if self.model_type in ["LSTM", "AELSTM", "CAELSTM"]:
+                loss_name = "classification_loss"
+            else:
+                loss_name = "mse"
             loss_kwargs = {}
             intermediate_layers = []
         else:
@@ -2397,7 +2454,14 @@ class Trainer():
             # Collect predictions and targets for metrics (only on main rank to avoid duplication)
             if self.is_main:
                 # Detach and convert to numpy for metrics computation
-                train_predictions.append(Y_pred.detach().cpu().numpy().flatten())
+                # For classification models, keep logits shape [B, 3] for proper conversion
+                pred_np = Y_pred.detach().cpu().numpy()
+                if pred_np.ndim == 2 and pred_np.shape[1] == 3:
+                    # Classification: keep as [B, 3] logits
+                    train_predictions.append(pred_np)
+                else:
+                    # Regression or other: flatten
+                    train_predictions.append(pred_np.flatten())
                 train_targets.append(Y_batch.detach().cpu().numpy().flatten())
             
             if self.is_main:
@@ -2496,7 +2560,14 @@ class Trainer():
                 # Collect predictions and targets for metrics (only on main rank)
                 if self.is_main:
                     # Detach and convert to numpy for metrics computation
-                    val_predictions.append(Y_pred.detach().cpu().numpy().flatten())
+                    # For classification models, keep logits shape [B, 3] for proper conversion
+                    pred_np = Y_pred.detach().cpu().numpy()
+                    if pred_np.ndim == 2 and pred_np.shape[1] == 3:
+                        # Classification: keep as [B, 3] logits
+                        val_predictions.append(pred_np)
+                    else:
+                        # Regression or other: flatten
+                        val_predictions.append(pred_np.flatten())
                     val_targets.append(Y_batch.detach().cpu().numpy().flatten())
                 
                 if self.is_main:
@@ -2565,8 +2636,10 @@ class Trainer():
             try:
                 train_pred_array = np.concatenate(train_predictions)
                 train_target_array = np.concatenate(train_targets)
-                train_metrics = _compute_basic_metrics(train_pred_array, train_target_array)
-                train_dir_metrics = _compute_directional_metrics(train_pred_array, train_target_array)
+                # Determine if classification based on model type or prediction shape
+                is_classification = self.model_type in ["LSTM", "AELSTM", "CAELSTM"] or (train_pred_array.ndim == 2 and train_pred_array.shape[1] == 3)
+                train_metrics = _compute_basic_metrics(train_pred_array, train_target_array, is_classification=is_classification)
+                train_dir_metrics = _compute_directional_metrics(train_pred_array, train_target_array, is_classification=is_classification)
                 train_metrics.update(train_dir_metrics)
             except Exception as e:
                 if self.is_main:
@@ -2576,8 +2649,10 @@ class Trainer():
             try:
                 val_pred_array = np.concatenate(val_predictions)
                 val_target_array = np.concatenate(val_targets)
-                val_metrics = _compute_basic_metrics(val_pred_array, val_target_array)
-                val_dir_metrics = _compute_directional_metrics(val_pred_array, val_target_array)
+                # Determine if classification based on model type or prediction shape
+                is_classification = self.model_type in ["LSTM", "AELSTM", "CAELSTM"] or (val_pred_array.ndim == 2 and val_pred_array.shape[1] == 3)
+                val_metrics = _compute_basic_metrics(val_pred_array, val_target_array, is_classification=is_classification)
+                val_dir_metrics = _compute_directional_metrics(val_pred_array, val_target_array, is_classification=is_classification)
                 val_metrics.update(val_dir_metrics)
             except Exception as e:
                 if self.is_main:

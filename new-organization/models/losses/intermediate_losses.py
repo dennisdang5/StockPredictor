@@ -4,8 +4,54 @@ Loss functions that use intermediate layer outputs.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional, Dict, Any, List
 from .base_loss import BaseLoss
+
+
+class ClassificationLoss(BaseLoss):
+    """
+    Loss function for 3-class classification with labels in {-1, 0, +1}.
+    
+    Maps labels: -1 -> 0, 0 -> 1, +1 -> 2
+    Uses softmax + cross-entropy loss.
+    
+    Expected:
+        - predictions: logits tensor of shape [B, 3]
+        - targets: labels tensor of shape [B] with values in {-1, 0, +1}
+    """
+    
+    def __init__(self):
+        """Initialize ClassificationLoss."""
+        super().__init__()
+        self.cross_entropy = nn.CrossEntropyLoss()
+    
+    def __call__(self, predictions, targets, intermediates: Optional[Dict[str, Any]] = None):
+        """
+        Compute cross-entropy loss for 3-class classification.
+        
+        Args:
+            predictions: Model logits tensor of shape [B, 3]
+            targets: Target labels tensor of shape [B] or [B, 1] with values in {-1, 0, +1}
+            intermediates: Ignored (for compatibility)
+        
+        Returns:
+            Loss tensor (scalar)
+        """
+        # Handle different target shapes: [B] or [B, 1]
+        if targets.dim() > 1:
+            targets = targets.squeeze(-1)
+        
+        # Convert targets from {-1, 0, +1} to {0, 1, 2}
+        # Map {-1, 0, +1} -> {0, 1, 2}
+        y_int = (targets + 1).long()
+        
+        # Ensure predictions are logits [B, 3] and targets are class indices [B]
+        return self.cross_entropy(predictions, y_int)
+    
+    def requires_intermediates(self) -> bool:
+        """ClassificationLoss doesn't require intermediate outputs."""
+        return False
 
 
 class AutoEncoderLoss(BaseLoss):
@@ -88,8 +134,8 @@ class AELSTMLoss(BaseLoss):
     """
     Loss function for AELSTM models.
     
-    Combines prediction loss with autoencoder intermediate features.
-    Can include reconstruction loss from the autoencoder component.
+    Combines classification loss (3-class) with autoencoder reconstruction loss (MSE).
+    Uses softmax + cross-entropy for prediction, MSE for reconstruction.
     """
     
     def __init__(
@@ -102,13 +148,13 @@ class AELSTMLoss(BaseLoss):
         Initialize AELSTMLoss.
         
         Args:
-            prediction_weight: Weight for prediction loss
-            ae_reconstruction_weight: Weight for autoencoder reconstruction loss
+            prediction_weight: Weight for prediction loss (classification)
+            ae_reconstruction_weight: Weight for autoencoder reconstruction loss (MSE)
             intermediate_layers: List of layer names to hook
                                 (default: ["AE.encoder", "AE.decoder"])
         """
         super().__init__()
-        self.prediction_loss = nn.MSELoss()
+        self.prediction_loss = ClassificationLoss()
         self.reconstruction_loss = nn.MSELoss()
         self.prediction_weight = prediction_weight
         self.ae_reconstruction_weight = ae_reconstruction_weight
@@ -167,7 +213,8 @@ class CAELSTMLoss(BaseLoss):
     """
     Loss function for CAELSTM models.
     
-    Combines prediction loss with CAE reconstruction loss.
+    Combines classification loss (3-class) with CAE reconstruction loss (MSE).
+    Uses softmax + cross-entropy for prediction, MSE for reconstruction.
     CAELSTM has decoder norm layers directly on the model (not nested under CAE).
     """
     
@@ -181,12 +228,12 @@ class CAELSTMLoss(BaseLoss):
         Initialize CAELSTMLoss.
         
         Args:
-            prediction_weight: Weight for prediction loss
-            reconstruction_weight: Weight for CAE reconstruction loss
+            prediction_weight: Weight for prediction loss (classification)
+            reconstruction_weight: Weight for CAE reconstruction loss (MSE)
             intermediate_layers: List of layer names to hook (default: ["short_dec_norm", "long_dec_norm"])
         """
         super().__init__()
-        self.prediction_loss = nn.MSELoss()
+        self.prediction_loss = ClassificationLoss()
         self.reconstruction_loss = nn.MSELoss()
         self.prediction_weight = prediction_weight
         self.reconstruction_weight = reconstruction_weight

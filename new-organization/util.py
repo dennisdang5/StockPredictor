@@ -1699,11 +1699,18 @@ def get_feature_input_classification(op, cp, seq_len, study_period, num_stocks, 
                 return_t[n, t] = cp.iloc[n, t] - op.iloc[n, t]  # Real price difference, not percent change
                 valid_stocks.append(n)
         
-        # Calculate median return at time t
+        # Calculate 3-class labels based on return terciles at time t
+        # Labels: -1 (bottom third), 0 (middle third), +1 (top third)
         return_t_valid = return_t[valid_stocks, t]
         if len(return_t_valid) > 0:
-            median_return = np.median(return_t_valid)
-            return_labels[valid_stocks, t] = np.where(return_t_valid >= median_return, 1.0, -1.0)
+            # Calculate 33rd and 66th percentiles for 3-class split
+            p33 = np.percentile(return_t_valid, 33.33)
+            p66 = np.percentile(return_t_valid, 66.67)
+            # Assign labels: -1 for bottom third, 0 for middle third, +1 for top third
+            return_labels[valid_stocks, t] = np.where(
+                return_t_valid >= p66, 1.0,  # Top third: +1
+                np.where(return_t_valid >= p33, 0.0, -1.0)  # Middle third: 0, Bottom third: -1
+            )
     
     print(f"[features] Step 1/2 complete. Step 2/2: Building feature windows (this may take several minutes)...")
     X_list, y_list, d_list, rev_list, return_list = [], [], [], [], []

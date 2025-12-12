@@ -6,7 +6,7 @@ from typing import Dict, Callable, Optional, Any
 import warnings
 import torch.nn as nn
 from .base_loss import BaseLoss, SimpleLoss
-from .intermediate_losses import AutoEncoderLoss, AELSTMLoss, CAELSTMLoss, CompositeLoss
+from .intermediate_losses import ClassificationLoss, AutoEncoderLoss, AELSTMLoss, CAELSTMLoss, CompositeLoss
 
 
 class LossRegistry:
@@ -94,6 +94,7 @@ LossRegistry.register("bce", _create_bce)
 LossRegistry.register("bce_with_logits", _create_bce_with_logits)
 
 # Register intermediate-aware losses
+LossRegistry.register("classification_loss", lambda **kwargs: ClassificationLoss(**kwargs))
 LossRegistry.register("autoencoder_loss", lambda **kwargs: AutoEncoderLoss(**kwargs))
 LossRegistry.register("ae_loss", lambda **kwargs: AutoEncoderLoss(**kwargs))  # Alias
 LossRegistry.register("aelstm_loss", lambda **kwargs: AELSTMLoss(**kwargs))

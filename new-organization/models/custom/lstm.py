@@ -63,8 +63,8 @@ class LSTMModel(BaseModel):
         self.lstm_norm = nn.LayerNorm(self.hidden_size)
         
         self.dropout = nn.Dropout(p=self.dropout)
-        self.linear = nn.Linear(self.hidden_size, 1)
-        # Note: No normalization after final output layer - output should be in natural scale
+        self.linear = nn.Linear(self.hidden_size, 3)  # Output 3 logits for 3-class classification
+        # Note: No normalization after final output layer - output should be logits for softmax
         
         # Initialize weights properly to prevent NaN
         self._initialize_weights()

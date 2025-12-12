@@ -50,11 +50,15 @@ class PortfolioArchitecture(BaseModel):
         if self.use_stock_embeddings:
             head_input_dim += model_config.embedding_dim
 
+        # Determine output dimension: 3 for LSTM-based classification models, 1 otherwise
+        self.portfolio_output_dim = self._determine_portfolio_output_dim()
+
         self.portfolio_head = self._build_mlp(
             input_dim=head_input_dim,
             hidden_dims=model_config.mlp_hidden_dims,
             activation=model_config.activation,
             dropout=model_config.dropout,
+            output_dim=self.portfolio_output_dim,
         )
 
         if model_config.freeze_base_models:
@@ -118,7 +122,15 @@ class PortfolioArchitecture(BaseModel):
         model.eval()
         with torch.no_grad():
             out = model(dummy)
-        inferred_dim = len(out)
+        
+        # Handle different output shapes: [B] or [B, D]
+        if out.dim() == 1:
+            inferred_dim = out.shape[0]
+        elif out.dim() == 2:
+            inferred_dim = out.shape[1]  # [B, D] -> D
+        else:
+            # Flatten and take last dimension
+            inferred_dim = out.shape[-1]
         
         # Only validate if output_dim is specified in config (optional check)
         if hasattr(self.model_config, 'output_dim') and self.model_config.output_dim is not None:
@@ -129,6 +141,18 @@ class PortfolioArchitecture(BaseModel):
         
         return inferred_dim
 
+    def _determine_portfolio_output_dim(self) -> int:
+        """
+        Determine the output dimension for the portfolio head.
+        
+        For LSTM-based models (LSTM, AELSTM, CAELSTM), output 3 logits for 3-class classification.
+        For other models (TabPFN, regression models), output 1.
+        """
+        lstm_models = {"LSTM", "AELSTM", "CAELSTM"}
+        if self.base_model_type.upper() in lstm_models:
+            return 3  # 3-class classification
+        return 1  # Regression or binary classification
+
     def _backbone_parameters(self):
         if self.strategy == "independent":
             for module in self.stock_models.values():
@@ -136,7 +160,7 @@ class PortfolioArchitecture(BaseModel):
         else:
             yield from self.shared_model.parameters()
 
-    def _build_mlp(self, input_dim, hidden_dims, activation: str, dropout: float):
+    def _build_mlp(self, input_dim, hidden_dims, activation: str, dropout: float, output_dim: int = 1):
         layers = []
         prev_dim = input_dim
         act_cls = getattr(nn, activation.capitalize(), nn.ReLU)
@@ -146,7 +170,7 @@ class PortfolioArchitecture(BaseModel):
             if dropout and dropout > 0:
                 layers.append(nn.Dropout(dropout))
             prev_dim = hidden
-        layers.append(nn.Linear(prev_dim, 1))
+        layers.append(nn.Linear(prev_dim, output_dim))
         return nn.Sequential(*layers)
 
     def _forward_backbone(self, stock_idx: int, inputs):
@@ -181,7 +205,8 @@ class PortfolioArchitecture(BaseModel):
             stock_indices = torch.tensor(stock_indices, device=x.device, dtype=torch.long)
         stock_indices = stock_indices.view(-1).to(dtype=torch.long, device=x.device)
 
-        outputs = torch.zeros(x.size(0), 1, device=x.device, dtype=x.dtype)
+        # Initialize outputs with correct shape: [B, output_dim]
+        outputs = torch.zeros(x.size(0), self.portfolio_output_dim, device=x.device, dtype=x.dtype)
         unique_stocks = torch.unique(stock_indices)
         for stock_id in unique_stocks.tolist():
             mask = stock_indices == stock_id

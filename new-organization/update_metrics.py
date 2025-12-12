@@ -30,7 +30,7 @@ The metrics file ({data_id}_metrics.npz) contains three numpy arrays, all aligne
    - Calculation: (Close[t] - Close[t-1]) / Close[t-1] (close-to-close percentage return)
    - Alignment: Each element corresponds to one test sample's date
    - Note: Multiple test samples can share the same date, so same Sp500 value may repeat
-   - Source: Fetched from yfinance using ticker ^GSPC
+   - Source: Fetched from yfinance using ticker ^SP500TR
    - Can be updated independently without redownloading stock data
 
 IMPORTANT NOTES:
