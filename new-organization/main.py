@@ -356,6 +356,50 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         use_nlp=True,
         nlp_method="aggregated"
     ))
+
+    # ---------------------------------------------------------------------
+    # 4. AELSTM NLP
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="aelstm_full_nlp",
+        model_type="AELSTM",
+        model_config=AELSTMConfig(parameters={
+            'input_shape': (240, 13),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=large_stocks,
+        time_args=long_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="full",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated"
+    ))
+
+    # ---------------------------------------------------------------------
+    # 4. AELSTM NLP
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="aelstm_full_base",
+        model_type="AELSTM",
+        model_config=AELSTMConfig(parameters={
+            'input_shape': (240, 3),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=large_stocks,
+        time_args=long_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="full",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None
+    ))
  
         
     # ---------------------------------------------------------------------

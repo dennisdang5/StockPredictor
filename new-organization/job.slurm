@@ -99,6 +99,7 @@ echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_
   "main_lstm_full_base.py"
   "main_caelstm_full_nlp.py"
   "main_aelstm_full_nlp.py"
+  "main_lstm_full_nlp"
 )
 
 for SCRIPT in "${SCRIPTS[@]}"; do
