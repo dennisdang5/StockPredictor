@@ -150,7 +150,8 @@ class YFinanceDataSource(DataSource):
             
             # Fetch S&P 500 data (^GSPC is the ticker for S&P 500)
             try:
-                sp500 = yf.Ticker("^GSPC")
+                #sp500 = yf.Ticker("^GSPC")
+                sp500 = yf.Ticker("^SP500TR")
                 sp500_data = sp500.history(start=min_date, end=max_date_buffered, repair=True)
             except Exception as yf_error:
                 print(f"[util] Warning: Error fetching S&P 500 data from yfinance: {yf_error}")

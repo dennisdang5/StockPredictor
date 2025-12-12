@@ -43,7 +43,29 @@ class CAELSTMModel(BaseModel):
         
         self.model_config = model_config
         self.input_shape = model_config.to_dict().get('input_shape', (31, 3))
-        self.kernel_size = model_config.to_dict().get('kernel_size', 3)
+
+        if self.input_shape[0] == 31:
+            self.short_kernel_size = 3
+            self.short_padding = 1
+            self.short_stride = 1
+
+            self.long_kernel_size = 3
+            self.long_padding = 1
+            self.long_stride = 1
+
+            self.barrier = 20
+        else:
+            self.short_kernel_size = 5
+            self.short_padding = 2
+            self.short_stride = 2
+
+            self.long_kernel_size = 21
+            self.long_padding = 10
+            self.long_stride = 21
+
+            self.barrier = 80
+        
+        #self.kernel_size = model_config.to_dict().get('kernel_size', 3)
         
         self.num_features = self.input_shape[1]  # Can be 3 (price only), 7 (price + 4 NLP), 13 (price + 10 NLP), etc.
         
@@ -52,18 +74,18 @@ class CAELSTMModel(BaseModel):
         
         # Short sequence CAE (first 20 timesteps)
         # Encoder: input features -> 2*input_shape[1] channels
-        self.short_enc_conv = nn.Conv1d(self.num_features, 2*self.input_shape[1], self.kernel_size, padding=self.kernel_size//2)
+        self.short_enc_conv = nn.Conv1d(self.num_features, 2*self.input_shape[1], self.short_kernel_size, padding=self.short_padding, stride=self.short_stride)
         self.short_enc_norm = nn.LayerNorm(2*self.input_shape[1])
         # Decoder: 2*input_shape[1] channels -> input features
-        self.short_dec_conv = nn.Conv1d(2*self.input_shape[1], self.num_features, self.kernel_size, padding=self.kernel_size//2)
+        self.short_dec_conv = nn.Conv1d(2*self.input_shape[1], self.num_features, self.short_kernel_size, padding=self.short_padding, stride=self.short_stride)
         self.short_dec_norm = nn.LayerNorm(self.num_features)
         
         # Long sequence CAE (last 11 timesteps)
         # Encoder: input features -> 2*input_shape[1] channels
-        self.long_enc_conv = nn.Conv1d(self.num_features, 2*self.input_shape[1], self.kernel_size, padding=self.kernel_size//2)
+        self.long_enc_conv = nn.Conv1d(self.num_features, 2*self.input_shape[1], self.long_kernel_size, padding=self.long_padding, stride=self.long_stride)
         self.long_enc_norm = nn.LayerNorm(2*self.input_shape[1])
         # Decoder: 2*input_shape[1] channels -> input features
-        self.long_dec_conv = nn.Conv1d(2*self.input_shape[1], self.num_features, self.kernel_size, padding=self.kernel_size//2)
+        self.long_dec_conv = nn.Conv1d(2*self.input_shape[1], self.num_features, self.long_kernel_size, padding=self.long_padding, stride=self.long_stride)
         self.long_dec_norm = nn.LayerNorm(self.num_features)
         
         # Use lstm_config from model_config - it's already calculated with correct input_shape
@@ -78,14 +100,14 @@ class CAELSTMModel(BaseModel):
         
         # Process short sequence (first 20 timesteps)
         # Conv1d expects [batch, channels, length], so transpose from [batch, time, features] to [batch, features, time]
-        short_enc = self.short_enc_conv(x[:, :20, :].transpose(1, 2))  # [batch, num_features, 20] -> [batch, 2*num_features, 20]
+        short_enc = self.short_enc_conv(x[:, :self.barrier, :].transpose(1, 2))  # [batch, num_features, 20] -> [batch, 2*num_features, 20]
         # Transpose to [batch, time, channels] for normalization
         short_enc = short_enc.transpose(1, 2)  # [batch, 2*num_features, 20] -> [batch, 20, 2*num_features]
         # Normalize after short encoder
         short_enc = self.short_enc_norm(short_enc)  # [batch, 20, 2*num_features]
         
         # Process long sequence (last 11 timesteps)
-        long_enc = self.long_enc_conv(x[:, 20:, :].transpose(1, 2))   # [batch, num_features, 11] -> [batch, 2*num_features, 11]
+        long_enc = self.long_enc_conv(x[:, self.barrier:, :].transpose(1, 2))   # [batch, num_features, 11] -> [batch, 2*num_features, 11]
         # Transpose to [batch, time, channels] for normalization
         long_enc = long_enc.transpose(1, 2)  # [batch, 2*num_features, 11] -> [batch, 11, 2*num_features]
         # Normalize after long encoder

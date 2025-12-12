@@ -1167,6 +1167,19 @@ class Trainer():
         if hasattr(final_config, 'enc_in'):
             final_config.enc_in = num_features
         
+        # For CAELSTM and AELSTM: update nested lstm_config.input_shape to match encoder output
+        # Encoder output shape is (seq_len, 2*num_features), which is what LSTM receives
+        if model_type_upper in ["CAELSTM", "AELSTM"]:
+            if hasattr(final_config, 'lstm_config'):
+                # Recalculate lstm_input_shape based on updated input_shape
+                lstm_input_shape = (seq_len, 2 * num_features)  # Encoder compresses to 2x features
+                final_config.lstm_input_shape = lstm_input_shape
+                
+                # Update the nested lstm_config object
+                if hasattr(final_config.lstm_config, 'parameters'):
+                    final_config.lstm_config.parameters['input_shape'] = lstm_input_shape
+                final_config.lstm_config.input_shape = lstm_input_shape
+        
         return final_config
     
     def _setup_loss_function(self):

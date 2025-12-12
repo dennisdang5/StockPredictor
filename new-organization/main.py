@@ -383,6 +383,29 @@ def create_model_configs() -> List[ModelTrainingConfig]:
     ))
 
     # ---------------------------------------------------------------------
+    # 5. CAELSTM full base
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="caelstm_full_base",
+        model_type="CAELSTM",
+        model_config=CAELSTMConfig(parameters={
+            'input_shape': (240, 3),
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1,
+        }),
+        stocks=large_stocks,
+        time_args=["1990-01-01", "2015-12-31"],
+        batch_size=64,
+        num_epochs=1000,
+        period_type="full",
+        lookback=240,
+        use_nlp=False,
+        nlp_method=None,
+        enabled=True,
+    ))
+
+    # ---------------------------------------------------------------------
     # 6. CAELSTM NLP
     # ---------------------------------------------------------------------
     configs.append(ModelTrainingConfig(
@@ -401,8 +424,32 @@ def create_model_configs() -> List[ModelTrainingConfig]:
         num_epochs=1000,
         period_type="LS",
         lookback=240,
-        use_nlp=False,
-        nlp_method=None,
+        use_nlp=True,
+        nlp_method="aggregated",
+        enabled=True,
+    ))
+
+    # ---------------------------------------------------------------------
+    # 6. CAELSTM NLP
+    # ---------------------------------------------------------------------
+    configs.append(ModelTrainingConfig(
+        name="caelstm_full_nlp",
+        model_type="CAELSTM",
+        model_config=CAELSTMConfig(parameters={
+            'input_shape': (240, 13),
+            'kernel_size': 3,
+            'hidden_size': 25,
+            'num_layers': 1,
+            'dropout': 0.1
+        }),
+        stocks=large_stocks,
+        time_args=long_history,
+        batch_size=64,
+        num_epochs=1000,
+        period_type="full",
+        lookback=240,
+        use_nlp=True,
+        nlp_method="aggregated",
         enabled=True,
     ))
 

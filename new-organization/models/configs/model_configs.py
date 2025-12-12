@@ -96,6 +96,11 @@ class AutoEncoderConfig(BaseModelConfig):
     
     Args:
         input_shape (tuple): Shape of input data (timesteps, features). Default: (31, 3)
+        embedding_dim (int, optional): Size of embedding dimension per timestep. 
+                                      Defaults to 2*num_features. Can be set smaller for compression.
+                                      The encoder will output (batch, seq_len * embedding_dim) which is
+                                      then reshaped to (batch, seq_len, embedding_dim) and expanded to
+                                      (batch, seq_len, 2*num_features) for LSTM compatibility.
         loss_config (dict, optional): Loss function configuration. Example:
             loss_config = {
                 'loss_name': 'autoencoder_loss',
@@ -109,6 +114,7 @@ class AutoEncoderConfig(BaseModelConfig):
     Example with AutoEncoderLoss:
         ae_config = AutoEncoderConfig(parameters={
             'input_shape': (31, 3),
+            'embedding_dim': 4,  # Smaller embedding (default would be 6 = 2*3)
             'loss_config': {
                 'loss_name': 'autoencoder_loss',
                 'loss_kwargs': {
@@ -122,6 +128,9 @@ class AutoEncoderConfig(BaseModelConfig):
     def __init__(self, parameters=None):
         super().__init__(parameters)
         self.input_shape = parameters.get('input_shape', (31, 3))
+        # embedding_dim defaults to 2*num_features but can be set smaller
+        num_features = self.input_shape[1] if isinstance(self.input_shape, tuple) else 3
+        self.embedding_dim = parameters.get('embedding_dim', 2 * num_features)
 
 
 class CNNAutoEncoderConfig(BaseModelConfig):

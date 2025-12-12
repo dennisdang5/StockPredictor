@@ -103,8 +103,8 @@ def fetch_sp500_daily_data(dates):
     print(f"  Fetching S&P 500 data from {min_date} to {max_date}...")
     
     try:
-        # Fetch S&P 500 data (^GSPC or SPY)
-        ticker = "^GSPC"  # S&P 500 index
+        # Fetch S&P 500 data (^SP500TR is the ticker for S&P 500)
+        ticker = "^SP500TR"  # S&P 500 index
         # Extend end date by a few days to ensure we get all dates
         from datetime import timedelta
         import warnings

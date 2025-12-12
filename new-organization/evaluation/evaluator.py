@@ -662,8 +662,8 @@ class ModelEvaluator:
         try:
             print("[Evaluator] Fetching S&P 500 data for benchmark comparison...")
             
-            # Fetch S&P 500 data (^GSPC is the ticker for S&P 500)
-            sp500 = yf.Ticker("^GSPC")
+            # Fetch S&P 500 data (^SP500TR is the ticker for S&P 500)
+            sp500 = yf.Ticker("^SP500TR")
             sp500_data = sp500.history(start=min_date, end=max_date, repair=True)
             
             if sp500_data is None or sp500_data.empty:
