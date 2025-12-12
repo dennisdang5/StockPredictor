@@ -40,8 +40,11 @@ class AutoEncoder(BaseModel):
             for val in x:
                 output *= val
             return output
-        self.embedding_dim = model_config.to_dict().get('embedding_dim', 2 * self.input_shape[1])
+
         self.dof = _dof(self.input_shape)
+        #self.embedding_dim = model_config.to_dict().get('embedding_dim', 2 * self.input_shape[1])
+        self.embedding_dim = 2 * self.dof
+        
         # Input normalization
         self.input_norm = nn.LayerNorm(self.dof)
         self.encoder=nn.Sequential(

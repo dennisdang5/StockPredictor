@@ -88,17 +88,20 @@ fi
 echo "MASTER_ADDR=$MASTER_ADDR  NNODES=$SLURM_NNODES  NPROC_PER_NODE=$NPROC_PER_NODE"
 
 # Simplified for debugging: run only one script at a time
-SCRIPTS=(
-  "main_aelstm_base.py"
-)
+#SCRIPTS=(
+#  "main_aelstm_base.py"
+#)
 
 # To run multiple scripts, uncomment the ones you want:
-# SCRIPTS=(
-#   "main_caelstm_base.py"
-#   "main_aelstm_base.py"
-#   "main_caelstm_nlp.py"
-#   "main_aelstm_nlp.py"
-# )
+ SCRIPTS=(
+  "main_lstm_base.py"
+  "main_aelstm_base.py"
+  "main_caelstm_base.py"
+  "main_portfolio_lstm_independent_base.py"
+  "main_lstm_nlp.py"
+  "main_aelstm_nlp.py"
+  "main_caelstm_nlp.py"
+)
 
 for SCRIPT in "${SCRIPTS[@]}"; do
   MASTER_PORT=$((10000 + RANDOM % 50000))
